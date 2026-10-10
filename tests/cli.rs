@@ -138,6 +138,7 @@ fn doctor_output_is_exact() {
   Retention:   cleanupPeriodDays: 30 (default)
                Claude Code deletes older transcripts, claude-plus keeps its own copy
   Price table: bundled prices 2026-10-10
+  Daemon:      not running, start it with claude-plus daemon --ensure
   Imported:    5 requests in 4 files · 1 unparsable line
   Cross-check: 1 session · transcripts $0.0012 · Claude Code $0.0123 · reconciled $0.0123
   Uncounted:   1 session with subagents has no Claude Code counter, its subagent output may be understated
@@ -362,6 +363,7 @@ fn doctor_header(env: &Env, transcript_files: u64, imported: &str) -> String {
   Retention:   cleanupPeriodDays: 30 (default)
                Claude Code deletes older transcripts, claude-plus keeps its own copy
   Price table: bundled prices 2026-10-10
+  Daemon:      not running, start it with claude-plus daemon --ensure
   Imported:    {imported}
 ",
         claude = env.claude.display(),
@@ -451,6 +453,7 @@ fn doctor_on_a_fresh_home_creates_nothing() {
   Retention:   cleanupPeriodDays: 30 (default)
                Claude Code deletes older transcripts, claude-plus keeps its own copy
   Price table: bundled prices 2026-10-10
+  Daemon:      not running, start it with claude-plus daemon --ensure
   Database:    not created yet, run claude-plus import
 ",
         claude = env.claude.display(),

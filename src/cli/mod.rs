@@ -5,13 +5,22 @@ mod import;
 mod reindex;
 mod stats;
 
-use anyhow::Result;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
+use crate::api::client::{Client, ClientError};
+use crate::api::wire::Health;
+use crate::daemon::control::{self, Status};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
 use crate::store::Store;
+
+const PROGRESS_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Parser)]
 #[command(
@@ -109,6 +118,50 @@ fn transcripts_missing(paths: &Paths) -> bool {
         );
     }
     missing
+}
+
+fn running_daemon(paths: &Paths) -> Result<Option<Health>> {
+    match control::status(paths)? {
+        Status::NotRunning => Ok(None),
+        Status::Unresponsive { pid } => {
+            let who = pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default();
+            bail!(
+                "the claude-plus daemon{who} does not answer; stop it with claude-plus daemon stop"
+            )
+        }
+        Status::Running(health) if Path::new(&health.claude_dir) != paths.claude_dir => bail!(
+            "the running claude-plus daemon reads {}, not {}; stop it with claude-plus daemon stop",
+            health.claude_dir,
+            paths.claude_dir.display()
+        ),
+        Status::Running(health) => Ok(Some(health)),
+    }
+}
+
+fn through_daemon<T>(
+    paths: &Paths,
+    verb: &str,
+    call: impl FnOnce(&Client) -> Result<T, ClientError>,
+) -> Result<T> {
+    let bar = progress_bar(verb)?;
+    let finished = AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let client = Client::new(&paths.socket());
+            while !finished.load(Ordering::Relaxed) {
+                if let Ok(Some(progress)) = client.health().map(|h| h.ingest.progress) {
+                    bar.set_length(progress.total as u64);
+                    bar.set_position(progress.done as u64);
+                }
+                std::thread::sleep(PROGRESS_POLL);
+            }
+        });
+        let result = call(&Client::new(&paths.socket()));
+        finished.store(true, Ordering::Relaxed);
+        result
+    });
+    bar.finish_and_clear();
+    Ok(result?)
 }
 
 fn open_store(paths: &Paths) -> Result<Store> {

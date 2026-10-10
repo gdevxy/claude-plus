@@ -5,7 +5,8 @@ use std::process::{Child, Stdio};
 
 use claude_plus::api::client::Client;
 use claude_plus::api::wire::{Health, Snapshot};
-use common::{Env, cmd, env, eventually, process, stdout_of};
+use claude_plus::daemon::lock::InstanceLock;
+use common::{Env, STATS_TABLE, cmd, env, eventually, process, stdout_of};
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::json;
 
@@ -314,4 +315,113 @@ fn a_data_dir_too_deep_for_a_socket_is_refused_before_starting() {
             .stderr(refusal.clone());
     }
     assert!(!deep.exists());
+}
+
+fn log_of(env: &Env) -> String {
+    std::fs::read_to_string(env.plus.join("daemon.log")).unwrap()
+}
+
+#[test]
+fn import_defers_to_the_running_daemon_and_prints_the_same_report() {
+    let env = env();
+    let _daemon = Foreground::start(&env, &[]);
+    idle_health(&env);
+    assert_eq!(
+        stdout_of(&env, &["import"]),
+        "✻ Imported 0 lines from 0 changed files · 0 new requests · 0 unparsable lines\n  History: 5 requests across 2 sessions · $0.0812 priced\n"
+    );
+    assert!(log_of(&env).contains(" info  import requested over the socket\n"));
+}
+
+#[test]
+fn stats_and_reindex_defer_to_the_running_daemon() {
+    let env = env();
+    let _daemon = Foreground::start(&env, &[]);
+    idle_health(&env);
+    assert_eq!(stdout_of(&env, &["stats", "--days", "3"]), STATS_TABLE);
+    assert_eq!(
+        stdout_of(&env, &["reindex"]),
+        "✻ Rebuilt 5 requests from 15 stored records\n"
+    );
+    let log = log_of(&env);
+    assert!(
+        log.contains(" info  import requested over the socket\n"),
+        "{log}"
+    );
+    assert!(
+        log.contains(" info  reindex requested over the socket\n"),
+        "{log}"
+    );
+    assert_eq!(stdout_of(&env, &["stats", "--days", "3"]), STATS_TABLE);
+}
+
+#[test]
+fn doctor_reports_the_running_daemon() {
+    let env = env();
+    let daemon = Foreground::start(&env, &[]);
+    let doctor = stdout_of(&env, &["doctor"]);
+    assert!(
+        doctor.contains(&format!(
+            "  Daemon:      running · pid {} · up ",
+            daemon.child.id()
+        )),
+        "{doctor}"
+    );
+}
+
+#[test]
+fn a_daemon_reading_another_claude_dir_is_not_used() {
+    let env = env();
+    let _daemon = Foreground::start(&env, &[]);
+    let other = env._temp.path().join("other-claude");
+    std::fs::create_dir_all(other.join("projects")).unwrap();
+    cmd(&env, &["import"])
+        .env("CLAUDE_CONFIG_DIR", &other)
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(format!(
+            "claude-plus: the running claude-plus daemon reads {}, not {}; stop it with claude-plus daemon stop\n",
+            env.claude.display(),
+            other.display()
+        ));
+}
+
+#[test]
+fn a_silent_lock_holder_is_reported_instead_of_racing_it() {
+    let env = env();
+    std::fs::create_dir_all(&env.plus).unwrap();
+    let _held = InstanceLock::acquire(&env.plus.join("daemon.lock")).unwrap();
+    let pid = std::process::id();
+    cmd(&env, &["import"]).assert().failure().stderr(format!(
+        "claude-plus: the claude-plus daemon (pid {pid}) does not answer; stop it with claude-plus daemon stop\n"
+    ));
+    assert!(stdout_of(&env, &["doctor"]).contains(&format!(
+        "  Daemon:      pid {pid} does not answer, see {}\n",
+        env.plus.join("daemon.log").display()
+    )));
+    assert!(!env.plus.join("data.db").exists());
+}
+
+#[test]
+fn doctor_explains_a_data_dir_too_deep_for_a_socket() {
+    let env = env();
+    let deep = env._temp.path().join("d".repeat(120));
+    let socket = deep.join("daemon.sock");
+    let output = cmd(&env, &["doctor"])
+        .env("CLAUDE_PLUS_HOME", &deep)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doctor = String::from_utf8(output).unwrap();
+    assert!(
+        doctor.contains(&format!(
+            "  Daemon:      cannot run, the socket path is {} bytes and this system allows {}; set CLAUDE_PLUS_HOME to a shorter directory\n",
+            socket.as_os_str().len(),
+            claude_plus::api::MAX_SOCKET_PATH
+        )),
+        "{doctor}"
+    );
 }

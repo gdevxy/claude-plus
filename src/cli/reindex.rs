@@ -1,11 +1,24 @@
 use anyhow::Result;
 
 use super::format::plural;
-use crate::ingest::Ingestor;
+use crate::ingest::{Ingestor, Rebuilt};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
 
 pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
+    let rebuilt = match super::running_daemon(paths)? {
+        Some(_) => super::through_daemon(paths, "Rebuilding", |client| client.reindex())?,
+        None => locally(paths, prices)?,
+    };
+    println!(
+        "✻ Rebuilt {} from {}",
+        plural(rebuilt.requests, "request", "requests"),
+        plural(rebuilt.records, "stored record", "stored records")
+    );
+    Ok(())
+}
+
+fn locally(paths: &Paths, prices: &PriceTable) -> Result<Rebuilt> {
     let mut store = super::open_store(paths)?;
     let bar = super::progress_bar("Rebuilding")?;
     let rebuilt = Ingestor::new(&mut store, prices).reindex(&mut |done, total| {
@@ -13,10 +26,5 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
         bar.set_position(done as u64);
     })?;
     bar.finish_and_clear();
-    println!(
-        "✻ Rebuilt {} from {}",
-        plural(rebuilt.requests, "request", "requests"),
-        plural(rebuilt.records, "stored record", "stored records")
-    );
-    Ok(())
+    Ok(rebuilt)
 }

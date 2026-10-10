@@ -1,7 +1,9 @@
 use anyhow::Result;
 
-use super::format::{plural, usd};
+use super::format::{duration, plural, usd};
 use super::labeled;
+use crate::api;
+use crate::daemon::control::{self, Status};
 use crate::ingest::discover;
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
@@ -37,10 +39,31 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
             &format!("bundled prices {}", prices.version())
         )
     );
+    println!("{}", labeled("Daemon:", &daemon(paths)));
 
     match readable_store(paths)? {
         Some(store) => print_database(&store),
         None => Ok(()),
+    }
+}
+
+fn daemon(paths: &Paths) -> String {
+    if let Some(problem) = api::socket_path_problem(&paths.socket()) {
+        return format!("cannot run, {problem}");
+    }
+    match control::status(paths) {
+        Ok(Status::Running(health)) => format!(
+            "running · pid {} · up {}",
+            health.pid,
+            duration(health.uptime_s)
+        ),
+        Ok(Status::NotRunning) => "not running, start it with claude-plus daemon --ensure".into(),
+        Ok(Status::Unresponsive { pid }) => format!(
+            "{} does not answer, see {}",
+            pid.map_or("the lock holder".to_string(), |pid| format!("pid {pid}")),
+            paths.daemon_log().display()
+        ),
+        Err(error) => format!("{error:#}"),
     }
 }
 
