@@ -6,6 +6,9 @@ import type { Io, PlusEvent, Reply } from './client'
 import { Outbox, eventId, eventsBody, fetchSnapshot, measureOf, send, socketPath } from './client'
 import {
   EMPTY_LOCAL,
+  TICK_MS,
+  cacheClock,
+  current,
   easables,
   ensureError,
   ensureOutcome,
@@ -14,6 +17,7 @@ import {
   settled,
   statusText,
   stepOf,
+  nextTickDelay,
   tickPeriod,
   toggled,
 } from './state'
@@ -85,33 +89,51 @@ async function socketOf($: EngineInterface): Promise<string | null> {
   return runtime.socket
 }
 
-function ensureTimers($: EngineInterface): void {
-  if (runtime.timer !== null) return
-  runtime.timer = $.clock.after(0, () => void tick($))
+function quietly(work: Promise<unknown>): void {
+  work.catch(() => undefined)
 }
 
-async function schedule($: EngineInterface): Promise<void> {
-  const period = tickPeriod({
-    animations: runtime.animations,
-    motions: await read($, motions),
-    nowMs: await read($, now),
-    snapshot: await read($, snapshot),
-    local: await read($, local),
-  })
-  runtime.timer = $.clock.after(period, () => void tick($))
+function ensureTimers($: EngineInterface): void {
+  if (runtime.timer !== null) return
+  arm($, 0)
+}
+
+function arm($: EngineInterface, delayMs: number): void {
+  try {
+    runtime.timer = $.clock.after(delayMs, () => quietly(tick($)))
+  } catch {
+    runtime.timer = null
+  }
+}
+
+async function delayToNextTick($: EngineInterface): Promise<number> {
+  try {
+    const input = {
+      animations: runtime.animations,
+      motions: await read($, motions),
+      nowMs: await $.clock.now(),
+      snapshot: await read($, snapshot),
+      local: await read($, local),
+    }
+    return nextTickDelay(tickPeriod(input), cacheClock(current(input), input.local, input.nowMs).expiresAtMs ?? 0, input.nowMs)
+  } catch {
+    return TICK_MS
+  }
 }
 
 async function tick($: EngineInterface): Promise<void> {
   try {
     const at = await $.clock.now()
     await update($, now, () => at)
-    if (runtime.outbox.size > 0) await flush($)
-    if (at - runtime.polledAtMs >= POLL_MS) await poll($)
-    if (needsEnsure((await read($, daemon)).status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) void ensureDaemon($)
     await settle($)
     await showStatus($)
+    if (runtime.outbox.size > 0) await flush($)
+    if (at - runtime.polledAtMs >= POLL_MS) await poll($)
+    if (needsEnsure((await read($, daemon)).status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($))
+  } catch {
+    return
   } finally {
-    await schedule($)
+    arm($, await delayToNextTick($))
   }
 }
 
@@ -171,7 +193,7 @@ async function poll($: EngineInterface): Promise<void> {
     const at = await $.clock.now()
     if (outdated.status === 'outdated' && at - runtime.replacedAtMs >= ENSURE_RETRY_MS) {
       runtime.replacedAtMs = at
-      void ensureDaemon($)
+      quietly(ensureDaemon($))
     }
     return
   }
@@ -201,7 +223,7 @@ async function flush($: EngineInterface): Promise<void> {
     if (runtime.posting === posting) runtime.posting = null
   }
   const reply = await sent.reply
-  if (!reply.ok && reply.late === true) void sent.settled.then(done)
+  if (!reply.ok && reply.late === true) quietly(sent.settled.then(done))
   else done(reply)
 }
 
@@ -238,9 +260,15 @@ function ensureDaemon($: EngineInterface): Promise<void> {
 }
 
 async function open($: EngineInterface, fullscreen: boolean): Promise<string> {
-  const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE })
+  const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE }).catch((error: unknown) => refusal(error))
+  if (typeof opened === 'string') return `✻ claude-plus could not open: ${opened}`
   if (!opened.isPlaced) return `✻ claude-plus will show once there is room: ${opened.reason}`
   return fullscreen ? '✻ claude-plus is open beside the conversation' : '✻ claude-plus is open above the prompt'
+}
+
+function refusal(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.replace(/^.*\$\.ui\.open:\s*/, '')
 }
 
 async function closeUnasked($: EngineInterface): Promise<void> {
@@ -259,17 +287,17 @@ export const register: Register = (on, options) => {
     const model = await $.session.model()
     const turns = await $.session.turns()
     await update($, local, known => ({ ...known, session: id, model, turns }))
-    void ensureDaemon($)
+    quietly(ensureDaemon($))
     if ((await read($, pane)).session === id) return next(e)
     await update($, pane, (): PaneState => ({ session: id, asked: false }))
-    void forward($, 'session.start', { cwd: e.cwd, surface: e.surface, interactive: e.isInteractive })
-    if (e.isInteractive && (await $.store.get(FULLSCREEN_KEY)) === true) void open($, true)
+    quietly(forward($, 'session.start', { cwd: e.cwd, surface: e.surface, interactive: e.isInteractive }))
+    if (e.isInteractive && (await $.store.get(FULLSCREEN_KEY)) === true) quietly(open($, true))
     return next(e)
   })
 
   on('command.run', { command: 'plus' }, async ($, e) => {
     ensureTimers($)
-    void ensureDaemon($)
+    quietly(ensureDaemon($))
     await $.store.set(FULLSCREEN_KEY, e.presentation.isFullscreen)
     await update($, pane, known => ({ ...known, asked: true }))
     return { text: await open($, e.presentation.isFullscreen) }
@@ -290,13 +318,13 @@ export const register: Register = (on, options) => {
     await animate($, async () => {
       await update($, local, known => ({ ...known, model, measure: measureOf(e, at) }))
     })
-    void forward($, 'session.measure', {
+    quietly(forward($, 'session.measure', {
       model,
       context: { tokens: e.context.tokens ?? null, window: e.context.window, percent: e.context.percent ?? null },
       rateLimits: e.rateLimits.map(limit => ({ kind: limit.kind, percentUsed: limit.percentUsed, resetsAt: limit.resetsAt ?? null })),
       cost_usd: e.cost?.usd ?? null,
       changed: [...e.changed],
-    })
+    }))
     return next(e)
   })
 
@@ -313,7 +341,7 @@ export const register: Register = (on, options) => {
         await update($, local, known => ({ ...known, model: e.model, effort, step: stepOf(usage, sentAt) }))
       }
       await update($, now, () => at)
-      void forward($, 'turn.step', {
+      quietly(forward($, 'turn.step', {
         sent_ms: sentAt,
         turnId: e.turnId,
         index: e.index,
@@ -322,7 +350,7 @@ export const register: Register = (on, options) => {
         effort: e.effort ?? null,
         stopReason: result.stopReason,
         usage: { ...usage },
-      })
+      }))
     }
     return result
   })
@@ -334,32 +362,32 @@ export const register: Register = (on, options) => {
       const turns = await $.session.turns()
       await update($, local, known => ({ ...known, working: false, turns }))
     }
-    void forward($, 'turn.complete', { turnId: e.turnId, agentId: e.agentId ?? null, reason: e.reason, usage: e.usage === undefined ? null : { ...e.usage } })
+    quietly(forward($, 'turn.complete', { turnId: e.turnId, agentId: e.agentId ?? null, reason: e.reason, usage: e.usage === undefined ? null : { ...e.usage } }))
     runtime.polledAtMs = -Infinity
     return next(e)
   })
 
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
-    void forward($, 'session.compact', {
+    quietly(forward($, 'session.compact', {
       trigger: e.trigger,
       agentId: e.agentId ?? null,
       skipped: result.skip ?? null,
       tokensBefore: result.skip === undefined ? (result.tokensBefore ?? null) : null,
       tokensAfter: result.skip === undefined ? (result.tokensAfter ?? null) : null,
-    })
+    }))
     return result
   })
 
   on('session.end', async ($, e, next) => {
-    void forward($, 'session.end', { reason: e.reason }, e.sessionId)
+    quietly(forward($, 'session.end', { reason: e.reason }, e.sessionId))
     return next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
-    if (e.props.placement === 'inline' || e.viewport?.isFullscreen === false) $.clock.after(0, () => void closeUnasked($).catch(() => undefined))
+    if (e.props.placement === 'inline' || e.viewport?.isFullscreen === false) $.clock.after(0, () => quietly(closeUnasked($)))
     const nowMs = await read($, now)
-    const current = await read($, view)
+    const shownView = await read($, view)
     const lines = screen({
       width: e.props.bodyColumns,
       nowMs,
@@ -375,8 +403,8 @@ export const register: Register = (on, options) => {
         ui={$.ui.resolve(e)}
         width={e.props.bodyColumns}
         lines={lines}
-        tabs={[{ key: 'tab-live', hotkey: '1', label: 'Live', isActive: current === 'live', onPress: () => void update($, view, () => 'live') }]}
-        onWhy={key => void update($, expanded, list => toggled(list, key))}
+        tabs={[{ key: 'tab-live', hotkey: '1', label: 'Live', isActive: shownView === 'live', onPress: () => quietly(update($, view, () => 'live')) }]}
+        onWhy={key => quietly(update($, expanded, list => toggled(list, key)))}
       />
     )
   })

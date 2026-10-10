@@ -12,6 +12,7 @@ import {
   ensureError,
   ensureOutcome,
   heartbeat,
+  nextTickDelay,
   retarget,
   screen,
   settled,
@@ -554,6 +555,10 @@ describe('motion', () => {
     expect(retarget(running, { cost: 10, hit: 90 }, { cost: 20, hit: 90 }, 150, true)).toEqual({ cost: { from: 8.75, to: 20, startMs: 150 } })
     expect(retarget(running, { cost: 10 }, { cost: 20 }, 150, false)).toEqual({})
     expect(settled({ cost: { from: 0, to: 1, startMs: 0 } }, EASE_MS)).toEqual({})
+  })
+
+  test('the next tick lands on the second the countdown changes', () => {
+    expect([nextTickDelay(1000, 5300, 5000), nextTickDelay(1000, 5300, 5300), nextTickDelay(1000, 0, 5450), nextTickDelay(500, 5300, 5100)]).toEqual([300, 1000, 550, 200])
   })
 
   test('the ticker runs at 20 fps only while something moves', () => {

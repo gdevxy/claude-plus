@@ -214,6 +214,10 @@ export function tickPeriod(input: Pick<ScreenInput, 'animations' | 'motions' | '
   return clock.state === 'warm' && clock.remainingMs <= LAST_MINUTE_MS ? QUICK_BREATH_MS : TICK_MS
 }
 
+export function nextTickDelay(periodMs: number, anchorMs: number, nowMs: number): number {
+  return (((anchorMs - nowMs) % periodMs) + periodMs) % periodMs || periodMs
+}
+
 export function statusText(input: Sources): string | undefined {
   const sources = { ...input, snapshot: current(input) }
   const parts: string[] = []

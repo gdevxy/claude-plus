@@ -10,6 +10,8 @@ type Wiring = {
   session: string
   served: Snapshot | null
   serving: 'current' | 'older' | 'newer'
+  lag: (() => Promise<void>) | null
+  openRefusal: string | null
   silent: boolean
   holding: boolean
   held: (() => void)[]
@@ -122,7 +124,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), serving: 'current', silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), serving: 'current', lag: null, openRefusal: null, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -130,6 +132,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
   on('session.turns', () => ({ value: 14 }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.open', ($, e) => {
+    if (wiring.openRefusal !== null) return { deny: wiring.openRefusal }
     wiring.opened.push(e.id)
     return { value: { isPlaced: true } }
   })
@@ -149,6 +152,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
   on('http.fetch', async ($, e) => {
     wiring.fetched.push(e)
     if (wiring.silent) await new Promise(() => undefined)
+    if (wiring.lag !== null && e.url.includes('/snapshot')) await wiring.lag()
     if (wiring.holding && e.url.endsWith('/events')) await new Promise<void>(resolve => wiring.held.push(resolve))
     if (wiring.down) throw new Error('ECONNREFUSED')
     if (e.url.endsWith('/events')) wiring.delivered.push(e)
@@ -385,6 +389,43 @@ describe('plus mod', () => {
     await $.session.measure({ ...MEASURE, rateLimits: [later], cost: { usd: 9.8 } })
     await clock.advance(1000)
     expect(wiring.statuses.at(-1)).toBe('$9.80 · cache 52:09 · 5h 71%')
+  })
+
+  test('the status countdown never skips a second while polls take time', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { lag: () => clock.sleep(300) })
+    await start($)
+    for (let step = 0; step < 200; step += 1) await clock.advance(100)
+    const seconds = wiring.statuses.flatMap(status => {
+      const found = /cache (\d+):(\d+)/.exec(status ?? '')
+      return found === null ? [] : [Number(found[1]) * 60 + Number(found[2])]
+    })
+    const steps = seconds.slice(1).map((second, index) => (seconds[index] ?? 0) - second)
+    expect(steps.filter(step => step !== 1)).toEqual([])
+    expect(seconds.length).toBeGreaterThan(15)
+  })
+
+  test('a refused state read does not stop the ticker', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    let refusing = false
+    on('state.get', ($, e, next) => (refusing ? { deny: 'state is away' } : next(e)))
+    await start($)
+    await clock.advance(1000)
+    refusing = true
+    await clock.advance(2000)
+    refusing = false
+    const before = wiring.statuses.length
+    await clock.advance(5000)
+    expect(wiring.statuses.length).toBeGreaterThan(before)
+  })
+
+  test('/plus answers even when the pane is refused', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on, { openRefusal: 'no panes in this session' })
+    const out = await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+    await clock.settle()
+    expect(out.text).toBe('✻ claude-plus could not open: no panes in this session')
   })
 
   test('the cache countdown ticks every second without a new snapshot', async ($, on) => {
