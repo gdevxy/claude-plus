@@ -17,7 +17,7 @@ use hyper::header::{ALLOW, CONTENT_TYPE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use serde::Serialize;
 use tokio::sync::watch;
@@ -30,6 +30,7 @@ use wire::{
     Progress, Snapshot,
 };
 
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_SOCKET_PATH: usize = if cfg!(target_os = "linux") { 107 } else { 103 };
 pub const REBUILDING: &str = "the store is being rebuilt";
@@ -75,6 +76,7 @@ pub struct State {
     pub watching: AtomicBool,
     pub shutdown: Shutdown,
     pub log: Arc<Log>,
+    pub request_timeout: Duration,
 }
 
 pub fn socket_path_problem(socket: &Path) -> Option<String> {
@@ -118,12 +120,15 @@ pub async fn serve(listener: UnixListener, state: Arc<State>) -> Result<()> {
                 let Ok((stream, _)) = accepted else {
                     continue;
                 };
+                let mut builder = http1::Builder::new();
+                builder.timer(TokioTimer::new()).header_read_timeout(state.request_timeout);
                 let state = state.clone();
                 let service = service_fn(move |request| {
                     let state = state.clone();
                     async move { Ok::<_, Infallible>(handle(state, request).await) }
                 });
-                let connection = http1::Builder::new().serve_connection(TokioIo::new(stream), service);
+                let connection = builder
+                    .serve_connection(TokioIo::new(stream), service);
                 let connection = graceful.watch(connection);
                 tokio::spawn(async move {
                     let _ = connection.await;
@@ -273,7 +278,17 @@ where
     B: Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let bytes = match Limited::new(body, MAX_BODY_BYTES).collect().await {
+    let collected = Limited::new(body, MAX_BODY_BYTES).collect();
+    let Ok(collected) = tokio::time::timeout(state.request_timeout, collected).await else {
+        return failure(
+            StatusCode::REQUEST_TIMEOUT,
+            format!(
+                "the request body did not arrive within {} ms",
+                state.request_timeout.as_millis()
+            ),
+        );
+    };
+    let bytes = match collected {
         Ok(collected) => collected.to_bytes(),
         Err(error) if error.is::<LengthLimitError>() => {
             return failure(

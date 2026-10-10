@@ -72,6 +72,7 @@ fn run_locked(
         watching: AtomicBool::new(false),
         shutdown: Shutdown::default(),
         log: log.clone(),
+        request_timeout: api::REQUEST_TIMEOUT,
     });
     let served = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -10,6 +10,7 @@ use crate::daemon::writer;
 use crate::pricing::PriceTable;
 
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
+const TEST_REQUEST_TIMEOUT: Duration = Duration::from_millis(200);
 
 struct Server {
     temp: tempfile::TempDir,
@@ -48,6 +49,7 @@ impl Server {
             watching: AtomicBool::new(true),
             shutdown: shutdown.clone(),
             log,
+            request_timeout: TEST_REQUEST_TIMEOUT,
         });
         let serving = std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
@@ -338,4 +340,48 @@ fn an_import_cut_short_by_shutdown_is_answered_as_stopping() {
     assert_eq!(error.to_string(), "the claude-plus daemon is stopping");
     server.serving.take().unwrap().join().unwrap().unwrap();
     assert!(started.elapsed() < DRAIN, "{:?}", started.elapsed());
+}
+
+fn answer_to(server: &Server, partial_request: &str) -> (String, Duration) {
+    use std::io::{Read, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(&server.socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stream.write_all(partial_request.as_bytes()).unwrap();
+    let started = Instant::now();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    (answer, started.elapsed())
+}
+
+#[test]
+fn a_client_that_never_finishes_its_headers_is_disconnected() {
+    let server = Server::start();
+    let (answer, waited) = answer_to(&server, "GET /health HTTP/1.1\r\nhost: x\r\n");
+    assert_eq!(answer, "");
+    assert!(waited < Duration::from_secs(2), "{waited:?}");
+}
+
+#[test]
+fn an_idle_kept_alive_connection_is_closed() {
+    let server = Server::start();
+    let (answer, waited) = answer_to(&server, "GET /health HTTP/1.1\r\nhost: x\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 200 OK"), "{answer:?}");
+    assert!(waited < Duration::from_secs(2), "{waited:?}");
+}
+
+#[test]
+fn a_body_that_never_arrives_is_answered_with_a_timeout() {
+    let server = Server::start();
+    let (answer, waited) = answer_to(
+        &server,
+        "POST /events HTTP/1.1\r\nhost: x\r\ncontent-length: 100\r\n\r\n{",
+    );
+    assert!(answer.starts_with("HTTP/1.1 408 "), "{answer:?}");
+    assert!(
+        answer.ends_with(r#"{"error":"the request body did not arrive within 200 ms"}"#),
+        "{answer:?}"
+    );
+    assert!(waited < Duration::from_secs(2), "{waited:?}");
 }
