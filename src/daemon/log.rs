@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -11,16 +11,20 @@ use chrono::{DateTime, Utc};
 pub const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
 pub struct Log {
-    file: Mutex<File>,
+    file: Mutex<LogFile>,
     echo: bool,
 }
 
-impl Log {
-    pub fn open(path: &Path, echo: bool) -> Result<Self> {
+struct LogFile {
+    path: PathBuf,
+    file: File,
+    len: u64,
+}
+
+impl LogFile {
+    fn open(path: &Path) -> Result<Self> {
         if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
-            let mut rotated = path.as_os_str().to_owned();
-            rotated.push(".1");
-            std::fs::rename(path, &rotated)
+            std::fs::rename(path, rotated(path))
                 .with_context(|| format!("cannot rotate {}", path.display()))?;
         }
         let file = OpenOptions::new()
@@ -30,7 +34,34 @@ impl Log {
             .open(path)
             .with_context(|| format!("cannot open {}", path.display()))?;
         Ok(Self {
-            file: Mutex::new(file),
+            path: path.to_path_buf(),
+            len: file.metadata().map_or(0, |m| m.len()),
+            file,
+        })
+    }
+
+    fn append(&mut self, line: &str) {
+        if writeln!(self.file, "{line}").is_ok() {
+            self.len += line.len() as u64 + 1;
+        }
+        if self.len > MAX_LOG_BYTES
+            && let Ok(reopened) = Self::open(&self.path)
+        {
+            *self = reopened;
+        }
+    }
+}
+
+fn rotated(path: &Path) -> PathBuf {
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    PathBuf::from(rotated)
+}
+
+impl Log {
+    pub fn open(path: &Path, echo: bool) -> Result<Self> {
+        Ok(Self {
+            file: Mutex::new(LogFile::open(path)?),
             echo,
         })
     }
@@ -50,7 +81,7 @@ impl Log {
     fn write(&self, level: &str, message: impl Display) {
         let line = line(Utc::now(), level, message);
         if let Ok(mut file) = self.file.lock() {
-            let _ = writeln!(file, "{line}");
+            file.append(&line);
         }
         if self.echo {
             eprintln!("{line}");
@@ -126,6 +157,23 @@ mod tests {
         drop(log);
         Log::open(&path, false).unwrap().info("third");
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+    }
+
+    #[test]
+    fn a_log_that_grows_too_large_is_rotated_while_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.log");
+        let log = Log::open(&path, false).unwrap();
+        log.warn("x".repeat(MAX_LOG_BYTES as usize));
+        log.info("after");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 1, "{}", text.len());
+        assert!(text.ends_with(" info  after\n"), "{text}");
+        let rotated = std::fs::read_to_string(temp.path().join("daemon.log.1")).unwrap();
+        assert!(rotated.len() as u64 > MAX_LOG_BYTES);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
