@@ -58,7 +58,7 @@ impl IngestReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rebuilt {
     pub requests: u64,
     pub records: u64,
