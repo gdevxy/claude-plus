@@ -44,6 +44,7 @@ impl Server {
         let state = Arc::new(State {
             writer: writer.clone(),
             reader: Mutex::new(reader),
+            prices: PriceTable::bundled(),
             started: Instant::now(),
             claude_dir: temp.path().join("claude"),
             watching: AtomicBool::new(true),
@@ -203,6 +204,55 @@ fn the_snapshot_carries_session_totals_from_the_store() {
     assert_eq!(snapshot.measure, None);
     let now = epoch_ms(SystemTime::now());
     assert!((now - 5000..=now).contains(&snapshot.generated_at_ms));
+}
+
+#[test]
+fn the_snapshot_reports_the_cache_forecast_and_limits() {
+    let server = Server::start();
+    server.client().import().unwrap();
+    let step_ms = epoch_ms(SystemTime::now()) - 1000;
+    server
+        .client()
+        .send_events(&json!({"events": [
+            {"session": SESSION, "kind": "session.measure", "ts_ms": step_ms, "data": {
+                "model": "claude-opus-5-5",
+                "rateLimits": [{"kind": "five_hour", "percentUsed": 54, "resetsAt": "2099-01-01T00:00:00Z"}]
+            }},
+            {"session": SESSION, "kind": "turn.step", "ts_ms": step_ms, "data": {
+                "turnId": "t1", "index": 0, "model": "claude-opus-5-5", "effort": "high",
+                "usage": {"model": "claude-opus-5-5", "input_tokens": 12, "output_tokens": 800,
+                          "cache_read_input_tokens": 25000, "cache_creation_input_tokens": 300}
+            }}
+        ]}))
+        .unwrap();
+    let live = server.client().snapshot(SESSION).unwrap().live;
+    assert_eq!(live.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(live.effort.as_deref(), Some("high"));
+    assert_eq!(live.cache.ttl, crate::cache_model::Ttl::OneHour);
+    assert_eq!(
+        live.cache.ttl_source,
+        crate::cache_model::TtlSource::Observed
+    );
+    assert_eq!(live.cache.last_touch_ms, Some(step_ms));
+    assert_eq!(live.cache.expires_at_ms, Some(step_ms + 3_600_000));
+    assert_eq!(live.cache.state, crate::cache_model::CacheState::Warm);
+    let forecast = live.forecast.unwrap();
+    assert_eq!(
+        (
+            forecast.samples,
+            forecast.prefix_tokens,
+            forecast.new_tokens,
+            forecast.output_tokens
+        ),
+        (2, 25_300, 2_661, 900)
+    );
+    assert_eq!(live.limits.len(), 1);
+    assert_eq!(
+        (live.limits[0].window.as_str(), live.limits[0].used_pct),
+        ("five_hour", 54.0)
+    );
+    assert_eq!(live.limits[0].calibration.family, "opus");
+    assert_eq!(live.limits[0].calibration.pct_per_usd, None);
 }
 
 #[test]

@@ -61,10 +61,12 @@ fn run_locked(
     let store = Store::open(&paths.database())?;
     let reader = Store::open_read_only(&paths.database())?;
     let listener = api::listen(&paths.socket())?;
-    let (writer, writer_thread) = writer::spawn(store, prices, paths.projects_dir(), log.clone())?;
+    let (writer, writer_thread) =
+        writer::spawn(store, prices.clone(), paths.projects_dir(), log.clone())?;
     let state = Arc::new(State {
         writer: writer.clone(),
         reader: Mutex::new(reader),
+        prices,
         started: Instant::now(),
         claude_dir: paths.claude_dir.clone(),
         watching: AtomicBool::new(false),

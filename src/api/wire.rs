@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use super::live::Live;
 use crate::ingest::IngestReport;
 use crate::store::{ModelTotal, SessionTotals, StoredEvent};
 use crate::transcript::TokenCounts;
@@ -71,6 +72,7 @@ pub struct Snapshot {
     pub generated_at_ms: i64,
     pub totals: SnapshotTotals,
     pub measure: Option<Measure>,
+    pub live: Live,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +117,7 @@ impl Snapshot {
         session: &str,
         totals: SessionTotals,
         measure: Option<StoredEvent>,
+        live: Live,
         now_ms: i64,
     ) -> Result<Self> {
         let measure = match measure {
@@ -141,6 +144,7 @@ impl Snapshot {
                 models: totals.models.into_iter().map(ModelCost::from).collect(),
             },
             measure,
+            live,
         })
     }
 }
@@ -172,6 +176,9 @@ impl From<ModelTotal> for ModelCost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache_model::{Cache, CacheState, Rebuild, RebuildCause, Ttl, TtlSource};
+    use crate::forecast::{Alternative, Forecast};
+    use crate::limits::{Calibration, LimitWindow, Pace};
 
     const SNAPSHOT_V1: &str = r#"{
   "v": 1,
@@ -214,8 +221,144 @@ mod tests {
     "data": {
       "contextPercent": 41
     }
+  },
+  "live": {
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "cache": {
+      "state": "warm",
+      "ttl": "1h",
+      "ttl_source": "observed",
+      "last_touch_ms": 1791021000000,
+      "expires_at_ms": 1791024600000,
+      "hit_ratio": 0.93,
+      "saved_usd": 3.2,
+      "rebuilds": 1,
+      "rebuild_usd": 0.4,
+      "last_rebuild": {
+        "ts_ms": 1791020000000,
+        "cause": "idle",
+        "tokens": 51000,
+        "extra_usd": 0.4
+      }
+    },
+    "forecast": {
+      "model": "claude-opus-5-5",
+      "samples": 10,
+      "prefix_tokens": 46000,
+      "new_tokens": 2030,
+      "output_tokens": 600,
+      "warm_usd": 0.03,
+      "cold_usd": 0.4,
+      "warm_pct_5h": 0.015,
+      "cold_pct_5h": 0.2,
+      "alternative": {
+        "model": "claude-sonnet-5-5",
+        "first_usd": 0.2,
+        "next_usd": 0.02
+      }
+    },
+    "limits": [
+      {
+        "window": "five_hour",
+        "used_pct": 54.0,
+        "resets_at_ms": 1791030000000,
+        "sampled_at_ms": 1791021500000,
+        "reset_since_sample": false,
+        "pace": {
+          "pct_per_hour": 12.5,
+          "projected_pct": 88.0,
+          "full_at_ms": null
+        },
+        "calibration": {
+          "family": "opus",
+          "pairs": 23,
+          "needed": 20,
+          "pct_per_usd": 0.5
+        }
+      }
+    ]
   }
 }"#;
+
+    fn live() -> Live {
+        Live {
+            model: Some("claude-opus-5-5".into()),
+            effort: Some("high".into()),
+            cache: Cache {
+                state: CacheState::Warm,
+                ttl: Ttl::OneHour,
+                ttl_source: TtlSource::Observed,
+                last_touch_ms: Some(1_791_021_000_000),
+                expires_at_ms: Some(1_791_024_600_000),
+                hit_ratio: Some(0.93),
+                saved_usd: 3.2,
+                rebuilds: 1,
+                rebuild_usd: 0.4,
+                last_rebuild: Some(Rebuild {
+                    ts_ms: 1_791_020_000_000,
+                    cause: RebuildCause::Idle,
+                    tokens: 51_000,
+                    extra_usd: Some(0.4),
+                }),
+            },
+            forecast: Some(Forecast {
+                model: "claude-opus-5-5".into(),
+                samples: 10,
+                prefix_tokens: 46_000,
+                new_tokens: 2_030,
+                output_tokens: 600,
+                warm_usd: Some(0.03),
+                cold_usd: Some(0.4),
+                warm_pct_5h: Some(0.015),
+                cold_pct_5h: Some(0.2),
+                alternative: Some(Alternative {
+                    model: "claude-sonnet-5-5".into(),
+                    first_usd: 0.2,
+                    next_usd: 0.02,
+                }),
+            }),
+            limits: vec![LimitWindow {
+                window: "five_hour".into(),
+                used_pct: 54.0,
+                resets_at_ms: Some(1_791_030_000_000),
+                sampled_at_ms: 1_791_021_500_000,
+                reset_since_sample: false,
+                pace: Some(Pace {
+                    pct_per_hour: 12.5,
+                    projected_pct: Some(88.0),
+                    full_at_ms: None,
+                }),
+                calibration: Calibration {
+                    family: "opus".into(),
+                    pairs: 23,
+                    needed: 20,
+                    pct_per_usd: Some(0.5),
+                },
+            }],
+        }
+    }
+
+    fn quiet() -> Live {
+        Live {
+            model: None,
+            effort: None,
+            cache: Cache {
+                state: CacheState::None,
+                ttl: Ttl::FiveMinutes,
+                ttl_source: TtlSource::Assumed,
+                last_touch_ms: None,
+                expires_at_ms: None,
+                hit_ratio: None,
+                saved_usd: 0.0,
+                rebuilds: 0,
+                rebuild_usd: 0.0,
+                last_rebuild: None,
+            },
+            forecast: None,
+            limits: vec![],
+        }
+    }
 
     fn totals() -> SessionTotals {
         SessionTotals {
@@ -261,6 +404,7 @@ mod tests {
                 received_ms: 1_791_021_500_012,
                 json: r#"{"contextPercent":41}"#.into(),
             }),
+            live(),
             1_791_021_600_000,
         )
         .unwrap();
@@ -282,12 +426,13 @@ mod tests {
                 received_ms: 6,
                 json: "{}".into(),
             }),
+            quiet(),
             7,
         )
         .unwrap();
         assert!(snapshot.known);
         assert_eq!(snapshot.totals.last_request_ms, None);
-        let unknown = Snapshot::of("s9", SessionTotals::default(), None, 7).unwrap();
+        let unknown = Snapshot::of("s9", SessionTotals::default(), None, quiet(), 7).unwrap();
         assert!(!unknown.known);
         assert_eq!(unknown.measure, None);
     }

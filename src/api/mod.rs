@@ -1,5 +1,6 @@
 pub mod client;
 pub mod events;
+pub mod live;
 pub mod wire;
 
 use std::convert::Infallible;
@@ -24,7 +25,9 @@ use tokio::sync::watch;
 
 use crate::daemon::log::Log;
 use crate::daemon::writer::WriterHandle;
+use crate::pricing::PriceTable;
 use crate::store::Store;
+use live::Live;
 use wire::{
     API_VERSION, ErrorBody, EventsAccepted, Health, ImportOutcome, IngestHealth, MEASURE_KIND,
     Progress, Snapshot,
@@ -72,6 +75,7 @@ impl Shutdown {
 pub struct State {
     pub writer: WriterHandle,
     pub reader: Mutex<Store>,
+    pub prices: PriceTable,
     pub started: Instant,
     pub claude_dir: PathBuf,
     pub watching: AtomicBool,
@@ -273,9 +277,11 @@ async fn snapshot(state: Arc<State>, query: Option<&str>) -> Reply {
             if reader.reindex_pending()? {
                 return Ok(None);
             }
+            let now_ms = epoch_ms(SystemTime::now());
             let totals = reader.session_totals(&session)?;
             let measure = reader.latest_event(&session, MEASURE_KIND)?;
-            Snapshot::of(&session, totals, measure, epoch_ms(SystemTime::now())).map(Some)
+            let live = Live::read(reader, &state.prices, &session, measure.as_ref(), now_ms)?;
+            Snapshot::of(&session, totals, measure, live, now_ms).map(Some)
         })
     })
     .await;
