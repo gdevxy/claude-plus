@@ -39,6 +39,36 @@ impl TranscriptFile {
     }
 }
 
+pub fn discover(projects_dir: &Path) -> anyhow::Result<Vec<TranscriptFile>> {
+    if !projects_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<TranscriptFile> = walkdir::WalkDir::new(projects_dir)
+        .min_depth(2)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter(|entry| is_session_file(projects_dir, entry.path()))
+        .map(|entry| TranscriptFile::from_path(entry.path()))
+        .collect();
+    files.sort_by(|a, b| a.path.as_os_str().cmp(b.path.as_os_str()));
+    Ok(files)
+}
+
+fn is_session_file(root: &Path, path: &Path) -> bool {
+    let depth = path
+        .strip_prefix(root)
+        .map(|p| p.components().count())
+        .unwrap_or(0);
+    let in_subagents = path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|n| n == "subagents");
+    depth == 2 || (depth == 4 && in_subagents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
