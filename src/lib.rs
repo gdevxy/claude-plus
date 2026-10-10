@@ -4,6 +4,7 @@ pub mod cli;
 pub mod daemon;
 pub mod forecast;
 pub mod ingest;
+pub mod limits;
 pub mod paths;
 pub mod pricing;
 pub mod store;

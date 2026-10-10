@@ -9,9 +9,14 @@ use anyhow::{Result, anyhow};
 use tokio::sync::{oneshot, watch};
 
 use super::log::Log;
+use crate::api::epoch_ms;
+use crate::api::wire::MEASURE_KIND;
 use crate::ingest::{IngestReport, Ingestor, Rebuilt, TranscriptFile};
+use crate::limits;
 use crate::pricing::PriceTable;
 use crate::store::{EventRow, Store};
+
+pub const FIT_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScanOutcome {
@@ -202,6 +207,7 @@ pub fn spawn(
         log,
         shared: handle.shared.clone(),
         cancel: handle.cancel.clone(),
+        fitted_at: None,
     };
     let thread = std::thread::Builder::new()
         .name("claude-plus-writer".into())
@@ -219,6 +225,7 @@ struct Worker {
     log: Arc<Log>,
     shared: Arc<Shared>,
     cancel: Arc<AtomicBool>,
+    fitted_at: Option<Instant>,
 }
 
 impl Worker {
@@ -343,12 +350,26 @@ impl Worker {
                 }
             }
         }
+        if outcome.is_ok() {
+            self.refresh_fit();
+        }
         if let Some((id, reply)) = reply {
             let collected = lock(&self.shared.collectors).remove(&id);
             let _ = reply.send(outcome.map(|done| ScanOutcome {
                 report: collected.unwrap_or(done.report),
                 reconcile_error: done.reconcile_error,
             }));
+        }
+    }
+
+    fn refresh_fit(&mut self) {
+        if self.fitted_at.is_some_and(|at| at.elapsed() < FIT_EVERY) {
+            return;
+        }
+        self.fitted_at = Some(Instant::now());
+        if let Err(error) = limits::refresh_fit(&mut self.store, epoch_ms(SystemTime::now())) {
+            self.log
+                .warn(format!("limit calibration failed: {error:#}"));
         }
     }
 
@@ -391,6 +412,15 @@ fn store_events(store: &mut Store, rows: &[EventRow]) -> Result<()> {
     let mut writer = store.writer()?;
     for row in rows {
         writer.event(row)?;
+        if row.kind != MEASURE_KIND {
+            continue;
+        }
+        let Ok(data) = serde_json::from_str(&row.json) else {
+            continue;
+        };
+        for sample in limits::samples_from_measure(&row.session_id, row.ts_ms, &data) {
+            writer.limit_sample(&sample)?;
+        }
     }
     writer.commit()
 }
@@ -498,6 +528,44 @@ mod tests {
         fx.handle.store_events(rows).await.unwrap();
         let latest = fx.reader().latest_event("s1", "session.measure").unwrap();
         assert_eq!(latest.unwrap().json, r#"{"n":3}"#);
+    }
+
+    #[tokio::test]
+    async fn a_measure_records_limit_samples_once_per_change() {
+        let fx = Fixture::new();
+        let measure = |ts_ms: i64, percent: f64| EventRow {
+            session_id: "s1".into(),
+            kind: "session.measure".into(),
+            ts_ms,
+            received_ms: ts_ms,
+            json: format!(
+                r#"{{"model":"claude-opus-5-5","rateLimits":[{{"kind":"five_hour","percentUsed":{percent},"resetsAt":"2026-10-11T10:00:00Z"}}]}}"#
+            ),
+        };
+        fx.handle
+            .store_events(vec![measure(1, 10.0), measure(2, 10.0), measure(3, 11.0)])
+            .await
+            .unwrap();
+        let samples = fx.reader().limit_samples_since(0).unwrap();
+        assert_eq!(
+            samples
+                .iter()
+                .map(|s| (s.ts_ms, s.used_pct))
+                .collect::<Vec<_>>(),
+            vec![(1, 10.0), (3, 11.0)]
+        );
+        assert_eq!(samples[0].model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[tokio::test]
+    async fn an_ingest_refreshes_the_limit_calibration() {
+        let fx = Fixture::new();
+        fx.write("a.jsonl", &line("a", "ra"));
+        fx.handle.import().await.unwrap();
+        assert_eq!(
+            fx.reader().meta(limits::FIT_KEY).unwrap().as_deref(),
+            Some("[]")
+        );
     }
 
     #[tokio::test]
