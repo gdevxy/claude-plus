@@ -199,7 +199,10 @@ Claude Code documents the transcript format as internal and subject to change, s
 - `attachment` records carry the actual injected context: `skill_listing` (content, names, skillCount), `instructions` (CLAUDE.md files with path, type and content), `nested_memory`, `mcp_instructions_delta`, `deferred_tools_record` and `deferred_tools_delta` (tool schemas), `agent_listing_delta`, `environment`, `invoked_skills`.
 - `user` records carry `tool_result` blocks (`tool_use_id`, `content`, `is_error`), matched to `tool_use` blocks of assistant records for the tool name.
 - `system` records with `subtype: compact_boundary` carry `compactMetadata` (`trigger`, `preTokens`, `postTokens`).
-- `cost-state` records carry Claude Code's own per-model cost totals, used as a cross-check of the pricing module.
+- `cost-state` records carry Claude Code's own cumulative per-session counters (`totalCostUSD`, and `modelUsage` per model with `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `costUSD`); they price consistently with the bundled table within about 1%, and only some sessions have one.
+- Subagent transcripts often keep only the preliminary streaming `output_tokens` (2 to 16) of a response: across sessions with subagents, transcripts hold about 47% of the output and 78% of the cache reads that `modelUsage` reports, while sessions without subagents match within 2%.
+- The parent's `Agent` tool result carries `toolUseResult.usage`, which describes only the subagent's last call, so it cannot repair earlier calls.
+- Workflow agents write to `<session>/subagents/workflows/<run>/agent-<id>.jsonl` beside a `journal.jsonl` that holds no usage.
 - `<synthetic>` model records carry no billable usage and are skipped.
 - Subagent records keep the parent `sessionId` and set `isSidechain: true`.
 - Claude Code deletes transcripts after `cleanupPeriodDays` (default 30), so the daemon's own store is the long-term history, and `doctor` reports the setting.
@@ -221,6 +224,7 @@ Claude Code documents the transcript format as internal and subject to change, s
 - `attachments(session_id, ts, kind, chars, names)`.
 - `compactions(session_id, ts, trigger, pre_tokens, post_tokens)`.
 - `cost_states(session_id, ts, total_cost_usd, json)`.
+- `adjustments(session_id, model, ts, input, output, cache_read, cache_write, cost_usd)` holds reconciliation rows.
 - `limit_samples(ts, session_id, model, window, used_pct, resets_at)`.
 - `live_breakdowns(session_id, ts, json)` holds the latest context breakdown pushed by the mod.
 - `meta(key, value)` holds schema version, price table version and calibration parameters.
@@ -237,6 +241,8 @@ Claude Code documents the transcript format as internal and subject to change, s
 - Thinking tokens are billed as output and already included in `output_tokens`.
 - An unknown model shows "price unknown" and is excluded from dollar totals with a visible count, never guessed.
 - Session, project and day aggregates are sums of deduplicated request costs, with subagent requests attributed to the parent session.
+- Reconciliation: for each session with a `cost-state`, the per-model shortfall of transcript usage against `modelUsage` becomes adjustment rows, spread over that model's requests by hour, priced like requests (missing cache writes at the 5-minute rate), never negative.
+- Adjustments count in session, day and total costs, are shown as "reconciled", and never alter request rows; sessions with subagents but no counter are reported as possibly understated, never extrapolated.
 - The pricing module is cross-checked against `cost-state` records in tests.
 
 ### Cache state
