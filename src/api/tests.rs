@@ -321,3 +321,21 @@ fn snapshots_are_refused_while_the_store_is_being_rebuilt() {
         1
     );
 }
+
+#[test]
+fn an_import_cut_short_by_shutdown_is_answered_as_stopping() {
+    let mut server = Server::start();
+    let release = server.writer.hold();
+    let socket = server.socket.clone();
+    let import = std::thread::spawn(move || Client::new(&socket).import());
+    while server.writer.status().backlog() < 1 {
+        std::thread::yield_now();
+    }
+    server.client().shutdown().unwrap();
+    let started = Instant::now();
+    release.send(()).unwrap();
+    let error = import.join().unwrap().unwrap_err();
+    assert_eq!(error.to_string(), "the claude-plus daemon is stopping");
+    server.serving.take().unwrap().join().unwrap().unwrap();
+    assert!(started.elapsed() < DRAIN, "{:?}", started.elapsed());
+}

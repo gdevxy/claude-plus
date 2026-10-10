@@ -102,8 +102,12 @@ impl WriterHandle {
         lock(&self.shared.status).clone()
     }
 
-    pub fn stop(&self) {
+    pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop(&self) {
+        self.cancel();
         self.send(Job::Stop);
     }
 
@@ -119,7 +123,7 @@ impl WriterHandle {
     }
 
     #[cfg(test)]
-    fn hold(&self) -> mpsc::Sender<()> {
+    pub(crate) fn hold(&self) -> mpsc::Sender<()> {
         let (release, held) = mpsc::channel();
         self.send(Job::Hold(held));
         release
@@ -181,9 +185,6 @@ impl Worker {
             let Some(job) = deferred.pop_front().or_else(|| queue.recv().ok()) else {
                 break;
             };
-            if self.cancel.load(Ordering::Relaxed) {
-                break;
-            }
             let mut drain = |store: &mut Store| {
                 while let Ok(job) = queue.try_recv() {
                     match job {
@@ -206,7 +207,10 @@ impl Worker {
                     self.finish_ingest(outcome, reply);
                 }
                 Job::Events(rows, reply) => answer(reply, store_events(&mut self.store, &rows)),
-                Job::Reindex(reply) => answer(reply, self.reindex(&mut drain)),
+                Job::Reindex(reply) => {
+                    let rebuilt = self.reindex(&mut drain);
+                    answer(reply, self.unless_cancelled(rebuilt));
+                }
                 Job::Stop => break,
                 #[cfg(test)]
                 Job::Hold(held) => {
@@ -233,6 +237,9 @@ impl Worker {
     }
 
     fn scan(&mut self, drain: &mut dyn FnMut(&mut Store)) -> Result<ScanOutcome> {
+        if self.is_cancelled() {
+            return Err(anyhow!(STOPPING));
+        }
         let shared = self.shared.clone();
         let mut progress = |done: usize, total: usize| {
             lock(&shared.status).progress = Some((done, total));
@@ -244,11 +251,33 @@ impl Worker {
         Ok(reconciled(&mut ingestor, report))
     }
 
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn unless_cancelled<T>(&self, outcome: Result<T>) -> Result<T> {
+        if self.is_cancelled() {
+            Err(anyhow!(STOPPING))
+        } else {
+            outcome
+        }
+    }
+
     fn finish_ingest(
         &mut self,
         outcome: Result<ScanOutcome>,
         reply: Option<(u64, Reply<ScanOutcome>)>,
     ) {
+        if self.is_cancelled() {
+            let mut status = lock(&self.shared.status);
+            status.backlog.pop_front();
+            status.progress = None;
+            if let Some((id, reply)) = reply {
+                lock(&self.shared.collectors).remove(&id);
+                let _ = reply.send(Err(STOPPING.into()));
+            }
+            return;
+        }
         let outcome = outcome.map_err(|error| format!("{error:#}"));
         let problem = match &outcome {
             Ok(done) => done
@@ -282,6 +311,9 @@ impl Worker {
     }
 
     fn reindex(&mut self, drain: &mut dyn FnMut(&mut Store)) -> Result<Rebuilt> {
+        if self.is_cancelled() {
+            return Err(anyhow!(STOPPING));
+        }
         let shared = self.shared.clone();
         let rebuilt = self.ingestor(drain).reindex(&mut |done, total| {
             lock(&shared.status).progress = Some((done, total));
@@ -491,5 +523,39 @@ mod tests {
         stopped.stop();
         let error = stopped.handle.reindex().await.unwrap_err();
         assert_eq!(error.to_string(), STOPPING);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_import_is_answered_as_stopping_while_events_are_still_stored() {
+        let mut fx = Fixture::new();
+        fx.write("a.jsonl", &line("a", "ra"));
+        let release = fx.handle.hold();
+        let import = tokio::spawn({
+            let handle = fx.handle.clone();
+            async move { handle.import().await }
+        });
+        while fx.handle.status().backlog() < 1 {
+            tokio::task::yield_now().await;
+        }
+        fx.handle.cancel();
+        release.send(()).unwrap();
+        let error = import.await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), STOPPING);
+        let row = EventRow {
+            session_id: "a".into(),
+            kind: "session.measure".into(),
+            ts_ms: 1,
+            received_ms: 1,
+            json: "{}".into(),
+        };
+        fx.handle.store_events(vec![row]).await.unwrap();
+        assert!(
+            fx.reader()
+                .latest_event("a", "session.measure")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(fx.handle.reindex().await.unwrap_err().to_string(), STOPPING);
+        fx.stop();
     }
 }

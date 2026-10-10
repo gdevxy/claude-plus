@@ -132,6 +132,7 @@ pub async fn serve(listener: UnixListener, state: Arc<State>) -> Result<()> {
             () = state.shutdown.triggered() => break,
         }
     }
+    state.writer.cancel();
     let _ = tokio::time::timeout(DRAIN, graceful.shutdown()).await;
     Ok(())
 }
@@ -159,6 +160,7 @@ where
         }
         (&Method::POST, "/shutdown") => {
             state.log.info("shutdown requested over the socket");
+            state.writer.cancel();
             state.shutdown.trigger();
             json(StatusCode::ACCEPTED, &serde_json::json!({"stopping": true}))
         }
