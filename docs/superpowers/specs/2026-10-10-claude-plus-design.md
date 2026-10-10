@@ -228,19 +228,20 @@ Claude Code documents the transcript format as internal and subject to change, s
   - Strings in `tool_use.input` and its `wireToolInputs` copy keep up to 256 bytes, so file paths and commands survive, and attachment names and paths are kept.
   - Any other string longer than 2,048 bytes becomes `{"$chars": n}`.
   - A shrunk string that starts with a tooling marker such as `<command-` or `<task-notification` keeps that marker as `"$prefix"`, so prompt classification survives redaction.
-  - A store written before these rules is rewritten once on first open after the upgrade, then compacted.
-  - A migration that changes how rows are derived marks the store, and the next import rebuilds the derived tables from raw records before reading new lines.
-- `files(id, path, offset, size, mtime, parse_errors)` holds ingestion checkpoints.
+- `files(id, path, offset, lines, size, mtime, parse_errors, head_len, head_hash)` holds ingestion checkpoints.
 - `sessions(id, project, cwd, started_at, last_seen_at, title)`.
 - `requests(key, session_id, ts, model, input, output, thinking, cache_read, cache_write_5m, cache_write_1h, cost_usd, is_sidechain, agent_id, skill, mcp_server, effort)`, `key` being the deduplication key.
 - `tool_uses(id, session_id, ts, name, input_chars)` and `tool_results(tool_use_id, session_id, ts, chars, is_error)`.
 - `attachments(session_id, ts, kind, chars, names)`.
 - `compactions(session_id, ts, trigger, pre_tokens, post_tokens)`.
-- `cost_states(session_id, ts, total_cost_usd, json)`.
+- `cost_states(file_id, line_no, session_id, total_cost_usd, model_count, json)`.
 - `adjustments(session_id, model, ts, input, output, cache_read, cache_write, cost_usd)` holds reconciliation rows.
 - `limit_samples(ts, session_id, model, window, used_pct, resets_at)`.
 - `live_breakdowns(session_id, ts, json)` holds the latest context breakdown pushed by the mod.
-- `meta(key, value)` holds schema version, price table version and calibration parameters.
+- `meta(key, value)` holds the price table version and calibration parameters.
+- The schema version lives in SQLite's `user_version`.
+  The first released schema is version 7, and each later migration adds one.
+  Versions 1 to 6 belong to pre-release builds; such a store is refused with a message asking to delete it and run `claude-plus import`.
 
 ## 5. Computation
 

@@ -1,6 +1,5 @@
 mod reconcile;
 mod schema;
-mod upgrade;
 mod writer;
 
 use std::collections::BTreeMap;
@@ -14,17 +13,19 @@ use rusqlite::{
 
 use crate::transcript::location::Location;
 pub use reconcile::Reconciliation;
-pub use upgrade::Upgrade;
 pub use writer::*;
 
 const GENERATION_MARK: &str = "#gen-";
-const REDERIVE_PENDING: &str = "rederive_pending";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const STATEMENT_CACHE: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 #[error("another claude-plus is writing, try again in a moment")]
 pub struct Busy;
+
+#[derive(Debug, thiserror::Error)]
+#[error("database was created by a pre-release claude-plus")]
+pub struct PreRelease;
 
 pub struct Store {
     conn: Connection,
@@ -88,14 +89,10 @@ pub struct RawRow {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_with_progress(path, &mut |_| {})
+        Self::open_writable(path).map_err(|error| opening_error(path, error))
     }
 
-    pub fn open_with_progress(path: &Path, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
-        Self::open_writable(path, on_upgrade).map_err(|error| opening_error(path, error))
-    }
-
-    fn open_writable(path: &Path, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
+    fn open_writable(path: &Path) -> Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -112,7 +109,7 @@ impl Store {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::migrated(conn, on_upgrade)
+        Self::migrated(conn)
     }
 
     pub fn open_read_only(path: &Path) -> Result<Self> {
@@ -122,7 +119,7 @@ impl Store {
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
             let store = Self { conn };
-            store.refuse_newer_schema()?;
+            store.refuse_unsupported_schema()?;
             Ok(store)
         };
         open().map_err(|error| opening_error(path, error))
@@ -133,12 +130,15 @@ impl Store {
     }
 
     pub fn latest_schema_version() -> usize {
-        schema::MIGRATIONS.len()
+        schema::version_of(schema::MIGRATIONS.len() - 1)
     }
 
-    fn refuse_newer_schema(&self) -> Result<()> {
+    fn refuse_unsupported_schema(&self) -> Result<()> {
         let current = self.schema_version()?;
         let latest = Self::latest_schema_version();
+        if schema::PRE_RELEASE_VERSIONS.contains(&current) {
+            return Err(PreRelease.into());
+        }
         if current > latest {
             bail!(
                 "database schema v{current} is newer than this claude-plus supports (v{latest}); upgrade claude-plus"
@@ -148,39 +148,23 @@ impl Store {
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::migrated(Connection::open_in_memory()?, &mut |_| {})
+        Self::migrated(Connection::open_in_memory()?)
     }
 
-    fn migrated(conn: Connection, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
+    fn migrated(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         let mut store = Self { conn };
-        store.refuse_newer_schema()?;
+        store.refuse_unsupported_schema()?;
         while store.schema_version()? < Self::latest_schema_version() {
             let tx = begin_write(&mut store.conn)?;
-            let current = user_version(&tx)?;
-            let Some(migration) = schema::MIGRATIONS.get(current) else {
+            let Some((version, sql)) = schema::next_migration(user_version(&tx)?) else {
                 break;
             };
-            let version = current + 1;
-            match migration {
-                schema::Migration::Sql(sql) => {
-                    tx.execute_batch(sql)?;
-                    set_user_version(&tx, version)?;
-                    tx.commit().map_err(friendly)?;
-                }
-                schema::Migration::Rust(step) => {
-                    drop(tx);
-                    step(&mut store.conn, on_upgrade)?;
-                    let tx = begin_write(&mut store.conn)?;
-                    if user_version(&tx)? < version {
-                        set_user_version(&tx, version)?;
-                    }
-                    tx.commit().map_err(friendly)?;
-                }
-            }
+            tx.execute_batch(sql)?;
+            set_user_version(&tx, version)?;
+            tx.commit().map_err(friendly)?;
         }
-        upgrade::compact_if_pending(&store.conn, on_upgrade)?;
         Ok(store)
     }
 
@@ -295,18 +279,6 @@ impl Store {
         raw_records(&self.conn, file_id, kinds)
     }
 
-    pub fn rederive_pending(&self) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT 1 FROM meta WHERE key = ?1",
-                [REDERIVE_PENDING],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
-    }
-
     pub fn parse_error_total(&self) -> Result<u64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(SUM(parse_errors), 0) FROM files",
@@ -353,6 +325,12 @@ impl Store {
 }
 
 fn opening_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
+    if error.is::<PreRelease>() {
+        return anyhow::anyhow!(
+            "database at {} was created by a pre-release claude-plus; delete it and run claude-plus import",
+            path.display()
+        );
+    }
     match error.downcast_ref::<rusqlite::Error>() {
         Some(sqlite) if !error.is::<Busy>() => {
             anyhow::anyhow!("cannot open {}: {sqlite}", path.display())
@@ -979,204 +957,6 @@ mod tests {
         assert_eq!(Store::open(&path).unwrap().totals().unwrap().requests, 1);
     }
 
-    fn seeded(path: &Path, version: usize, seed: &str) {
-        let conn = Connection::open(path).unwrap();
-        for migration in &schema::MIGRATIONS[..version] {
-            let schema::Migration::Sql(sql) = migration else {
-                panic!("seeding stops at SQL migrations")
-            };
-            conn.execute_batch(sql).unwrap();
-        }
-        conn.execute_batch(seed).unwrap();
-        conn.pragma_update(None, "user_version", version as i64)
-            .unwrap();
-    }
-
-    #[test]
-    fn v1_and_v2_databases_open_at_the_latest_version() {
-        for version in [1, 2] {
-            let temp = tempfile::tempdir().unwrap();
-            let path = temp.path().join("data.db");
-            seeded(
-                &path,
-                version,
-                r#"INSERT INTO files (id, path, offset, lines, size, mtime) VALUES (1, '/p/proj/s1.jsonl', 10, 2, 10, 5);
-                   INSERT INTO raw_records VALUES
-                     (1, 1, 'user', '{"type":"user","message":{"role":"user","content":"secret prompt"}}'),
-                     (1, 2, 'cost-state', '{"type":"cost-state","sessionId":"s1","totalCostUSD":0.5,"modelUsage":{"m":{"outputTokens":1}}}');
-                   INSERT INTO cost_states VALUES
-                     (1, 2, 's1', 0.5, '{"type":"cost-state","sessionId":"s1","totalCostUSD":0.5,"modelUsage":{"m":{"outputTokens":1}}}');
-                   INSERT INTO requests (key, session_id, ts, model, input, output, thinking, cache_read, cache_write_5m, cache_write_1h, cost_usd, is_sidechain)
-                     VALUES ('r1', 's1', 1, 'm', 1, 2, 0, 0, 0, 0, 0.25, 0);"#,
-            );
-            let store = Store::open(&path).unwrap();
-            assert_eq!(
-                store.schema_version().unwrap(),
-                Store::latest_schema_version(),
-                "v{version}"
-            );
-            let checkpoint = store.checkpoint("/p/proj/s1.jsonl").unwrap().unwrap();
-            assert_eq!(
-                (checkpoint.offset, checkpoint.lines, checkpoint.head_len),
-                (10, 2, 0)
-            );
-            assert_eq!(
-                store.raw_records(1, &["user"]).unwrap()[0].json,
-                r#"{"message":{"content":{"$chars":13},"role":"user"},"type":"user"}"#
-            );
-            assert_eq!(store.cost_state_deltas().unwrap()[0].claude_usd, Some(0.5));
-            assert_eq!(store.totals().unwrap().requests, 1);
-            assert_eq!(store.dump("adjustments"), Vec::<String>::new());
-            assert!(store.rederive_pending().unwrap());
-        }
-    }
-
-    #[test]
-    fn upgrading_from_v3_classifies_stored_cost_states() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("data.db");
-        seeded(
-            &path,
-            3,
-            r#"INSERT INTO cost_states VALUES
-                (1, 1, 's1', 0.5, '{"type":"cost-state","totalCostUSD":0.5,"modelUsage":{"m":{"outputTokens":1},"broken":7}}'),
-                (1, 2, 's1', 0.0, '{"type":"cost-state","modelUsage":{}}'),
-                (1, 3, 's1', 0.0, '{"type":"cost-state","totalCostUSD":0}');"#,
-        );
-        let store = Store::open(&path).unwrap();
-        assert_eq!(
-            store.schema_version().unwrap(),
-            Store::latest_schema_version()
-        );
-        let rows: Vec<(i64, Option<f64>, i64)> = store
-            .conn
-            .prepare(
-                "SELECT line_no, total_cost_usd, model_count FROM cost_states ORDER BY line_no",
-            )
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(
-            rows,
-            vec![(1, Some(0.5), 1), (2, None, 0), (3, Some(0.0), 0)]
-        );
-    }
-
-    #[test]
-    fn upgrading_from_v4_redacts_stored_raw_records_and_compacts() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("data.db");
-        seeded(
-            &path,
-            4,
-            r#"INSERT INTO files (id, path) VALUES (1, '/p/proj/s1.jsonl');
-               INSERT INTO raw_records VALUES
-                 (1, 1, 'user', '{"type":"user","message":{"role":"user","content":"my password"}}'),
-                 (1, 2, 'assistant', '{"type":"assistant","message":{"content":[{"type":"text","text":"secret answer"},{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/a"}}]}}'),
-                 (1, 3, 'custom-title', '{"type":"custom-title","customTitle":"Keep me"}');
-               INSERT INTO cost_states VALUES (1, 4, 's1', 1.0, 1, '{"type":"cost-state","note":"' || printf('%.3000c', 'x') || '"}');"#,
-        );
-        let mut events = Vec::new();
-        let store = Store::open_with_progress(&path, &mut |event| events.push(event)).unwrap();
-        assert_eq!(
-            store.schema_version().unwrap(),
-            Store::latest_schema_version()
-        );
-        let raw: Vec<String> = store
-            .raw_records(1, &[])
-            .unwrap()
-            .into_iter()
-            .map(|row| row.json)
-            .collect();
-        assert_eq!(
-            raw,
-            vec![
-                r#"{"message":{"content":{"$chars":11},"role":"user"},"type":"user"}"#,
-                r#"{"message":{"content":[{"text":{"$chars":13},"type":"text"},{"id":"t","input":{"file_path":"/a"},"name":"Read","type":"tool_use"}]},"type":"assistant"}"#,
-                r#"{"customTitle":"Keep me","type":"custom-title"}"#,
-            ]
-        );
-        assert_eq!(
-            store.dump("cost_states"),
-            vec![
-                r#"Integer(1)|Integer(4)|Text("s1")|Real(1.0)|Integer(1)|Text("{\"note\":{\"$chars\":3000},\"type\":\"cost-state\"}")"#
-            ]
-        );
-        assert_eq!(
-            events,
-            vec![
-                Upgrade::Records { done: 0, total: 3 },
-                Upgrade::Records { done: 3, total: 3 },
-                Upgrade::Compacting
-            ]
-        );
-        assert_eq!(
-            store.dump("meta"),
-            vec![r#"Text("rederive_pending")|Text("yes")"#]
-        );
-        assert!(store.rederive_pending().unwrap());
-    }
-
-    #[test]
-    fn a_concurrent_upgrade_is_not_applied_twice() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("data.db");
-        seeded(
-            &path,
-            4,
-            r#"INSERT INTO files (id, path) VALUES (1, '/p/proj/s1.jsonl');
-               INSERT INTO raw_records VALUES (1, 1, 'user', '{"type":"user","message":{"role":"user","content":"hi"}}');
-               CREATE TABLE applied (key TEXT);
-               CREATE TRIGGER count_meta AFTER INSERT ON meta BEGIN INSERT INTO applied VALUES (NEW.key); END;"#,
-        );
-        let mut other_opened = false;
-        let store = Store::open_with_progress(&path, &mut |_| {
-            if !other_opened {
-                other_opened = true;
-                Store::open(&path).unwrap();
-            }
-        })
-        .unwrap();
-        assert_eq!(
-            store.schema_version().unwrap(),
-            Store::latest_schema_version()
-        );
-        let rederives: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM applied WHERE key = ?1",
-                [REDERIVE_PENDING],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(rederives, 1);
-    }
-
-    #[test]
-    fn a_busy_compaction_is_asked_to_retry() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("data.db");
-        Store::open(&path)
-            .unwrap()
-            .conn
-            .execute(
-                "INSERT INTO meta (key, value) VALUES ('vacuum_pending', 'yes')",
-                [],
-            )
-            .unwrap();
-        let mut holder = Connection::open(&path).unwrap();
-        let _held = holder
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
-        let conn = Connection::open(&path).unwrap();
-        conn.busy_timeout(std::time::Duration::from_millis(10))
-            .unwrap();
-        let error = upgrade::compact_if_pending(&conn, &mut |_| {}).unwrap_err();
-        assert!(error.is::<Busy>(), "{error:#}");
-    }
-
     #[test]
     fn a_second_writer_is_asked_to_retry() {
         let temp = tempfile::tempdir().unwrap();
@@ -1211,6 +991,38 @@ mod tests {
     }
 
     #[test]
+    fn pre_release_stores_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        let expected = format!(
+            "database at {} was created by a pre-release claude-plus; delete it and run claude-plus import",
+            path.display()
+        );
+        for version in 1..=6 {
+            Connection::open(&path)
+                .unwrap()
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            let error = Store::open(&path).err().expect("must refuse");
+            assert_eq!(error.to_string(), expected);
+            let error = Store::open_read_only(&path).err().expect("must refuse");
+            assert_eq!(format!("{error:#}"), expected);
+            let version_after: i64 = Connection::open(&path)
+                .unwrap()
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(version_after, version);
+        }
+    }
+
+    #[test]
+    fn a_new_store_starts_at_the_first_released_version() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), 7);
+        assert_eq!(Store::latest_schema_version(), 7);
+    }
+
+    #[test]
     fn newer_schema_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("data.db");
@@ -1220,7 +1032,7 @@ mod tests {
             .unwrap();
         let expected = format!(
             "database schema v99 is newer than this claude-plus supports (v{}); upgrade claude-plus",
-            schema::MIGRATIONS.len()
+            Store::latest_schema_version()
         );
         let error = Store::open(&path).err().expect("must refuse").to_string();
         assert_eq!(error, expected);
@@ -1239,11 +1051,10 @@ mod tests {
         assert!(!path.exists());
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 1)
+            .execute_batch("CREATE TABLE unrelated (x)")
             .unwrap();
         let store = Store::open_read_only(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
-        assert_eq!(Store::latest_schema_version(), schema::MIGRATIONS.len());
+        assert_eq!(store.schema_version().unwrap(), 0);
     }
 
     #[cfg(unix)]

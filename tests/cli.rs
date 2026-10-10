@@ -490,25 +490,32 @@ fn file_state(database: &Path) -> FileState {
 }
 
 #[test]
-fn doctor_leaves_an_older_database_untouched() {
+fn pre_release_databases_are_refused_untouched() {
     let env = env();
     cmd(&env, &["import"]).assert().success();
     let database = env.plus.join("data.db");
     rusqlite::Connection::open(&database)
         .unwrap()
-        .execute_batch(
-            "DROP TABLE adjustments; DROP INDEX cost_states_by_session; PRAGMA user_version = 2;",
-        )
+        .pragma_update(None, "user_version", 5)
         .unwrap();
+    let message = format!(
+        "database at {} was created by a pre-release claude-plus; delete it and run claude-plus import",
+        database.display()
+    );
     let before = file_state(&database);
     let doctor = stdout_of(&env, &["doctor"]);
     assert!(
-        doctor.ends_with("  Database:    schema v2, run claude-plus import to upgrade\n"),
+        doctor.ends_with(&format!("  Database:    {message}\n")),
         "{doctor}"
     );
+    cmd(&env, &["import"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(format!("claude-plus: {message}\n"));
     let after = file_state(&database);
-    assert_eq!(after.user_version, 2);
-    assert!(after.bytes == before.bytes, "doctor changed data.db");
+    assert_eq!(after.user_version, 5);
+    assert!(after.bytes == before.bytes, "data.db changed");
 }
 
 #[test]
@@ -555,42 +562,6 @@ fn doctor_reads_a_database_with_live_wal_files() {
         .query_row("SELECT COUNT(*) FROM adjustments", [], |r| r.get(0))
         .unwrap();
     assert_eq!(remaining, 1);
-}
-
-#[test]
-fn import_upgrades_an_older_database_quietly() {
-    let env = env();
-    cmd(&env, &["import"]).assert().success();
-    let database = env.plus.join("data.db");
-    {
-        let conn = rusqlite::Connection::open(&database).unwrap();
-        conn.execute(
-            "UPDATE raw_records SET json = ?1 WHERE kind = 'user' AND json LIKE '%hello%'",
-            [r#"{"type":"user","sessionId":"11111111-1111-1111-1111-111111111111","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"hello my password"}}"#],
-        )
-        .unwrap();
-        conn.pragma_update(None, "user_version", 4).unwrap();
-    }
-    cmd(&env, &["import"])
-        .assert()
-        .success()
-        .stderr(predicate::str::is_empty())
-        .stdout(predicate::str::contains("0 new requests"));
-    let conn = rusqlite::Connection::open(&database).unwrap();
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap();
-    let leaked: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM raw_records WHERE json LIKE '%password%'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        (version, leaked),
-        (claude_plus::store::Store::latest_schema_version() as i64, 0)
-    );
 }
 
 #[test]
@@ -693,52 +664,6 @@ fn stats_columns_share_one_precision_with_aligned_decimals() {
   includes $0.0111 reconciled from Claude Code session counters
 "
     );
-}
-
-#[test]
-fn import_rebuilds_derived_rows_after_upgrading_from_v5() {
-    let env = env();
-    cmd(&env, &["import"]).assert().success();
-    let database = env.plus.join("data.db");
-    let attachment_chars = || -> i64 {
-        rusqlite::Connection::open(&database)
-            .unwrap()
-            .query_row("SELECT chars FROM attachments", [], |r| r.get(0))
-            .unwrap()
-    };
-    assert_eq!(attachment_chars(), "- demo: does demo things".len() as i64);
-    {
-        let conn = rusqlite::Connection::open(&database).unwrap();
-        conn.execute("UPDATE attachments SET chars = 999", [])
-            .unwrap();
-        conn.pragma_update(None, "user_version", 5).unwrap();
-    }
-    cmd(&env, &["import"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("0 new requests"));
-    assert_eq!(attachment_chars(), "- demo: does demo things".len() as i64);
-    assert_eq!(stdout_of(&env, &["stats", "--days", "3"]), STATS_TABLE);
-}
-
-#[test]
-fn doctor_reports_a_pending_rebuild() {
-    let env = env();
-    cmd(&env, &["import"]).assert().success();
-    rusqlite::Connection::open(env.plus.join("data.db"))
-        .unwrap()
-        .execute(
-            "INSERT INTO meta (key, value) VALUES ('rederive_pending', 'yes')",
-            [],
-        )
-        .unwrap();
-    let doctor = stdout_of(&env, &["doctor"]);
-    assert!(
-        doctor.ends_with("  Database:    rebuild pending, run claude-plus import\n"),
-        "{doctor}"
-    );
-    cmd(&env, &["import"]).assert().success();
-    assert!(stdout_of(&env, &["doctor"]).contains("Cross-check:"));
 }
 
 #[test]

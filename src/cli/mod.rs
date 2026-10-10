@@ -10,7 +10,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
-use crate::store::{Store, Upgrade};
+use crate::store::Store;
 
 #[derive(Parser)]
 #[command(
@@ -55,7 +55,6 @@ fn progress_bar(verb: &str) -> Result<ProgressBar> {
 }
 
 const LABEL_WIDTH: usize = 13;
-const SPINNER_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 
 fn labeled(label: &str, value: &str) -> String {
     format!("  {label:<LABEL_WIDTH$}{value}")
@@ -74,34 +73,5 @@ fn transcripts_missing(paths: &Paths) -> bool {
 
 fn open_store(paths: &Paths) -> Result<Store> {
     paths.ensure_data_dir()?;
-    let mut shown: Option<ProgressBar> = None;
-    let store = Store::open_with_progress(&paths.database(), &mut |event| match event {
-        Upgrade::Records { done, total } => {
-            let bar = shown.get_or_insert_with(|| {
-                ProgressBar::new(total).with_style(
-                    ProgressStyle::with_template(
-                        "✻ Upgrading stored records {human_pos}/{human_len} {wide_bar}",
-                    )
-                    .expect("valid template"),
-                )
-            });
-            bar.set_position(done);
-        }
-        Upgrade::Compacting => {
-            if let Some(bar) = shown.take() {
-                bar.finish_and_clear();
-            }
-            let spinner = ProgressBar::new_spinner()
-                .with_style(
-                    ProgressStyle::with_template("✻ {msg} {spinner}").expect("valid template"),
-                )
-                .with_message("Compacting the database, this runs once");
-            spinner.enable_steady_tick(SPINNER_TICK);
-            shown = Some(spinner);
-        }
-    });
-    if let Some(bar) = shown {
-        bar.finish_and_clear();
-    }
-    store
+    Store::open(&paths.database())
 }

@@ -1,13 +1,6 @@
-use super::upgrade::redact_stored_records;
+pub const PRE_RELEASE_VERSIONS: std::ops::RangeInclusive<usize> = 1..=6;
 
-pub enum Migration {
-    Sql(&'static str),
-    Rust(super::upgrade::Step),
-}
-
-pub const MIGRATIONS: &[Migration] = &[
-    Migration::Sql(
-        r#"
+pub const MIGRATIONS: &[&str] = &[r#"
 CREATE TABLE files (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -15,7 +8,9 @@ CREATE TABLE files (
     lines INTEGER NOT NULL DEFAULT 0,
     size INTEGER NOT NULL DEFAULT 0,
     mtime INTEGER NOT NULL DEFAULT 0,
-    parse_errors INTEGER NOT NULL DEFAULT 0
+    parse_errors INTEGER NOT NULL DEFAULT 0,
+    head_len INTEGER NOT NULL DEFAULT 0,
+    head_hash INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE raw_records (
     file_id INTEGER NOT NULL REFERENCES files(id),
@@ -92,24 +87,12 @@ CREATE TABLE cost_states (
     file_id INTEGER NOT NULL,
     line_no INTEGER NOT NULL,
     session_id TEXT NOT NULL,
-    total_cost_usd REAL NOT NULL,
+    total_cost_usd REAL,
+    model_count INTEGER NOT NULL,
     json TEXT NOT NULL,
     PRIMARY KEY (file_id, line_no)
 );
-CREATE TABLE meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-"#,
-    ),
-    Migration::Sql(
-        r#"
-ALTER TABLE files ADD COLUMN head_len INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE files ADD COLUMN head_hash INTEGER NOT NULL DEFAULT 0;
-"#,
-    ),
-    Migration::Sql(
-        r#"
+CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no);
 CREATE TABLE adjustments (
     session_id TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -122,42 +105,20 @@ CREATE TABLE adjustments (
     PRIMARY KEY (session_id, model, ts)
 );
 CREATE INDEX adjustments_by_ts ON adjustments(ts);
-CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no);
-"#,
-    ),
-    Migration::Sql(
-        r#"
-CREATE TABLE cost_states_v4 (
-    file_id INTEGER NOT NULL,
-    line_no INTEGER NOT NULL,
-    session_id TEXT NOT NULL,
-    total_cost_usd REAL,
-    model_count INTEGER NOT NULL,
-    json TEXT NOT NULL,
-    PRIMARY KEY (file_id, line_no)
+CREATE TABLE meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
-INSERT INTO cost_states_v4 (file_id, line_no, session_id, total_cost_usd, model_count, json)
-SELECT file_id, line_no, session_id,
-       CASE WHEN json_type(json, '$.totalCostUSD') IN ('integer', 'real')
-            THEN json_extract(json, '$.totalCostUSD') END,
-       CASE WHEN json_type(json, '$.modelUsage') = 'object'
-            THEN (SELECT COUNT(*) FROM json_each(cost_states.json, '$.modelUsage') AS usage WHERE usage.type = 'object')
-            ELSE 0 END,
-       json
-FROM cost_states;
-DROP TABLE cost_states;
-ALTER TABLE cost_states_v4 RENAME TO cost_states;
-CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no);
-"#,
-    ),
-    Migration::Rust(redact_stored_records),
-    Migration::Sql(
-        r#"
-INSERT OR REPLACE INTO meta (key, value)
-SELECT 'rederive_pending', 'yes' WHERE EXISTS (SELECT 1 FROM raw_records);
-"#,
-    ),
-];
+"#];
+
+pub fn version_of(index: usize) -> usize {
+    PRE_RELEASE_VERSIONS.end() + index + 1
+}
+
+pub fn next_migration(version: usize) -> Option<(usize, &'static str)> {
+    let index = version.saturating_sub(*PRE_RELEASE_VERSIONS.end());
+    MIGRATIONS.get(index).map(|sql| (version_of(index), *sql))
+}
 
 pub const DERIVED_TABLES: &[&str] = &[
     "requests",

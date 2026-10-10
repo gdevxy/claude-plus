@@ -66,13 +66,6 @@ fn readable_store(paths: &Paths) -> Result<Option<Store>> {
         println!("{}", labeled("Database:", &value));
         return Ok(None);
     }
-    if store.rederive_pending()? {
-        println!(
-            "{}",
-            labeled("Database:", "rebuild pending, run claude-plus import")
-        );
-        return Ok(None);
-    }
     Ok(Some(store))
 }
 
