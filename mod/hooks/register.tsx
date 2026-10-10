@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 'claude-code'
 
-import type { Daemon, Local, Motion, PlusView, Snapshot } from '../types'
+import type { Daemon, Local, Motion, PaneState, PlusView, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
 import { Outbox, eventId, eventsBody, fetchSnapshot, measureOf, send, socketPath } from './client'
 import {
@@ -28,8 +28,9 @@ export const SERVICE_UNAVAILABLE = 503
 export const STUCK_POST_MS = 30_000
 
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
-const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null)
-const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local)
+const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
+const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-1' })
+const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false } as PaneState)
 const daemon = atom({ plugin: 'plus', key: 'daemon' } as const, { status: 'starting', detail: null } as Daemon)
 const now = atom({ plugin: 'plus', key: 'now' } as const, 0)
 const expanded = atom({ plugin: 'plus', key: 'expanded' } as const, [] as string[])
@@ -214,9 +215,16 @@ function ensureDaemon($: EngineInterface): Promise<void> {
   return runtime.ensuring
 }
 
-async function open($: EngineInterface): Promise<string> {
+async function open($: EngineInterface, fullscreen: boolean): Promise<string> {
   const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE })
-  return opened.isPlaced ? '✻ claude-plus is open beside the conversation' : `✻ claude-plus will show once there is room: ${opened.reason}`
+  if (!opened.isPlaced) return `✻ claude-plus will show once there is room: ${opened.reason}`
+  return fullscreen ? '✻ claude-plus is open beside the conversation' : '✻ claude-plus is open above the prompt'
+}
+
+async function closeUnasked($: EngineInterface): Promise<void> {
+  if ((await read($, pane)).asked) return
+  await $.store.set(FULLSCREEN_KEY, false)
+  await $.ui.close({ id: PANE_ID })
 }
 
 export const register: Register = (on, options) => {
@@ -229,8 +237,10 @@ export const register: Register = (on, options) => {
     const model = await $.session.model()
     await update($, local, known => ({ ...known, session: id, model }))
     void ensureDaemon($)
+    if ((await read($, pane)).session === id) return next(e)
+    await update($, pane, (): PaneState => ({ session: id, asked: false }))
     void forward($, 'session.start', { cwd: e.cwd, surface: e.surface, interactive: e.isInteractive })
-    if (e.isInteractive && (await $.store.get(FULLSCREEN_KEY)) !== false) void open($)
+    if (e.isInteractive && (await $.store.get(FULLSCREEN_KEY)) === true) void open($, true)
     return next(e)
   })
 
@@ -238,7 +248,8 @@ export const register: Register = (on, options) => {
     ensureTimers($)
     void ensureDaemon($)
     await $.store.set(FULLSCREEN_KEY, e.presentation.isFullscreen)
-    return { text: await open($) }
+    await update($, pane, known => ({ ...known, asked: true }))
+    return { text: await open($, e.presentation.isFullscreen) }
   })
 
   on('turn.start', async ($, e, next) => {
@@ -323,6 +334,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
+    if (e.props.placement === 'inline' || e.viewport?.isFullscreen === false) $.clock.after(0, () => void closeUnasked($).catch(() => undefined))
     const nowMs = await read($, now)
     const current = await read($, view)
     const lines = screen({

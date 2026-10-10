@@ -18,6 +18,7 @@ type Wiring = {
   delivered: { url: string; init?: HttpInit }[]
   ran: (readonly string[])[]
   opened: string[]
+  closed: string[]
   statuses: (string | undefined)[]
 }
 
@@ -28,10 +29,10 @@ const MEASURE = {
   changed: ['context' as const],
 }
 
-function wire(on: On, overrides: Partial<Wiring> = {}): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], statuses: [], ...overrides }
+function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
+  const wiring: Wiring = { session: 's1', served: snapshot(), silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
   mock.env(on, { HOME: '/Users/me' })
-  mock.store(on)
+  mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.turns', () => ({ value: 14 }))
@@ -39,6 +40,10 @@ function wire(on: On, overrides: Partial<Wiring> = {}): Wiring {
   on('ui.open', ($, e) => {
     wiring.opened.push(e.id)
     return { value: { isPlaced: true } }
+  })
+  on('ui.close', ($, e) => {
+    wiring.closed.push(e.id)
+    return { value: undefined }
   })
   on('ui.status', ($, e) => {
     wiring.statuses.push(e.text)
@@ -69,14 +74,14 @@ async function start($: Engine): Promise<void> {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
 }
 
-async function mount($: Engine, columns: number) {
+async function mount($: Engine, columns: number, fullscreen = true) {
   return $.ui.mount({
     plugin: 'plus',
     surface: 'terminal',
     component: 'Pane',
     requestId: 'plus',
-    props: { title: 'claude-plus', isFocused: true, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
-    viewport: { columns: columns + 100, rows: 50, isFullscreen: true },
+    props: { title: 'claude-plus', isFocused: true, bodyColumns: columns, placement: fullscreen ? 'dock' : 'inline', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+    viewport: { columns: fullscreen ? columns + 100 : columns + 2, rows: 50, isFullscreen: fullscreen },
   })
 }
 
@@ -113,10 +118,62 @@ describe('plus mod', () => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)
     const out = await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
-    expect(out.text).toBe('✻ claude-plus is open beside the conversation')
+    expect(out.text).toBe('✻ claude-plus is open above the prompt')
     await start($)
     await clock.settle()
     expect(wiring.opened).toEqual(['plus'])
+  })
+
+  test('/plus on a wide fullscreen terminal says the pane is beside the conversation', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on, {}, {})
+    const out = await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+    await clock.settle()
+    expect(out.text).toBe('✻ claude-plus is open beside the conversation')
+  })
+
+  test('the first session leaves the pane closed until the layout is known', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, {}, {})
+    await start($)
+    await clock.settle()
+    expect(wiring.opened).toEqual([])
+  })
+
+  test('a pane opened unasked that lands on the main screen closes and stays closed', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 60, false)
+    await clock.settle()
+    expect([wiring.opened, wiring.closed]).toEqual([['plus'], ['plus']])
+    await ui.unmount()
+    wiring.session = 's2'
+    await start($)
+    await clock.settle()
+    expect(wiring.opened).toEqual(['plus'])
+  })
+
+  test('a pane the person asked for on the main screen stays open', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, {}, {})
+    await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+    const ui = await mount($, 60, false)
+    await clock.settle()
+    expect(wiring.closed).toEqual([])
+    await ui.unmount()
+  })
+
+  test('a reload neither opens the pane again nor forwards a second start for the session', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    await start($)
+    await clock.advance(1000)
+    expect(wiring.opened).toEqual(['plus'])
+    expect(kinds(wiring)).toEqual(['session.start'])
   })
 
   test('/plus after a hot reload starts the ticker without a session start', async ($, on) => {

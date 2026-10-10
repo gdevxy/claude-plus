@@ -116,12 +116,15 @@ export type Daemon = { status: DaemonStatus; detail: string | null }
 
 export type Motion = { from: number; to: number; startMs: number }
 
+export type PaneState = { session: string | null; asked: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     plus: {
       view: PlusView
-      snapshot: Snapshot | null
-      local: Local
+      snapshot: Shaped<Snapshot | null>
+      local: Shaped<Local>
+      pane: PaneState
       daemon: Daemon
       now: number
       expanded: string[]
