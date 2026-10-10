@@ -84,6 +84,16 @@ mod tests {
     }
 
     #[test]
+    fn cache_writes_saturate_instead_of_overflowing() {
+        let counts = TokenCounts::from_usage(&json!({
+            "cache_creation_input_tokens": u64::MAX,
+            "cache_creation": {"ephemeral_1h_input_tokens": u64::MAX, "ephemeral_5m_input_tokens": u64::MAX}
+        }));
+        assert_eq!(counts.cache_write(), u64::MAX);
+        assert_eq!(counts.prompt_total(), u64::MAX);
+    }
+
+    #[test]
     fn null_usage_fields_are_zero() {
         let counts =
             TokenCounts::from_usage(&json!({"input_tokens": null, "cache_creation": null}));

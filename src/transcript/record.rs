@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::TokenCounts;
-use super::text::string_chars;
+use super::text::{string_chars, string_chars_except};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -123,6 +123,18 @@ const NON_PROMPT_PREFIXES: &[&str] = &[
 ];
 
 const SYNTHETIC_MODEL: &str = "<synthetic>";
+
+pub(crate) const ATTACHMENT_METADATA_KEYS: &[&str] = &[
+    "type",
+    "names",
+    "addedNames",
+    "removedNames",
+    "name",
+    "path",
+    "filePath",
+    "filename",
+    "displayPath",
+];
 
 impl AssistantRecord {
     pub fn is_billable(&self) -> bool {
@@ -283,7 +295,7 @@ fn attachment(raw: &Value) -> AttachmentRecord {
     AttachmentRecord {
         common: common(raw),
         kind: text(&body, "/type").unwrap_or_else(|| "unknown".to_string()),
-        chars: string_chars(&body),
+        chars: string_chars_except(&body, ATTACHMENT_METADATA_KEYS),
         names,
     }
 }
@@ -400,8 +412,14 @@ fn result_chars(content: &Value) -> u64 {
     match content {
         Value::Array(items) => items
             .iter()
-            .filter(|item| text(item, "/type").as_deref() == Some("text"))
-            .filter_map(|item| item.get("text"))
+            .filter_map(|item| match text(item, "/type").as_deref() {
+                Some("text") => item.get("text"),
+                Some("tool_reference") => item.get("tool_name"),
+                Some("document") if text(item, "/source/type").as_deref() == Some("text") => {
+                    item.pointer("/source/data")
+                }
+                _ => None,
+            })
             .map(string_chars)
             .fold(0, u64::saturating_add),
         other => string_chars(other),

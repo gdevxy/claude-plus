@@ -151,6 +151,12 @@ CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no)
 "#,
     ),
     Migration::Rust(redact_stored_records),
+    Migration::Sql(
+        r#"
+INSERT OR REPLACE INTO meta (key, value)
+SELECT 'rederive_pending', 'yes' WHERE EXISTS (SELECT 1 FROM raw_records);
+"#,
+    ),
 ];
 
 pub const DERIVED_TABLES: &[&str] = &[

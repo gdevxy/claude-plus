@@ -161,13 +161,92 @@ mod tests {
         };
         assert_eq!(a.kind, "skill_listing");
         assert_eq!(a.names, vec!["a".to_string()]);
-        assert_eq!(a.chars, "skill_listing".len() as u64 + 6 + 1);
+        assert_eq!(a.chars, 6);
 
         let instructions = r#"{"type":"attachment","sessionId":"s1","attachment":{"type":"instructions","files":[{"path":"/h/CLAUDE.md","type":"User","content":"rules"}]}}"#;
         let Record::Attachment(a) = parse_line(instructions).unwrap().record else {
             panic!()
         };
         assert_eq!(a.names, vec!["/h/CLAUDE.md".to_string()]);
+        assert_eq!(a.chars, 5);
+
+        let delta = r#"{"type":"attachment","attachment":{"type":"deferred_tools_delta","addedNames":["Read","Bash"],"entries":[{"name":"skill-a","description":"does a"}],"path":"/h/notes.md","content":"body"}}"#;
+        let Record::Attachment(a) = parse_line(delta).unwrap().record else {
+            panic!()
+        };
+        assert_eq!(
+            a.names,
+            vec!["Read", "Bash", "skill-a", "/h/notes.md"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(a.chars, "does a".len() as u64 + "body".len() as u64);
+    }
+
+    #[test]
+    fn tool_result_text_documents_and_references_are_counted() {
+        let line = serde_json::json!({"type":"user","message":{"role":"user","content":[{
+        "type":"tool_result","tool_use_id":"t","content":[
+            {"type":"text","text":"abc"},
+            {"type":"document","source":{"type":"text","media_type":"text/plain","data":"hello"}},
+            {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"QUJD"}},
+            {"type":"tool_reference","tool_name":"mcp__x__y"}
+        ]}]}});
+        let Record::User(u) = parse_value(line).unwrap().record else {
+            panic!()
+        };
+        assert_eq!(u.tool_results[0].chars, 3 + 5 + 9);
+    }
+
+    #[test]
+    fn parses_attribution_effort_and_agent_fields() {
+        let line = ASSISTANT
+            .replace(
+                r#""isSidechain":false"#,
+                r#""isSidechain":true,"agentId":"a7""#,
+            )
+            .replace(
+                r#""effort":"high""#,
+                r#""effort":"high","perTurnEffort":"low","attributionMcpServer":"context7""#,
+            );
+        let Record::Assistant(a) = parse_line(&line).unwrap().record else {
+            panic!()
+        };
+        assert_eq!(a.effort.as_deref(), Some("low"));
+        assert_eq!(a.mcp_server.as_deref(), Some("context7"));
+        assert_eq!(a.common.agent_id.as_deref(), Some("a7"));
+        assert!(a.common.is_sidechain);
+        assert_eq!(a.common.cwd.as_deref(), Some("/w"));
+    }
+
+    #[test]
+    fn thinking_only_assistant_records_are_billable_without_tools() {
+        let line = r#"{"type":"assistant","requestId":"r","message":{"model":"claude-opus-5-5","content":[{"type":"thinking","thinking":"hmm","signature":"sig"}],"usage":{"input_tokens":1,"output_tokens":9}}}"#;
+        let Record::Assistant(a) = parse_line(line).unwrap().record else {
+            panic!()
+        };
+        assert!(a.tool_uses.is_empty());
+        assert!(a.is_billable());
+        assert_eq!(a.usage.output, 9);
+    }
+
+    #[test]
+    fn ai_titles_are_not_custom() {
+        let Record::Title(t) =
+            parse_line(r#"{"type":"ai-title","sessionId":"s1","aiTitle":"Fix the parser"}"#)
+                .unwrap()
+                .record
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (t.title.as_str(), t.is_custom, t.session_id.as_deref()),
+            ("Fix the parser", false, Some("s1"))
+        );
+        let untitled = parse_line(r#"{"type":"ai-title","sessionId":"s1"}"#).unwrap();
+        assert_eq!(untitled.record.kind(), "ai-title");
+        assert!(matches!(untitled.record, Record::Other { .. }));
     }
 
     #[test]
@@ -229,12 +308,20 @@ mod tests {
             "[1,2]",
             "42",
             "{\"type\":",
+            "\"text\"",
+            "null",
+        ] {
+            assert!(parse_line(line).is_err(), "{line}");
+        }
+        for line in [
+            "{}",
             "{\"type\":17}",
             r#"{"type":"attachment","attachment":[{"$chars":18446744073709551615},{"$chars":1}]}"#,
             r#"{"type":"assistant","message":{"usage":{"input_tokens":18446744073709551615,"cache_read_input_tokens":18446744073709551615}}}"#,
             "{\"message\":{\"usage\":\"x\"},\"type\":\"assistant\"}",
+            r#"{"type":"user","message":{"content":{"$chars":"x"}}}"#,
         ] {
-            let _ = parse_line(line);
+            assert!(parse_line(line).is_ok(), "{line}");
         }
         assert!(matches!(parse_line("[1]"), Err(ParseError::NotAnObject)));
         assert!(matches!(

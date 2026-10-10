@@ -276,6 +276,8 @@ impl Writer<'_> {
         for table in super::schema::DERIVED_TABLES {
             self.tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
+        self.tx
+            .execute("DELETE FROM meta WHERE key = ?1", [super::REDERIVE_PENDING])?;
         Ok(())
     }
 

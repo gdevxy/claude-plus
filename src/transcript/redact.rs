@@ -1,22 +1,12 @@
 use serde_json::{Map, Value, json};
 
+use super::record::ATTACHMENT_METADATA_KEYS;
 use super::text::{SHRUNK_KEY, shrink};
 
 pub const RAW_STRING_LIMIT: usize = 2048;
 pub const TOOL_INPUT_LIMIT: usize = 256;
 
 const STRUCTURE_KEYS: &[&str] = &["type"];
-const ATTACHMENT_KEPT_KEYS: &[&str] = &[
-    "type",
-    "names",
-    "addedNames",
-    "removedNames",
-    "name",
-    "path",
-    "filePath",
-    "filename",
-    "displayPath",
-];
 const CONTENT_BLOCKS: &[&str] = &["text", "thinking", "redacted_thinking", "image", "document"];
 const TOOL_USE_BLOCKS: &[&str] = &["tool_use", "server_tool_use"];
 
@@ -30,7 +20,7 @@ pub fn redact(raw: &Value) -> Value {
                 redact_fields(record, &["toolUseResult"], STRUCTURE_KEYS);
             }
             Some("attachment") => {
-                redact_fields(record, &["attachment"], ATTACHMENT_KEPT_KEYS);
+                redact_fields(record, &["attachment"], ATTACHMENT_METADATA_KEYS);
                 redact_fields(record, &["rendered", "renderedInHumanTurn"], STRUCTURE_KEYS);
             }
             Some("system") => redact_fields(record, &["content", "prompt"], STRUCTURE_KEYS),

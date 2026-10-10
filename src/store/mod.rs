@@ -18,6 +18,7 @@ pub use upgrade::Upgrade;
 pub use writer::*;
 
 pub(crate) const GENERATION_MARK: &str = "#gen-";
+const REDERIVE_PENDING: &str = "rederive_pending";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
@@ -276,6 +277,18 @@ impl Store {
 
     pub fn raw_records(&self, file_id: i64, kinds: &[&str]) -> Result<Vec<RawRow>> {
         raw_records(&self.conn, file_id, kinds)
+    }
+
+    pub fn rederive_pending(&self) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM meta WHERE key = ?1",
+                [REDERIVE_PENDING],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     pub fn parse_error_total(&self) -> Result<u64> {
@@ -863,7 +876,11 @@ mod tests {
                 Upgrade::Compacting
             ]
         );
-        assert_eq!(store.dump("meta"), Vec::<String>::new());
+        assert_eq!(
+            store.dump("meta"),
+            vec![r#"Text("rederive_pending")|Text("yes")"#]
+        );
+        assert!(store.rederive_pending().unwrap());
     }
 
     #[test]

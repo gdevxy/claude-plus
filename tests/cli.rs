@@ -591,7 +591,10 @@ fn import_upgrades_an_older_database_quietly() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!((version, leaked), (5, 0));
+    assert_eq!(
+        (version, leaked),
+        (claude_plus::store::Store::latest_schema_version() as i64, 0)
+    );
 }
 
 #[test]
@@ -694,4 +697,50 @@ fn stats_columns_share_one_precision_with_aligned_decimals() {
   includes $0.0111 reconciled from Claude Code session counters
 "
     );
+}
+
+#[test]
+fn import_rebuilds_derived_rows_after_upgrading_from_v5() {
+    let env = env();
+    cmd(&env, &["import"]).assert().success();
+    let database = env.plus.join("data.db");
+    let attachment_chars = || -> i64 {
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .query_row("SELECT chars FROM attachments", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(attachment_chars(), "- demo: does demo things".len() as i64);
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute("UPDATE attachments SET chars = 999", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
+    }
+    cmd(&env, &["import"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0 new requests"));
+    assert_eq!(attachment_chars(), "- demo: does demo things".len() as i64);
+    assert_eq!(stdout_of(&env, &["stats", "--days", "3"]), STATS_TABLE);
+}
+
+#[test]
+fn doctor_reports_a_pending_rebuild() {
+    let env = env();
+    cmd(&env, &["import"]).assert().success();
+    rusqlite::Connection::open(env.plus.join("data.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO meta (key, value) VALUES ('rederive_pending', 'yes')",
+            [],
+        )
+        .unwrap();
+    let doctor = stdout_of(&env, &["doctor"]);
+    assert!(
+        doctor.ends_with("  Database:    rebuild pending, run claude-plus import\n"),
+        "{doctor}"
+    );
+    cmd(&env, &["import"]).assert().success();
+    assert!(stdout_of(&env, &["doctor"]).contains("Cross-check:"));
 }
