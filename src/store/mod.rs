@@ -1,4 +1,5 @@
 mod events;
+mod limits;
 mod reconcile;
 mod schema;
 mod session;
@@ -16,6 +17,7 @@ use rusqlite::{
 
 use crate::transcript::location::Location;
 pub use events::{EventRow, StoredEvent};
+pub use limits::{LimitSample, RESETS_AT_TOLERANCE_MS, SpendPoint};
 pub use reconcile::Reconciliation;
 pub use session::{ModelTotal, SessionTotals};
 pub use timeline::{PREFIX_KINDS, RequestPoint};
@@ -1121,7 +1123,7 @@ mod tests {
                 })
                 .collect();
             for open in opens {
-                assert_eq!(open.join().unwrap().unwrap(), 8);
+                assert_eq!(open.join().unwrap().unwrap(), 9);
             }
         });
     }
@@ -1154,8 +1156,8 @@ mod tests {
     #[test]
     fn a_new_store_is_at_the_latest_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 8);
-        assert_eq!(Store::latest_schema_version(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
+        assert_eq!(Store::latest_schema_version(), 9);
     }
 
     #[test]
@@ -1171,9 +1173,10 @@ mod tests {
             w.commit().unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
         assert_eq!(store.totals().unwrap().requests, 1);
         assert_eq!(store.dump("events"), Vec::<String>::new());
+        assert_eq!(store.dump("limit_samples"), Vec::<String>::new());
     }
 
     #[test]

@@ -270,7 +270,7 @@ mod tests {
         Health {
             v: 1,
             version: version.into(),
-            schema: 8,
+            schema: 9,
             pid: 42,
             uptime_s: 1,
             claude_dir: "/c".into(),

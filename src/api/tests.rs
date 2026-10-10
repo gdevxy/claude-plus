@@ -100,7 +100,7 @@ fn health_reports_version_schema_and_ingest_state() {
     let health = server.client().health().unwrap();
     assert_eq!(
         (health.v, health.version.as_str(), health.schema, health.pid),
-        (1, env!("CARGO_PKG_VERSION"), 8, std::process::id())
+        (1, env!("CARGO_PKG_VERSION"), 9, std::process::id())
     );
     assert_eq!(
         health.claude_dir,

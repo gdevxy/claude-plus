@@ -122,6 +122,18 @@ CREATE TABLE events (
 );
 CREATE INDEX events_by_session_kind ON events(session_id, kind, ts_ms);
 "#,
+    r#"
+CREATE TABLE limit_samples (
+    id INTEGER PRIMARY KEY,
+    ts_ms INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    model TEXT,
+    window TEXT NOT NULL,
+    used_pct REAL NOT NULL,
+    resets_at_ms INTEGER
+);
+CREATE INDEX limit_samples_by_window ON limit_samples(window, ts_ms);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {
