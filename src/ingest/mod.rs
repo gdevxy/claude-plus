@@ -90,7 +90,7 @@ impl<'a> Ingestor<'a> {
         }
         let reconciliation = self
             .store
-            .ensure_reconciled(self.prices, report.files_changed > 0)
+            .reconcile(self.prices)
             .context("reconciling with Claude Code counters")?;
         report.reconciliation = Some(reconciliation);
         Ok(report)
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_import_keeps_existing_reconciliation() {
+    fn every_import_rebuilds_adjustments() {
         let fx = Fixture::new();
         let line = assistant(
             "s1",
@@ -469,12 +469,8 @@ mod tests {
 
         let unchanged = fx.run(&mut store);
         assert_eq!(unchanged.files_changed, 0);
-        assert!((unchanged.reconciliation.unwrap().adjusted_usd - 0.01).abs() < 1e-12);
-        assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
-
-        fx.append("-w-proj/s1.jsonl", "{\"type\":\"queue-operation\"}\n");
-        let changed = fx.run(&mut store);
-        assert!((changed.reconciliation.unwrap().adjusted_usd - 0.02).abs() < 1e-12);
+        assert!((unchanged.reconciliation.unwrap().adjusted_usd - 0.02).abs() < 1e-12);
+        assert!((store.totals().unwrap().reconciled_usd - 0.02).abs() < 1e-12);
     }
 
     #[test]

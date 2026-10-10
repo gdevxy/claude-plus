@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, TimeZone};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 pub use reconcile::Reconciliation;
 pub use writer::*;
@@ -81,28 +81,56 @@ impl Store {
         Self::migrated(conn)
     }
 
-    pub fn open_in_memory() -> Result<Self> {
-        Self::migrated(Connection::open_in_memory()?)
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("cannot open {}", path.display()))?;
+        let store = Self { conn };
+        store.refuse_newer_schema()?;
+        Ok(store)
     }
 
-    fn migrated(mut conn: Connection) -> Result<Self> {
-        let current: usize =
-            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? as usize;
-        let latest = schema::MIGRATIONS.len();
+    pub fn schema_version(&self) -> Result<usize> {
+        Ok(self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? as usize)
+    }
+
+    pub fn latest_schema_version() -> usize {
+        schema::MIGRATIONS.len()
+    }
+
+    fn refuse_newer_schema(&self) -> Result<()> {
+        let current = self.schema_version()?;
+        let latest = Self::latest_schema_version();
         if current > latest {
             bail!(
                 "database schema v{current} is newer than this claude-plus supports (v{latest}); upgrade claude-plus"
             );
         }
+        Ok(())
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        Self::migrated(Connection::open_in_memory()?)
+    }
+
+    fn migrated(conn: Connection) -> Result<Self> {
+        let mut store = Self { conn };
+        store.refuse_newer_schema()?;
+        let current = store.schema_version()?;
+        let latest = Self::latest_schema_version();
         if current < latest {
-            let tx = conn.transaction()?;
+            let tx = store.conn.transaction()?;
             for migration in &schema::MIGRATIONS[current..] {
                 tx.execute_batch(migration)?;
             }
             tx.pragma_update(None, "user_version", latest as i64)?;
             tx.commit()?;
         }
-        Ok(Self { conn })
+        Ok(store)
     }
 
     pub fn writer(&mut self) -> Result<Writer<'_>> {
@@ -659,14 +687,32 @@ mod tests {
             .unwrap()
             .pragma_update(None, "user_version", 99)
             .unwrap();
-        let error = Store::open(&path).err().expect("must refuse").to_string();
-        assert_eq!(
-            error,
-            format!(
-                "database schema v99 is newer than this claude-plus supports (v{}); upgrade claude-plus",
-                schema::MIGRATIONS.len()
-            )
+        let expected = format!(
+            "database schema v99 is newer than this claude-plus supports (v{}); upgrade claude-plus",
+            schema::MIGRATIONS.len()
         );
+        let error = Store::open(&path).err().expect("must refuse").to_string();
+        assert_eq!(error, expected);
+        let error = Store::open_read_only(&path)
+            .err()
+            .expect("must refuse")
+            .to_string();
+        assert_eq!(error, expected);
+    }
+
+    #[test]
+    fn read_only_open_neither_creates_nor_migrates() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        assert!(Store::open_read_only(&path).is_err());
+        assert!(!path.exists());
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 1)
+            .unwrap();
+        let store = Store::open_read_only(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 1);
+        assert_eq!(Store::latest_schema_version(), schema::MIGRATIONS.len());
     }
 
     #[cfg(unix)]

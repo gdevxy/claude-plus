@@ -449,19 +449,91 @@ fn doctor_lists_counter_only_unpriced_models() {
     assert_eq!(stdout_of(&env, &["doctor"]), expected);
 }
 
+struct FileState {
+    user_version: i64,
+    size: u64,
+    modified: std::time::SystemTime,
+}
+
+fn file_state(database: &Path) -> FileState {
+    let metadata = std::fs::metadata(database).unwrap();
+    let user_version =
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+    FileState {
+        user_version,
+        size: metadata.len(),
+        modified: metadata.modified().unwrap(),
+    }
+}
+
 #[test]
-fn doctor_does_not_write_to_the_database() {
+fn doctor_leaves_an_older_database_untouched() {
     let env = env();
     cmd(&env, &["import"]).assert().success();
     let database = env.plus.join("data.db");
     rusqlite::Connection::open(&database)
         .unwrap()
-        .execute("DELETE FROM adjustments", [])
+        .execute_batch(
+            "DROP TABLE adjustments; DROP INDEX cost_states_by_session; PRAGMA user_version = 2;",
+        )
         .unwrap();
-    cmd(&env, &["doctor"]).assert().success();
-    let remaining: i64 = rusqlite::Connection::open(&database)
-        .unwrap()
+    let before = file_state(&database);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let doctor = stdout_of(&env, &["doctor"]);
+    assert!(
+        doctor.ends_with("  Database:    schema v2, run claude-plus import to upgrade\n"),
+        "{doctor}"
+    );
+    let after = file_state(&database);
+    assert_eq!(after.user_version, 2);
+    assert_eq!((after.size, after.modified), (before.size, before.modified));
+}
+
+#[test]
+fn doctor_on_a_fresh_home_creates_nothing() {
+    let env = env();
+    let expected = format!(
+        "✻ claude-plus doctor
+  Claude dir:  {claude} · 4 transcript files
+  Data dir:    {plus}
+  Retention:   cleanupPeriodDays: 30 (default)
+               Claude Code deletes older transcripts, claude-plus keeps its own copy
+  Price table: bundled prices 2026-10-10
+  Database:    not created yet, run claude-plus import
+",
+        claude = env.claude.display(),
+        plus = env.plus.display()
+    );
+    assert_eq!(stdout_of(&env, &["doctor"]), expected);
+    assert!(!env.plus.exists());
+}
+
+#[test]
+fn doctor_reads_a_database_with_live_wal_files() {
+    let env = env();
+    cmd(&env, &["import"]).assert().success();
+    let database = env.plus.join("data.db");
+    let writer = rusqlite::Connection::open(&database).unwrap();
+    writer
+        .execute(
+            "DELETE FROM adjustments WHERE model = 'claude-haiku-4-5-20251001'",
+            [],
+        )
+        .unwrap();
+    assert!(env.plus.join("data.db-wal").exists());
+    assert!(env.plus.join("data.db-shm").exists());
+    let doctor = stdout_of(&env, &["doctor"]);
+    assert!(
+        doctor.ends_with(
+            "  Cross-check: 2 sessions · transcripts $0.0701 · Claude Code $0.0812 · reconciled $0.0801\n"
+        ),
+        "{doctor}"
+    );
+    let remaining: i64 = writer
         .query_row("SELECT COUNT(*) FROM adjustments", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(remaining, 0);
+    assert_eq!(remaining, 1);
 }

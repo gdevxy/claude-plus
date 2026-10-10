@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use super::{Store, Writer};
 use crate::pricing::{PriceTable, normalize_model};
@@ -9,7 +9,6 @@ use crate::transcript::{ModelUsage, Record, TokenCounts, parse_line};
 
 const OVERAGE_TOLERANCE: f64 = 1.01;
 const BUCKET_SECONDS: i64 = 3600;
-const RECONCILED_PRICES_KEY: &str = "reconciled_with_prices";
 pub(super) const LATEST_COST_STATE: &str = "NOT EXISTS (SELECT 1 FROM cost_states later
     WHERE later.session_id = c.session_id AND (later.file_id, later.line_no) > (c.file_id, c.line_no))";
 
@@ -28,26 +27,6 @@ impl Store {
         let reconciliation = rebuild(&tx, prices)?;
         tx.commit()?;
         Ok(reconciliation)
-    }
-
-    pub fn ensure_reconciled(
-        &mut self,
-        prices: &PriceTable,
-        data_changed: bool,
-    ) -> Result<Reconciliation> {
-        let reconciled_with: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                [RECONCILED_PRICES_KEY],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if data_changed || reconciled_with.as_deref() != Some(prices.version()) {
-            self.reconcile(prices)
-        } else {
-            self.reconciliation_summary()
-        }
     }
 
     pub fn reconciliation_summary(&self) -> Result<Reconciliation> {
@@ -179,10 +158,6 @@ fn rebuild(conn: &Connection, prices: &PriceTable) -> Result<Reconciliation> {
             ])?;
         }
     }
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [RECONCILED_PRICES_KEY, prices.version()],
-    )?;
     summary(conn)
 }
 

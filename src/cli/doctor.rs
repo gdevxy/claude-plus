@@ -5,6 +5,7 @@ use super::labeled;
 use crate::ingest::discover;
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
+use crate::store::Store;
 
 pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
     let files = discover(&paths.projects_dir())?;
@@ -37,7 +38,32 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
         )
     );
 
-    let store = super::open_store(paths)?;
+    match readable_store(paths)? {
+        Some(store) => print_database(&store),
+        None => Ok(()),
+    }
+}
+
+fn readable_store(paths: &Paths) -> Result<Option<Store>> {
+    let database = paths.database();
+    if !database.exists() {
+        println!(
+            "{}",
+            labeled("Database:", "not created yet, run claude-plus import")
+        );
+        return Ok(None);
+    }
+    let store = Store::open_read_only(&database)?;
+    let version = store.schema_version()?;
+    if version < Store::latest_schema_version() {
+        let value = format!("schema v{version}, run claude-plus import to upgrade");
+        println!("{}", labeled("Database:", &value));
+        return Ok(None);
+    }
+    Ok(Some(store))
+}
+
+fn print_database(store: &Store) -> Result<()> {
     let reconciliation = store.reconciliation_summary()?;
     let totals = store.totals()?;
     let imported = format!(
