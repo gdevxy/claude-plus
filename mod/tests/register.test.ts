@@ -12,6 +12,7 @@ type Wiring = {
   serving: 'current' | 'older' | 'newer'
   lag: (() => Promise<void>) | null
   openRefusal: string | null
+  resets: number
   silent: boolean
   holding: boolean
   held: (() => void)[]
@@ -124,7 +125,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), serving: 'current', lag: null, openRefusal: null, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), serving: 'current', lag: null, openRefusal: null, resets: 0, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -155,6 +156,10 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     if (wiring.lag !== null && e.url.includes('/snapshot')) await wiring.lag()
     if (wiring.holding && e.url.endsWith('/events')) await new Promise<void>(resolve => wiring.held.push(resolve))
     if (wiring.down) throw new Error('ECONNREFUSED')
+    if (wiring.resets > 0) {
+      wiring.resets -= 1
+      throw new Error('ECONNRESET')
+    }
     if (e.url.endsWith('/events')) wiring.delivered.push(e)
     if (wiring.rebuilding && e.url.includes('/snapshot')) return { value: { status: 503, ok: false, headers: {}, text: '{"error":"rebuilding"}' } }
     const body = e.url.includes('/snapshot') ? JSON.stringify(servedBody(wiring)) : '{"accepted":1,"rejected":[]}'
@@ -560,6 +565,19 @@ describe('plus mod', () => {
     await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
     await clock.settle()
     expect(wiring.ran).toHaveLength(3)
+  })
+
+  test('a connection the daemon closed while idle keeps the pane as it was', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    wiring.resets = 1
+    await clock.advance(3000)
+    const ui = await mount($, 40)
+    expect(await ui.find({ key: 'daemon' })).toBeUndefined()
+    expect((await ui.find({ key: 'headline' }))?.text).toContain('$4.18')
+    await ui.unmount()
   })
 
   test('a silent daemon is reported once the 500 ms timeout passes', async ($, on) => {

@@ -114,6 +114,24 @@ describe('daemon client', () => {
     expect([eventId('k3j', 1), eventId('k3j', 36)]).toEqual(['k3j-1', 'k3j-10'])
   })
 
+  test('a connection the daemon closed is tried once more before failing', async () => {
+    let calls = 0
+    const resetOnce: Io = {
+      fetch: () => (calls++ === 0 ? Promise.reject(new Error('ECONNRESET')) : Promise.resolve({ status: 200, ok: true, headers: {}, text: 'fine' })),
+      sleep: () => new Promise(() => undefined),
+    }
+    expect([await request(resetOnce, '/s.sock', '/health'), calls]).toEqual([{ ok: true, text: 'fine' }, 2])
+    let refused = 0
+    const down: Io = {
+      fetch: () => {
+        refused += 1
+        return Promise.reject(new Error('ECONNREFUSED'))
+      },
+      sleep: () => new Promise(() => undefined),
+    }
+    expect([await request(down, '/s.sock', '/health'), refused]).toEqual([{ ok: false, reason: 'ECONNREFUSED', status: null }, 2])
+  })
+
   test('the outbox keeps the newest events and retries in order', () => {
     const outbox = new Outbox()
     for (let n = 0; n < OUTBOX_LIMIT + 4; n += 1) outbox.add(event(n))

@@ -39,13 +39,16 @@ export function send(io: Io, socket: string, path: string, init: HttpInit = {}):
     (): Reply => ({ ok: false, reason: `no answer within ${TIMEOUT_MS} ms`, status: null, late: true }),
     (): Reply => ({ ok: false, reason: 'cancelled', status: null }),
   )
-  const answered = io.fetch(`${HOST}${path}`, { ...init, socketPath: socket }).then(
-    (response): Reply =>
-      response.ok
-        ? { ok: true, text: response.text }
-        : { ok: false, reason: `${response.status}: ${errorOf(response.text)}`, status: response.status },
-    (error: unknown): Reply => ({ ok: false, reason: error instanceof Error ? error.message : String(error), status: null }),
-  )
+  const attempt = () => io.fetch(`${HOST}${path}`, { ...init, socketPath: socket })
+  const answered = attempt()
+    .catch((error: unknown) => (stop.signal.aborted ? Promise.reject(error) : attempt()))
+    .then(
+      (response): Reply =>
+        response.ok
+          ? { ok: true, text: response.text }
+          : { ok: false, reason: `${response.status}: ${errorOf(response.text)}`, status: response.status },
+      (error: unknown): Reply => ({ ok: false, reason: error instanceof Error ? error.message : String(error), status: null }),
+    )
   const reply = Promise.race([answered, late]).then(first => {
     stop.abort()
     return first
