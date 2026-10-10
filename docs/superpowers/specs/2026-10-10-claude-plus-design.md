@@ -190,7 +190,10 @@ Mod events are the low-latency source for the Live view, and transcript records 
 
 Claude Code documents the transcript format as internal and subject to change, so the parser treats every field as optional and every unknown record type as opaque.
 
-- One API response is written as several `assistant` records, one per content block, each repeating the identical `message.usage`. Requests must be deduplicated on `requestId` (fallback `message.id`) before any cost aggregation.
+- One API response is written as several `assistant` records, one per content block, each repeating `message.usage`. Input and cache fields are identical across them, but about 20% of responses show `output_tokens` growing from record to record as the response streams. Requests must be deduplicated on `requestId` (fallback `message.id`, then `uuid`) before any cost aggregation, keeping the record with the highest `output_tokens`.
+- `message.usage.iterations` lists the API calls behind one response; it has more than one entry only for refusal fallbacks, where the top-level counts describe the final call. v1 uses the top-level counts.
+- `user` records that are not human prompts carry `isMeta`, `isCompactSummary` or `isVisibleInTranscriptOnly`, or start with tooling markers such as `<task-notification`, `<command-`, `<local-command`, `<system-reminder`, `[Request interrupted`.
+- `tool_result` content can contain base64 `image` blocks, which must be counted as images, never as text characters.
 - `message.usage.cache_creation` splits cache writes into `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, and `output_tokens_details.thinking_tokens` gives thinking tokens.
 - `assistant` records carry `attributionSkill`, `attributionMcpServer`, `attributionMcpTool`, `attributionPlugin`, `effort`, `perTurnEffort` and, when limited, `quotaLimits` (`status`, `rateLimitType`, `resetsAt`).
 - `attachment` records carry the actual injected context: `skill_listing` (content, names, skillCount), `instructions` (CLAUDE.md files with path, type and content), `nested_memory`, `mcp_instructions_delta`, `deferred_tools_record` and `deferred_tools_delta` (tool schemas), `agent_listing_delta`, `environment`, `invoked_skills`.
