@@ -28,7 +28,7 @@ pub fn incremental(
         bar.set_position(done as u64);
     })?;
     bar.finish_and_clear();
-    let reconciled = ingestor.reconcile();
+    let reconciled = ingestor.reconcile(&report);
     Ok((store, report, reconciled))
 }
 

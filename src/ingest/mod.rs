@@ -1,6 +1,7 @@
 mod discover;
 mod lines;
 
+use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -8,8 +9,8 @@ use anyhow::{Context, Result};
 
 use crate::pricing::PriceTable;
 use crate::store::{
-    AttachmentRow, Busy, CompactionRow, CostStateRow, FileProgress, Reconciliation, RequestRow,
-    RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
+    AttachmentRow, Busy, CompactionRow, CostStateRow, FileCheckpoint, FileProgress, Reconciliation,
+    RequestRow, RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
 };
 use crate::transcript::location::Location;
 use crate::transcript::redact::redact;
@@ -36,6 +37,7 @@ pub struct IngestReport {
     pub parse_errors: u64,
     pub files_vanished: u64,
     pub failures: Vec<(String, String)>,
+    pub sessions_touched: BTreeSet<String>,
 }
 
 impl IngestReport {
@@ -49,6 +51,8 @@ impl IngestReport {
         self.parse_errors += other.parse_errors;
         self.files_vanished += other.files_vanished;
         self.failures.extend(other.failures.iter().cloned());
+        self.sessions_touched
+            .extend(other.sessions_touched.iter().cloned());
     }
 }
 
@@ -103,9 +107,9 @@ impl<'a> Ingestor<'a> {
         Ok(report)
     }
 
-    pub fn reconcile(&mut self) -> Result<Reconciliation> {
+    pub fn reconcile(&mut self, report: &IngestReport) -> Result<Reconciliation> {
         self.store
-            .reconcile(self.prices)
+            .reconcile_sessions(self.prices, &report.sessions_touched)
             .context("reconciling with Claude Code counters")
     }
 
@@ -166,13 +170,12 @@ impl<'a> Ingestor<'a> {
             .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
             .unwrap_or(0);
         let path = file.path.to_string_lossy().into_owned();
+        if is_current(self.store.checkpoint(&path)?.as_ref(), size, mtime) {
+            return Ok(report);
+        }
         let mut writer = self.store.writer()?;
         let checkpoint = writer.checkpoint(&path)?;
-        if let Some(cp) = &checkpoint
-            && cp.size == size
-            && cp.mtime == mtime
-            && cp.offset == size
-        {
+        if is_current(checkpoint.as_ref(), size, mtime) {
             return Ok(report);
         }
 
@@ -249,6 +252,10 @@ impl<'a> Ingestor<'a> {
     }
 }
 
+fn is_current(checkpoint: Option<&FileCheckpoint>, size: u64, mtime: i64) -> bool {
+    checkpoint.is_some_and(|cp| cp.size == size && cp.mtime == mtime && cp.offset == size)
+}
+
 fn is_live_only(record: &Record) -> bool {
     matches!(record, Record::Attachment(_) | Record::CompactBoundary(_))
 }
@@ -322,6 +329,9 @@ pub fn derive(
                 }
                 RequestWrite::Updated | RequestWrite::Unchanged => report.duplicate_requests += 1,
             }
+            if write != RequestWrite::Unchanged {
+                report.sessions_touched.insert(session_id.clone());
+            }
             for tool in &a.tool_uses {
                 writer.tool_use(&ToolUseRow {
                     id: tool.id.clone(),
@@ -371,6 +381,7 @@ pub fn derive(
                 .session_id
                 .clone()
                 .unwrap_or_else(|| location.session_hint.clone());
+            report.sessions_touched.insert(session_id.clone());
             writer.cost_state(&CostStateRow {
                 file_id,
                 line_no,
@@ -451,7 +462,7 @@ mod tests {
             let prices = PriceTable::bundled();
             let mut ingestor = Ingestor::new(store, &prices);
             let report = ingestor.ingest_all(&self.projects, &mut |_, _| {}).unwrap();
-            (report, ingestor.reconcile().unwrap())
+            (report.clone(), ingestor.reconcile(&report).unwrap())
         }
     }
 
@@ -500,41 +511,111 @@ mod tests {
         assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
     }
 
+    fn adjusted_outputs(store: &Store) -> Vec<(String, String)> {
+        store
+            .dump("adjustments")
+            .iter()
+            .map(|row| {
+                let cells: Vec<&str> = row.split('|').collect();
+                (cells[0].to_string(), cells[4].to_string())
+            })
+            .collect()
+    }
+
     #[test]
-    fn every_import_rebuilds_adjustments() {
+    fn reconcile_rebuilds_only_the_sessions_an_import_touched() {
         let fx = Fixture::new();
-        let line = assistant(
-            "s1",
-            "req_1",
-            "2026-10-01T10:00:00Z",
-            "claude-sonnet-5-5",
-            r#"{"input_tokens":1,"output_tokens":3}"#,
-        );
-        let counter = |output: u64| {
-            format!(
-                r#"{{"type":"cost-state","sessionId":"s1","totalCostUSD":0.01,"modelUsage":{{"claude-sonnet-5-5":{{"inputTokens":1,"outputTokens":{output}}}}}}}"#
+        let request = |session: &str, id: &str, output: u64| {
+            assistant(
+                session,
+                id,
+                "2026-10-01T10:00:00Z",
+                "claude-sonnet-5-5",
+                &format!(r#"{{"input_tokens":1,"output_tokens":{output}}}"#),
             )
         };
-        let path = fx.write("-w-proj/s1.jsonl", &format!("{line}\n{}\n", counter(1003)));
+        let counter = |session: &str, output: u64| {
+            format!(
+                r#"{{"type":"cost-state","sessionId":"{session}","totalCostUSD":0.02,"modelUsage":{{"claude-sonnet-5-5":{{"inputTokens":1,"outputTokens":{output}}}}}}}"#
+            )
+        };
+        for session in ["s1", "s2"] {
+            fx.write(
+                &format!("-w-proj/{session}.jsonl"),
+                &format!(
+                    "{}\n{}\n",
+                    request(session, session, 3),
+                    counter(session, 1003)
+                ),
+            );
+        }
         let mut store = Store::open_in_memory().unwrap();
-        fx.run(&mut store);
+        let (first, _) = fx.run_reconciled(&mut store);
+        assert_eq!(
+            first.sessions_touched,
+            BTreeSet::from(["s1".to_string(), "s2".to_string()])
+        );
+
+        let s2 = fx.projects.join("-w-proj/s2.jsonl");
         let mut w = store.writer().unwrap();
-        let file_id = w.file(&path.to_string_lossy(), 0, 0).unwrap();
+        let file_id = w.file(&s2.to_string_lossy(), 0, 0).unwrap();
         w.cost_state(&CostStateRow {
             file_id,
             line_no: 99,
-            session_id: "s1".into(),
-            total_cost_usd: Some(0.02),
+            session_id: "s2".into(),
+            total_cost_usd: Some(0.05),
             model_count: 1,
-            json: counter(2003),
+            json: counter("s2", 5003),
         })
         .unwrap();
         w.commit().unwrap();
+        fx.append(
+            "-w-proj/s1.jsonl",
+            &format!("{}\n", request("s1", "s1-b", 500)),
+        );
 
-        let (unchanged, reconciliation) = fx.run_reconciled(&mut store);
-        assert_eq!(unchanged.files_changed, 0);
-        assert!((reconciliation.adjusted_usd - 0.02).abs() < 1e-12);
-        assert!((store.totals().unwrap().reconciled_usd - 0.02).abs() < 1e-12);
+        let (second, reconciliation) = fx.run_reconciled(&mut store);
+        assert_eq!(second.sessions_touched, BTreeSet::from(["s1".to_string()]));
+        assert_eq!(reconciliation.sessions_adjusted, 2);
+        assert_eq!(
+            adjusted_outputs(&store),
+            vec![
+                (r#"Text("s1")"#.into(), "Integer(500)".into()),
+                (r#"Text("s2")"#.into(), "Integer(1000)".into())
+            ]
+        );
+        store.reconcile(&PriceTable::bundled()).unwrap();
+        assert_eq!(adjusted_outputs(&store)[1].1, "Integer(5000)");
+    }
+
+    #[test]
+    fn unchanged_files_are_skipped_without_the_write_lock() {
+        let fx = Fixture::new();
+        fx.write(
+            "-w-proj/s1.jsonl",
+            &format!(
+                "{}\n",
+                assistant(
+                    "s1",
+                    "r1",
+                    "2026-10-01T10:00:00Z",
+                    "claude-opus-5-5",
+                    OPUS_USAGE
+                )
+            ),
+        );
+        let database = fx._temp.path().join("data.db");
+        let mut store = Store::open(&database).unwrap();
+        fx.run(&mut store);
+        let mut holder = Store::open(&database).unwrap();
+        let _held = holder.writer().unwrap();
+        store.set_busy_timeout(std::time::Duration::from_millis(10));
+        let (report, _) = fx.run_reconciled(&mut store);
+        assert_eq!(
+            (report.files_seen, report.files_changed, report.lines),
+            (1, 0, 0)
+        );
+        assert!(report.sessions_touched.is_empty());
     }
 
     #[test]

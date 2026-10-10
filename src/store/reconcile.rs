@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -27,6 +27,23 @@ impl Store {
     pub fn reconcile(&mut self, prices: &PriceTable) -> Result<Reconciliation> {
         let tx = super::begin_write(&mut self.conn)?;
         let reconciliation = rebuild(&tx, prices)?;
+        tx.commit()?;
+        Ok(reconciliation)
+    }
+
+    pub fn reconcile_sessions(
+        &mut self,
+        prices: &PriceTable,
+        sessions: &BTreeSet<String>,
+    ) -> Result<Reconciliation> {
+        if sessions.is_empty() {
+            return summary(&self.conn);
+        }
+        let tx = super::begin_write(&mut self.conn)?;
+        for session_id in sessions {
+            rebuild_session(&tx, prices, session_id)?;
+        }
+        let reconciliation = summary(&tx)?;
         tx.commit()?;
         Ok(reconciliation)
     }
@@ -140,27 +157,41 @@ struct Adjustment {
 
 fn rebuild(conn: &Connection, prices: &PriceTable) -> Result<Reconciliation> {
     conn.execute("DELETE FROM adjustments", [])?;
-    let mut insert = conn.prepare(
+    for counter in latest_counters(conn, None)? {
+        write_adjustments(conn, prices, &counter)?;
+    }
+    summary(conn)
+}
+
+fn rebuild_session(conn: &Connection, prices: &PriceTable, session_id: &str) -> Result<()> {
+    conn.prepare_cached("DELETE FROM adjustments WHERE session_id = ?1")?
+        .execute([session_id])?;
+    for counter in latest_counters(conn, Some(session_id))? {
+        write_adjustments(conn, prices, &counter)?;
+    }
+    Ok(())
+}
+
+fn write_adjustments(conn: &Connection, prices: &PriceTable, counter: &Counter) -> Result<()> {
+    let mut insert = conn.prepare_cached(
         "INSERT INTO adjustments (session_id, model, ts, input, output, cache_read, cache_write, cost_usd)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
-    for counter in latest_counters(conn)? {
-        let requests = session_requests(conn, &counter.session_id)?;
-        for adjustment in adjustments(&counter.model_usage, &requests) {
-            let t = adjustment.tokens;
-            insert.execute(params![
-                counter.session_id,
-                adjustment.model,
-                adjustment.ts,
-                t.input as i64,
-                t.output as i64,
-                t.cache_read as i64,
-                t.cache_write as i64,
-                t.priced(prices, &adjustment.model)
-            ])?;
-        }
+    let requests = session_requests(conn, &counter.session_id)?;
+    for adjustment in adjustments(&counter.model_usage, &requests) {
+        let t = adjustment.tokens;
+        insert.execute(params![
+            counter.session_id,
+            adjustment.model,
+            adjustment.ts,
+            t.input as i64,
+            t.output as i64,
+            t.cache_read as i64,
+            t.cache_write as i64,
+            t.priced(prices, &adjustment.model)
+        ])?;
     }
-    summary(conn)
+    Ok(())
 }
 
 fn summary(conn: &Connection) -> Result<Reconciliation> {
@@ -200,11 +231,14 @@ fn summary(conn: &Connection) -> Result<Reconciliation> {
     })
 }
 
-fn latest_counters(conn: &Connection) -> Result<Vec<Counter>> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT c.session_id, c.json FROM cost_states c WHERE {LATEST_COST_STATE} ORDER BY c.session_id"
+fn latest_counters(conn: &Connection, session_id: Option<&str>) -> Result<Vec<Counter>> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT c.session_id, c.json FROM cost_states c
+         WHERE {LATEST_COST_STATE} AND (?1 IS NULL OR c.session_id = ?1) ORDER BY c.session_id"
     ))?;
-    let rows = statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let rows = statement.query_map([session_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     let mut counters = Vec::new();
     for row in rows {
         let (session_id, json) = row?;
@@ -781,6 +815,46 @@ mod tests {
         Session::new(&mut store, "plain").request(T, "claude-sonnet-5-5", tokens(1, 1, 0), false);
         let result = store.reconcile(&PriceTable::bundled()).unwrap();
         assert_eq!(result.sessions_without_counter, 2);
+    }
+
+    #[test]
+    fn reconciling_some_sessions_leaves_the_others_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        let prices = PriceTable::bundled();
+        for id in ["s1", "s2"] {
+            let mut s = Session::new(&mut store, id);
+            s.request(T, "claude-sonnet-5-5", tokens(1, 1, 0), false);
+            s.counter(1.0, &[counter("claude-sonnet-5-5", 1, 101, 0)]);
+        }
+        store.reconcile(&prices).unwrap();
+        for id in ["s1", "s2"] {
+            let mut s = Session::new(&mut store, id);
+            s.next_line = 10;
+            s.counter(1.0, &[counter("claude-sonnet-5-5", 1, 201, 0)]);
+        }
+        let touched = BTreeSet::from(["s1".to_string()]);
+        let result = store.reconcile_sessions(&prices, &touched).unwrap();
+        let outputs: Vec<(String, u64)> = rows(&store)
+            .into_iter()
+            .map(|row| (row.session_id, row.tokens[1]))
+            .collect();
+        assert_eq!(outputs, vec![("s1".into(), 200), ("s2".into(), 100)]);
+        assert_eq!(result, store.reconciliation_summary().unwrap());
+        assert_eq!(result.sessions_adjusted, 2);
+    }
+
+    #[test]
+    fn reconciling_no_session_takes_no_write_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        let mut store = Store::open(&path).unwrap();
+        let mut holder = Store::open(&path).unwrap();
+        store.set_busy_timeout(std::time::Duration::from_millis(10));
+        let _held = holder.writer().unwrap();
+        let result = store
+            .reconcile_sessions(&PriceTable::bundled(), &BTreeSet::new())
+            .unwrap();
+        assert_eq!(result, Reconciliation::default());
     }
 
     #[test]

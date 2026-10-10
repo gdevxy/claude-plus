@@ -591,12 +591,17 @@ fn reconcile_failure_still_prints_the_import_report() {
              BEGIN SELECT RAISE(ABORT, 'adjustments are locked'); END;",
         )
         .unwrap();
-    write_unpriced_transcript(&env);
+    let transcript = env
+        .claude
+        .join("projects/-work-demo/22222222-2222-2222-2222-222222222222.jsonl");
+    let content = std::fs::read_to_string(&transcript).unwrap();
+    let counter = content.lines().last().unwrap().to_string();
+    std::fs::write(&transcript, format!("{content}{counter}\n")).unwrap();
     cmd(&env, &["import"])
         .assert()
         .failure()
         .stdout(
-            "✻ Imported 1 line from 1 changed file · 1 new request · 0 unparsable lines\n  History: 6 requests across 3 sessions · $0.0812 priced\n  1 request without a known price (see `claude-plus doctor`)\n",
+            "✻ Imported 1 line from 1 changed file · 0 new requests · 0 unparsable lines\n  History: 5 requests across 2 sessions · $0.0812 priced\n",
         )
         .stderr(predicate::str::starts_with(
             "claude-plus: reconciling with Claude Code counters: adjustments are locked",
