@@ -191,21 +191,35 @@ fn rebuild(
         RebuildCause::Unknown
     };
     let tokens = request.tokens.cache_write().min(prefix);
-    let read = TokenCounts {
-        cache_read: tokens,
-        ..Default::default()
-    };
     let extra_usd = context
         .prices
-        .cost(&request.model, &ttl.written(tokens))
-        .zip(context.prices.cost(&request.model, &read))
-        .map(|(written, read)| written - read);
+        .cost(&request.model, &request.tokens)
+        .zip(
+            context
+                .prices
+                .cost(&request.model, &read_instead(&request.tokens, tokens)),
+        )
+        .map(|(paid, warm)| paid - warm);
     Some(Rebuild {
         ts_ms: request.ts_ms,
         cause,
         tokens,
         extra_usd,
     })
+}
+
+fn read_instead(tokens: &TokenCounts, moved: u64) -> TokenCounts {
+    let from_1h = if tokens.cache_write() == 0 {
+        0
+    } else {
+        (moved as u128 * tokens.cache_write_1h as u128 / tokens.cache_write() as u128) as u64
+    };
+    TokenCounts {
+        cache_read: tokens.cache_read + moved,
+        cache_write_1h: tokens.cache_write_1h - from_1h,
+        cache_write_5m: tokens.cache_write_5m - (moved - from_1h),
+        ..*tokens
+    }
 }
 
 #[cfg(test)]
@@ -383,6 +397,35 @@ mod tests {
         assert_eq!(unknown.last_rebuild.unwrap().cause, RebuildCause::Unknown);
         let compacted = cache_with(requests, 61, true, &[], &[(T0 / 1000) + 30]);
         assert_eq!((compacted.rebuilds, compacted.last_rebuild), (0, None));
+    }
+
+    #[test]
+    fn a_rebuild_costs_what_its_own_request_paid_over_reading_the_prefix() {
+        let mut long = at(4000, "claude-haiku-5-5", 0, 0, 60_000);
+        long.tokens.input = 50_000;
+        let haiku = cache(
+            vec![at(0, "claude-haiku-5-5", 59_000, 0, 1000), long],
+            4001,
+            true,
+        );
+        assert!(close(
+            haiku.last_rebuild.unwrap().extra_usd.unwrap(),
+            60_000.0 * (0.5 * 2.0 - 0.05) / 1e6
+        ));
+        let five_minute = cache(
+            vec![
+                at(0, OPUS, 50_000, 0, 1000),
+                at(4000, OPUS, 0, 51_000, 0),
+                at(4100, OPUS, 51_000, 0, 100),
+            ],
+            4101,
+            true,
+        );
+        assert_eq!(five_minute.ttl, Ttl::OneHour);
+        assert!(close(
+            five_minute.last_rebuild.unwrap().extra_usd.unwrap(),
+            51_000.0 * (4.0 * 1.25 - 0.2) / 1e6
+        ));
     }
 
     #[test]
