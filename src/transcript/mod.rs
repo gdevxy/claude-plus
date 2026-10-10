@@ -1,3 +1,4 @@
+pub mod location;
 mod record;
 pub mod redact;
 pub mod text;

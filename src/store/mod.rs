@@ -12,6 +12,7 @@ use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
 
+use crate::transcript::location::Location;
 pub use reconcile::Reconciliation;
 pub use upgrade::Upgrade;
 pub use writer::*;
@@ -73,9 +74,7 @@ pub struct RawRow {
     pub line_no: u64,
     pub kind: String,
     pub json: String,
-    pub project: String,
-    pub session_hint: String,
-    pub agent_id: Option<String>,
+    pub location: Location,
 }
 
 impl Store {
@@ -394,7 +393,7 @@ pub(crate) fn raw_records(conn: &Connection, file_id: i64, kinds: &[&str]) -> Re
     let path: String = conn.query_row("SELECT path FROM files WHERE id = ?1", [file_id], |r| {
         r.get(0)
     })?;
-    let location = crate::ingest::TranscriptFile::from_path(Path::new(live_path(&path)));
+    let location = Location::from_path(Path::new(live_path(&path)));
     let mut sql = String::from("SELECT line_no, kind, json FROM raw_records WHERE file_id = ?1");
     if !kinds.is_empty() {
         let placeholders = vec!["?"; kinds.len()].join(",");
@@ -410,9 +409,7 @@ pub(crate) fn raw_records(conn: &Connection, file_id: i64, kinds: &[&str]) -> Re
             line_no: r.get::<_, i64>(0)? as u64,
             kind: r.get(1)?,
             json: r.get(2)?,
-            project: location.project.clone(),
-            session_hint: location.session_hint.clone(),
-            agent_id: location.agent_id.clone(),
+            location: location.clone(),
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -656,7 +653,7 @@ mod tests {
         );
         let raw = w.raw_records(file, &["assistant"]).unwrap();
         assert_eq!(raw.len(), 1);
-        assert_eq!(raw[0].project, "proj");
+        assert_eq!(raw[0].location.project, "proj");
         w.commit().unwrap();
         assert_eq!(store.totals().unwrap().requests, 0);
     }
@@ -731,8 +728,8 @@ mod tests {
         let retired = store.raw_records(first, &[]).unwrap();
         assert_eq!(
             (
-                retired[0].project.as_str(),
-                retired[0].session_hint.as_str()
+                retired[0].location.project.as_str(),
+                retired[0].location.session_hint.as_str()
             ),
             ("proj", "s1")
         );

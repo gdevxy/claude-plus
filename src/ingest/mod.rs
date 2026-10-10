@@ -11,6 +11,7 @@ use crate::store::{
     AttachmentRow, Busy, CompactionRow, CostStateRow, FileProgress, Reconciliation, RequestRow,
     RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
 };
+use crate::transcript::location::Location;
 use crate::transcript::redact::redact;
 use crate::transcript::{Parsed, Record, parse_line};
 
@@ -109,8 +110,7 @@ impl<'a> Ingestor<'a> {
         let mut report = IngestReport::default();
         let mut records = 0u64;
         let files = writer.raw_files()?;
-        for (index, (file_id, path)) in files.iter().enumerate() {
-            let location = TranscriptFile::from_path(Path::new(path));
+        for (index, (file_id, _)) in files.iter().enumerate() {
             for row in writer.raw_records(*file_id, &[])? {
                 let Ok(parsed) = parse_line(&row.json) else {
                     continue;
@@ -118,7 +118,7 @@ impl<'a> Ingestor<'a> {
                 derive(
                     &mut writer,
                     self.prices,
-                    &location,
+                    &row.location,
                     row.file_id,
                     row.line_no,
                     &parsed,
@@ -215,7 +215,7 @@ impl<'a> Ingestor<'a> {
                     derive(
                         &mut writer,
                         self.prices,
-                        file,
+                        &file.location,
                         file_id,
                         line_no,
                         &parsed,
@@ -259,7 +259,7 @@ pub fn record_raw(writer: &mut Writer, file_id: i64, line_no: u64, parsed: &Pars
 pub fn derive(
     writer: &mut Writer,
     prices: &PriceTable,
-    file: &TranscriptFile,
+    location: &Location,
     file_id: i64,
     line_no: u64,
     parsed: &Parsed,
@@ -268,12 +268,12 @@ pub fn derive(
     let common = parsed.record.common();
     let session_id = common
         .and_then(|c| c.session_id.clone())
-        .unwrap_or_else(|| file.session_hint.clone());
+        .unwrap_or_else(|| location.session_hint.clone());
     let ts = common.and_then(|c| c.timestamp).map(|t| t.timestamp());
     if common.is_some() {
         writer.session(&SessionRow {
             id: session_id.clone(),
-            project: file.project.clone(),
+            project: location.project.clone(),
             cwd: common.and_then(|c| c.cwd.clone()),
             ts,
         })?;
@@ -292,8 +292,12 @@ pub fn derive(
                 model: a.model.clone(),
                 tokens: a.usage,
                 cost_usd,
-                is_sidechain: a.common.is_sidechain || file.agent_id.is_some(),
-                agent_id: a.common.agent_id.clone().or_else(|| file.agent_id.clone()),
+                is_sidechain: a.common.is_sidechain || location.agent_id.is_some(),
+                agent_id: a
+                    .common
+                    .agent_id
+                    .clone()
+                    .or_else(|| location.agent_id.clone()),
                 skill: a.skill.clone(),
                 mcp_server: a.mcp_server.clone(),
                 effort: a.effort.clone(),
@@ -355,7 +359,7 @@ pub fn derive(
             let session_id = c
                 .session_id
                 .clone()
-                .unwrap_or_else(|| file.session_hint.clone());
+                .unwrap_or_else(|| location.session_hint.clone());
             writer.cost_state(&CostStateRow {
                 file_id,
                 line_no,
@@ -369,10 +373,10 @@ pub fn derive(
             let session_id = t
                 .session_id
                 .clone()
-                .unwrap_or_else(|| file.session_hint.clone());
+                .unwrap_or_else(|| location.session_hint.clone());
             writer.session(&SessionRow {
                 id: session_id.clone(),
-                project: file.project.clone(),
+                project: location.project.clone(),
                 cwd: None,
                 ts: None,
             })?;
@@ -451,14 +455,17 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(
             (
-                files[0].project.as_str(),
-                files[0].session_hint.as_str(),
-                files[0].agent_id.as_deref()
+                files[0].location.project.as_str(),
+                files[0].location.session_hint.as_str(),
+                files[0].location.agent_id.as_deref()
             ),
             ("-w-proj", "s1", None)
         );
         assert_eq!(
-            (files[1].session_hint.as_str(), files[1].agent_id.as_deref()),
+            (
+                files[1].location.session_hint.as_str(),
+                files[1].location.agent_id.as_deref()
+            ),
             ("s1", Some("a1"))
         );
     }
