@@ -183,6 +183,9 @@ Mod (TypeScript, files under `mod/`):
    - `$.session.usage({ breakdown: 'full' })`: Claude Code's own context breakdown (categories, memory files, MCP tools, auto-compact threshold, last API usage), requested after each turn.
    - `turn.step` result: per-request usage (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, model) and effort, as soon as the request completes.
    - `turn.complete`, `session.compact`, `session.start`, `session.end`: lifecycle markers.
+   - Every event carries a client `id`, a random prefix per mod instance plus a counter, and the daemon stores an event only once per session and `id`, so a batch sent again after a timeout is not counted twice.
+     An event without an `id` is still accepted and is not deduplicated.
+   - A `turn.step` event carries `sent_ms`, the time the hook saw the request leave, besides its `ts_ms`, the time the response ended.
 2. Transcripts, tailed by the daemon: `~/.claude/projects/<project>/<session>.jsonl` and `<project>/<session>/subagents/agent-<id>.jsonl`.
    They supply what the mod cannot see (the 5m and 1h split of cache writes, subagent usage, tool results, injected context attachments) and all history.
 3. Config on disk, scanned by the daemon, for configured but never-loaded items.
@@ -217,6 +220,8 @@ Claude Code documents the transcript format as internal and subject to change, s
 ### Daemon lifecycle
 
 - The mod runs `claude-plus daemon --ensure` with `$.process.run` at session start (binary resolved from `userConfig.binaryPath`, default `claude-plus` on `PATH`), which returns at once after starting a detached daemon if none answers on the socket.
+- `--ensure` replaces a running daemon that is older in its version, its store schema or its API version, and keeps a newer one.
+- The mod runs `--ensure` again on `/plus`, every 30 s while the daemon does not answer, and at once when a snapshot shows the daemon is older than the pane.
 - A daemon started by the mod's `$.process.spawn` would die with the module on reload, which is why the daemon detaches itself instead.
 - Single instance is enforced by an exclusive lock on `~/.claude-plus/daemon.lock` and a socket probe, so many concurrent sessions share one daemon.
 - The daemon stays resident and idles cheaply; `claude-plus uninstall` stops it.
@@ -262,7 +267,10 @@ Claude Code documents the transcript format as internal and subject to change, s
 ### Cache state
 
 - TTL type for a session is taken from the most recent cache write (`1h` when `ephemeral_1h_input_tokens > 0`, else `5m`).
-- Expiry is `last_request_ts + ttl`, since every cache hit refreshes the TTL; the mod counts down locally from the snapshot's `expires_at` with a 1 s clock.
+- Expiry is `last_request_sent + ttl`, since every cache hit refreshes the TTL when the API serves the request; the mod counts down locally from the snapshot's `expires_at` with a 1 s clock.
+- The send time of a request is the `sent_ms` of its mod `turn.step`, and for a transcript row matched to a step, the earlier of the two times.
+- A request seen only in the transcript uses the transcript timestamp, which is that of its first content block.
+  That is a known bound: after long extended thinking it can run late by the thinking time, while every request the mod sees counts from its send.
 - Hit ratio is `cache_read / (cache_read + cache_write + input)` over the session.
 - A rebuild is detected when a request has a large cache write and near-zero cache read relative to the previous request's prefix.
 - Cause attribution: idle gap above TTL gives "idle", a model change gives "model switch", a change of an injected context attachment between the two requests gives "prefix changed", otherwise "unknown".
@@ -270,7 +278,8 @@ Claude Code documents the transcript format as internal and subject to change, s
 ### Next-turn forecast (estimate)
 
 - Prefix size `P` is the previous request's cache read plus cache write.
-- New input `N` and output `O` are the medians of the last 10 turns of this session.
+- New input `N` and output `O` are medians over the last 10 requests of this session.
+  `N` is taken from the warm requests among them, whose cache read covers at least 90% of the previous prefix, so the opening cold write does not dominate it; with no warm request, all 10 are used.
 - `p_cw` is the cache write price matching the session's TTL type (`p_cw5` or `p_cw1h`).
 - Warm: `P * p_cr + N * p_cw + O * p_out`.
 - Cold: `(P + N) * p_cw + O * p_out`.
