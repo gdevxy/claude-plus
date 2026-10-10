@@ -1,5 +1,6 @@
 mod reconcile;
 mod schema;
+mod upgrade;
 mod writer;
 
 use std::collections::BTreeMap;
@@ -7,9 +8,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, TimeZone};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
 pub use reconcile::Reconciliation;
+pub use upgrade::Upgrade;
 pub use writer::*;
 
 pub(crate) const GENERATION_MARK: &str = "#gen-";
@@ -71,6 +73,10 @@ pub struct RawRow {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_progress(path, &mut |_| {})
+    }
+
+    pub fn open_with_progress(path: &Path, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         #[cfg(unix)]
@@ -80,7 +86,7 @@ impl Store {
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::migrated(conn)
+        Self::migrated(conn, on_upgrade)
     }
 
     pub fn open_read_only(path: &Path) -> Result<Self> {
@@ -116,22 +122,31 @@ impl Store {
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::migrated(Connection::open_in_memory()?)
+        Self::migrated(Connection::open_in_memory()?, &mut |_| {})
     }
 
-    fn migrated(conn: Connection) -> Result<Self> {
+    fn migrated(conn: Connection, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
         let mut store = Self { conn };
         store.refuse_newer_schema()?;
         let current = store.schema_version()?;
-        let latest = Self::latest_schema_version();
-        if current < latest {
-            let tx = store.conn.transaction()?;
-            for migration in &schema::MIGRATIONS[current..] {
-                tx.execute_batch(migration)?;
+        for (index, migration) in schema::MIGRATIONS.iter().enumerate().skip(current) {
+            let version = index as i64 + 1;
+            match migration {
+                schema::Migration::Sql(sql) => {
+                    let tx = store
+                        .conn
+                        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    tx.execute_batch(sql)?;
+                    tx.pragma_update(None, "user_version", version)?;
+                    tx.commit()?;
+                }
+                schema::Migration::Rust(step) => {
+                    step(&mut store.conn, on_upgrade)?;
+                    store.conn.pragma_update(None, "user_version", version)?;
+                }
             }
-            tx.pragma_update(None, "user_version", latest as i64)?;
-            tx.commit()?;
         }
+        upgrade::compact_if_pending(&store.conn, on_upgrade)?;
         Ok(store)
     }
 
@@ -264,6 +279,28 @@ impl Store {
             [],
             |r| r.get::<_, i64>(0),
         )? as u64)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dump(&self, table: &str) -> Vec<String> {
+        let mut statement = self
+            .conn
+            .prepare(&format!("SELECT * FROM {table} ORDER BY 1, 2"))
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |r| {
+                (0..columns)
+                    .map(|i| {
+                        r.get::<_, rusqlite::types::Value>(i)
+                            .map(|v| format!("{v:?}"))
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map(|cells| cells.join("|"))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
     }
 
     pub fn file_count(&self) -> Result<u64> {
@@ -691,7 +728,10 @@ mod tests {
     fn seeded(path: &Path, version: usize, seed: &str) {
         let conn = Connection::open(path).unwrap();
         for migration in &schema::MIGRATIONS[..version] {
-            conn.execute_batch(migration).unwrap();
+            let schema::Migration::Sql(sql) = migration else {
+                panic!("seeding stops at SQL migrations")
+            };
+            conn.execute_batch(sql).unwrap();
         }
         conn.execute_batch(seed).unwrap();
         conn.pragma_update(None, "user_version", version as i64)
@@ -729,6 +769,57 @@ mod tests {
             rows,
             vec![(1, Some(0.5), 1), (2, None, 0), (3, Some(0.0), 0)]
         );
+    }
+
+    #[test]
+    fn upgrading_from_v4_redacts_stored_raw_records_and_compacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        seeded(
+            &path,
+            4,
+            r#"INSERT INTO files (id, path) VALUES (1, '/p/proj/s1.jsonl');
+               INSERT INTO raw_records VALUES
+                 (1, 1, 'user', '{"type":"user","message":{"role":"user","content":"my password"}}'),
+                 (1, 2, 'assistant', '{"type":"assistant","message":{"content":[{"type":"text","text":"secret answer"},{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/a"}}]}}'),
+                 (1, 3, 'custom-title', '{"type":"custom-title","customTitle":"Keep me"}');
+               INSERT INTO cost_states VALUES (1, 4, 's1', 1.0, 1, '{"type":"cost-state","note":"' || printf('%.3000c', 'x') || '"}');"#,
+        );
+        let mut events = Vec::new();
+        let store = Store::open_with_progress(&path, &mut |event| events.push(event)).unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Store::latest_schema_version()
+        );
+        let raw: Vec<String> = store
+            .raw_records(1, &[])
+            .unwrap()
+            .into_iter()
+            .map(|row| row.json)
+            .collect();
+        assert_eq!(
+            raw,
+            vec![
+                r#"{"message":{"content":{"$chars":11},"role":"user"},"type":"user"}"#,
+                r#"{"message":{"content":[{"text":{"$chars":13},"type":"text"},{"id":"t","input":{"file_path":"/a"},"name":"Read","type":"tool_use"}]},"type":"assistant"}"#,
+                r#"{"customTitle":"Keep me","type":"custom-title"}"#,
+            ]
+        );
+        assert_eq!(
+            store.dump("cost_states"),
+            vec![
+                r#"Integer(1)|Integer(4)|Text("s1")|Real(1.0)|Integer(1)|Text("{\"note\":{\"$chars\":3000},\"type\":\"cost-state\"}")"#
+            ]
+        );
+        assert_eq!(
+            events,
+            vec![
+                Upgrade::Records { done: 0, total: 3 },
+                Upgrade::Records { done: 3, total: 3 },
+                Upgrade::Compacting
+            ]
+        );
+        assert_eq!(store.dump("meta"), Vec::<String>::new());
     }
 
     #[test]

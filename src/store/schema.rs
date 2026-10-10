@@ -1,5 +1,13 @@
-pub const MIGRATIONS: &[&str] = &[
-    r#"
+use super::upgrade::redact_stored_records;
+
+pub enum Migration {
+    Sql(&'static str),
+    Rust(super::upgrade::Step),
+}
+
+pub const MIGRATIONS: &[Migration] = &[
+    Migration::Sql(
+        r#"
 CREATE TABLE files (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -93,11 +101,15 @@ CREATE TABLE meta (
     value TEXT NOT NULL
 );
 "#,
-    r#"
+    ),
+    Migration::Sql(
+        r#"
 ALTER TABLE files ADD COLUMN head_len INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE files ADD COLUMN head_hash INTEGER NOT NULL DEFAULT 0;
 "#,
-    r#"
+    ),
+    Migration::Sql(
+        r#"
 CREATE TABLE adjustments (
     session_id TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -112,7 +124,9 @@ CREATE TABLE adjustments (
 CREATE INDEX adjustments_by_ts ON adjustments(ts);
 CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no);
 "#,
-    r#"
+    ),
+    Migration::Sql(
+        r#"
 CREATE TABLE cost_states_v4 (
     file_id INTEGER NOT NULL,
     line_no INTEGER NOT NULL,
@@ -135,6 +149,8 @@ DROP TABLE cost_states;
 ALTER TABLE cost_states_v4 RENAME TO cost_states;
 CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no);
 "#,
+    ),
+    Migration::Rust(redact_stored_records),
 ];
 
 pub const DERIVED_TABLES: &[&str] = &[

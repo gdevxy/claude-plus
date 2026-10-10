@@ -10,7 +10,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
-use crate::store::Store;
+use crate::store::{Store, Upgrade};
 
 #[derive(Parser)]
 #[command(
@@ -73,5 +73,28 @@ fn transcripts_missing(paths: &Paths) -> bool {
 
 fn open_store(paths: &Paths) -> Result<Store> {
     paths.ensure_data_dir()?;
-    Store::open(&paths.database())
+    let mut bar: Option<ProgressBar> = None;
+    let store = Store::open_with_progress(&paths.database(), &mut |event| {
+        let bar = bar.get_or_insert_with(|| {
+            ProgressBar::new(0).with_style(
+                ProgressStyle::with_template("✻ Upgrading stored records {pos}/{len} {wide_bar}")
+                    .expect("valid template"),
+            )
+        });
+        match event {
+            Upgrade::Records { done, total } => {
+                bar.set_length(total);
+                bar.set_position(done);
+            }
+            Upgrade::Compacting => {
+                bar.set_style(ProgressStyle::with_template("✻ {msg}").expect("valid template"));
+                bar.set_message("Compacting the database, this runs once");
+                bar.tick();
+            }
+        }
+    });
+    if let Some(bar) = bar {
+        bar.finish_and_clear();
+    }
+    store
 }

@@ -539,3 +539,36 @@ fn doctor_reads_a_database_with_live_wal_files() {
         .unwrap();
     assert_eq!(remaining, 1);
 }
+
+#[test]
+fn import_upgrades_an_older_database_quietly() {
+    let env = env();
+    cmd(&env, &["import"]).assert().success();
+    let database = env.plus.join("data.db");
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute(
+            "UPDATE raw_records SET json = ?1 WHERE kind = 'user' AND json LIKE '%hello%'",
+            [r#"{"type":"user","sessionId":"11111111-1111-1111-1111-111111111111","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"hello my password"}}"#],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+    }
+    cmd(&env, &["import"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .stdout(predicate::str::contains("0 new requests"));
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    let leaked: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM raw_records WHERE json LIKE '%password%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!((version, leaked), (5, 0));
+}

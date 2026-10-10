@@ -216,7 +216,11 @@ Claude Code documents the transcript format as internal and subject to change, s
 
 ### Storage schema (initial)
 
-- `raw_records(id, file_id, line_no, kind, json)` keeps every relevant parsed line for reindexing, with `tool_result` content replaced by its length to bound size.
+- `raw_records(file_id, line_no, kind, json)` keeps every relevant parsed line for reindexing, without the content that Claude Code's own retention would delete.
+  - Tool result content, text and thinking blocks, user prompts, tool results echoed in `toolUseResult`, system message content and attachment content become `{"$chars": n}`, so derived character counts stay exact.
+  - Strings in `tool_use.input` keep up to 256 bytes, so file paths and commands survive, and attachment names and paths are kept.
+  - Any other string longer than 2,048 bytes becomes `{"$chars": n}`.
+  - A store written before these rules is rewritten once on first open after the upgrade, then compacted.
 - `files(id, path, offset, size, mtime, parse_errors)` holds ingestion checkpoints.
 - `sessions(id, project, cwd, started_at, last_seen_at, title)`.
 - `requests(key, session_id, ts, model, input, output, thinking, cache_read, cache_write_5m, cache_write_1h, cost_usd, is_sidechain, agent_id, skill, mcp_server, effort)`, `key` being the deduplication key.

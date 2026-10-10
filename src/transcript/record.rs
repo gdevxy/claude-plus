@@ -246,7 +246,7 @@ fn user(raw: &Value) -> UserRecord {
         })
         .collect();
     let text_chars = match content {
-        Some(Value::String(s)) => s.chars().count() as u64,
+        Some(content) if !content.is_array() => string_chars(content),
         _ => blocks(raw)
             .filter(|block| text(block, "/type").as_deref() == Some("text"))
             .map(|block| block.get("text").map(string_chars).unwrap_or(0))

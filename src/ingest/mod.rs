@@ -11,12 +11,12 @@ use crate::store::{
     AttachmentRow, CompactionRow, CostStateRow, FileProgress, Reconciliation, RequestRow,
     RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
 };
-use crate::transcript::{Parsed, Record, parse_line, text::shrink};
+use crate::transcript::redact::redact;
+use crate::transcript::{Parsed, Record, parse_line};
 
 pub use discover::{TranscriptFile, discover};
 
 pub const BATCH_LINES: u64 = 5000;
-pub const RAW_STRING_LIMIT: usize = 2048;
 pub const SKIPPED_RAW_KINDS: &[&str] = &[
     "file-history-snapshot",
     "file-history-delta",
@@ -114,7 +114,7 @@ impl<'a> Ingestor<'a> {
                 let Ok(parsed) = parse_line(&row.json) else {
                     continue;
                 };
-                apply(
+                derive(
                     &mut writer,
                     self.prices,
                     &location,
@@ -209,15 +209,18 @@ impl<'a> Ingestor<'a> {
                 continue;
             }
             match parse_line(&line.text) {
-                Ok(parsed) => apply(
-                    &mut writer,
-                    self.prices,
-                    file,
-                    file_id,
-                    line_no,
-                    &parsed,
-                    &mut report,
-                )?,
+                Ok(parsed) => {
+                    record_raw(&mut writer, file_id, line_no, &parsed)?;
+                    derive(
+                        &mut writer,
+                        self.prices,
+                        file,
+                        file_id,
+                        line_no,
+                        &parsed,
+                        &mut report,
+                    )?;
+                }
                 Err(_) => {
                     report.parse_errors += 1;
                     batch_errors += 1;
@@ -244,7 +247,15 @@ fn is_not_found(error: &anyhow::Error) -> bool {
         .is_some_and(|e| e.kind() == ErrorKind::NotFound)
 }
 
-pub fn apply(
+pub fn record_raw(writer: &mut Writer, file_id: i64, line_no: u64, parsed: &Parsed) -> Result<()> {
+    let kind = parsed.record.kind();
+    if !SKIPPED_RAW_KINDS.contains(&kind) {
+        writer.raw(file_id, line_no, kind, &redact(&parsed.raw).to_string())?;
+    }
+    Ok(())
+}
+
+pub fn derive(
     writer: &mut Writer,
     prices: &PriceTable,
     file: &TranscriptFile,
@@ -253,15 +264,6 @@ pub fn apply(
     parsed: &Parsed,
     report: &mut IngestReport,
 ) -> Result<()> {
-    let kind = parsed.record.kind();
-    if !SKIPPED_RAW_KINDS.contains(&kind) {
-        writer.raw(
-            file_id,
-            line_no,
-            kind,
-            &shrink(&parsed.raw, RAW_STRING_LIMIT).to_string(),
-        )?;
-    }
     let common = parsed.record.common();
     let session_id = common
         .and_then(|c| c.session_id.clone())
@@ -359,7 +361,7 @@ pub fn apply(
                 session_id,
                 total_cost_usd: c.total_cost_usd,
                 model_count: c.model_usage.len() as u64,
-                json: parsed.raw.to_string(),
+                json: redact(&parsed.raw).to_string(),
             })?;
         }
         Record::Title(t) => {
@@ -771,6 +773,88 @@ mod tests {
         );
         assert!(raw[1].json.len() < 1000, "tool output must be shrunk");
         assert!(raw[1].json.contains(r#""$chars":5000"#));
+    }
+
+    const DERIVED: &[&str] = &[
+        "requests",
+        "tool_uses",
+        "tool_results",
+        "attachments",
+        "compactions",
+        "cost_states",
+        "sessions",
+        "adjustments",
+    ];
+
+    #[test]
+    fn reindex_derives_the_same_rows_from_redacted_raw() {
+        let fx = Fixture::new();
+        let secret = "s3cr3t-".repeat(400);
+        let short = "s3cr3t-short";
+        let lines = [
+            serde_json::json!({"type":"user","sessionId":"s1","timestamp":"2026-10-01T09:59:00Z","message":{"role":"user","content":format!("{short} {secret}")}}),
+            serde_json::json!({"type":"attachment","sessionId":"s1","timestamp":"2026-10-01T09:59:01Z","attachment":{"type":"instructions","files":[{"path":"/h/CLAUDE.md","type":"User","content":short}],"names":["a"],"content":secret}}),
+            serde_json::json!({"type":"assistant","sessionId":"s1","timestamp":"2026-10-01T10:00:00Z","requestId":"r1","message":{"model":"claude-opus-5-5","content":[
+                {"type":"thinking","thinking":short,"signature":secret},
+                {"type":"text","text":short},
+                {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls -la","description":secret}},
+                {"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/w/a.rs"}}
+            ],"usage":{"input_tokens":1,"output_tokens":5}}}),
+            serde_json::json!({"type":"user","sessionId":"s1","timestamp":"2026-10-01T10:00:01Z","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","content":short},
+                {"type":"tool_result","tool_use_id":"t2","is_error":true,"content":[
+                    {"type":"text","text":secret},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":secret}},
+                    {"type":"tool_reference","tool_name":"mcp__x__y"}
+                ]}
+            ]},"toolUseResult":{"stdout":short}}),
+            serde_json::json!({"type":"system","subtype":"compact_boundary","sessionId":"s1","timestamp":"2026-10-01T10:00:02Z","content":short,"compactMetadata":{"trigger":"auto","preTokens":9,"postTokens":3}}),
+            serde_json::json!({"type":"cost-state","sessionId":"s1","totalCostUSD":1.0,"modelUsage":{"claude-opus-5-5":{"inputTokens":1,"outputTokens":50}}}),
+            serde_json::json!({"type":"last-prompt","sessionId":"s1","lastPrompt":short}),
+        ];
+        let content: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        fx.write("-w-proj/s1.jsonl", &content);
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let (file_id, _) = store.raw_files().unwrap()[0].clone();
+        for row in store.raw_records(file_id, &[]).unwrap() {
+            assert!(!row.json.contains("s3cr3t"), "{}", row.json);
+        }
+        let imported: Vec<Vec<String>> = DERIVED.iter().map(|t| store.dump(t)).collect();
+        assert_eq!(imported[1].len(), 2);
+        assert_eq!(imported[2].len(), 2);
+        assert_eq!(imported[3].len(), 1);
+        assert!(!imported.concat().concat().contains("s3cr3t"));
+
+        reindex(&mut store);
+        let rebuilt: Vec<Vec<String>> = DERIVED.iter().map(|t| store.dump(t)).collect();
+        assert_eq!(rebuilt, imported);
+        let raw_after = store.raw_records(file_id, &[]).unwrap();
+        assert_eq!(raw_after.len(), lines.len());
+    }
+
+    #[test]
+    fn reindex_never_writes_raw_records() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        fx.write("-w-proj/s1.jsonl", &format!("{line}\n"));
+        let database = fx._temp.path().join("data.db");
+        let mut store = Store::open(&database).unwrap();
+        fx.run(&mut store);
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER raw_is_read_only BEFORE INSERT ON raw_records
+                 BEGIN SELECT RAISE(ABORT, 'raw rewritten'); END;",
+            )
+            .unwrap();
+        assert_eq!(reindex(&mut store).requests, 1);
     }
 
     fn set_mtime_offset(path: &std::path::Path, seconds: u64) {
