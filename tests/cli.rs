@@ -328,6 +328,17 @@ fn invalid_now_override_is_rejected() {
         ));
 }
 
+#[test]
+fn invalid_now_override_fails_before_importing() {
+    let env = env();
+    cmd(&env, &["stats"])
+        .env("CLAUDE_PLUS_NOW", "yesterday")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty());
+    assert!(!env.plus.join("data.db").exists());
+}
+
 fn assistant_line(session: &str, request: &str, ts: &str, sidechain: bool) -> String {
     format!(
         r#"{{"type":"assistant","sessionId":"{session}","isSidechain":{sidechain},"timestamp":"{ts}","requestId":"{request}","message":{{"id":"{request}","model":"claude-sonnet-5-5","content":[{{"type":"text","text":"x"}}],"usage":{{"input_tokens":1,"output_tokens":1000}}}}}}"#
