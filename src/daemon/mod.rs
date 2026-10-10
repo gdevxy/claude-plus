@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::api::{self, Shutdown, State};
 use crate::ingest::TranscriptFile;
@@ -83,13 +83,15 @@ fn run_locked(
             let mut interrupt = signal(SignalKind::interrupt())?;
             let shutdown = state.shutdown.clone();
             let signal_log = log.clone();
+            let socket = paths.socket();
             let signals = tokio::spawn(async move {
-                let name = tokio::select! {
-                    _ = terminate.recv() => "SIGTERM",
-                    _ = interrupt.recv() => "SIGINT",
-                };
+                let (name, _) = next_signal(&mut terminate, &mut interrupt).await;
                 signal_log.info(format!("{name} received, stopping"));
                 shutdown.trigger();
+                let (name, number) = next_signal(&mut terminate, &mut interrupt).await;
+                signal_log.warn(format!("{name} received again, exiting now"));
+                let _ = std::fs::remove_file(&socket);
+                std::process::exit(128 + number);
             });
             let tail = tokio::spawn(tail(paths.projects_dir(), state.clone(), rescan_every));
             log.info(format!(
@@ -109,6 +111,13 @@ fn run_locked(
     let _ = std::fs::remove_file(paths.socket());
     log.info("stopped");
     served
+}
+
+async fn next_signal(terminate: &mut Signal, interrupt: &mut Signal) -> (&'static str, i32) {
+    tokio::select! {
+        _ = terminate.recv() => ("SIGTERM", rustix::process::Signal::TERM.as_raw()),
+        _ = interrupt.recv() => ("SIGINT", rustix::process::Signal::INT.as_raw()),
+    }
 }
 
 async fn tail(projects_dir: PathBuf, state: Arc<State>, rescan_every: Duration) {

@@ -477,3 +477,32 @@ fn a_replaced_projects_dir_is_watched_again_without_waiting_for_a_rescan() {
         || Some(snapshot(&env, session)).filter(|s| s.totals.requests == 1),
     );
 }
+
+#[test]
+fn a_second_interrupt_stops_the_daemon_without_waiting_for_the_drain() {
+    use std::io::Write;
+    let env = env();
+    let mut daemon = Foreground::start(&env, &[]);
+    let mut stalled =
+        std::os::unix::net::UnixStream::connect(env.plus.join("daemon.sock")).unwrap();
+    stalled.write_all(b"GET /health HTTP/1.1\r\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    daemon.signal(Signal::INT);
+    eventually("the first interrupt to be logged", || {
+        log_of(&env)
+            .contains(" info  SIGINT received, stopping\n")
+            .then_some(())
+    });
+    let second = std::time::Instant::now();
+    daemon.signal(Signal::INT);
+    let status = daemon.child.wait().unwrap();
+    let waited = second.elapsed();
+    assert_eq!(status.code(), Some(130), "{status}");
+    assert!(waited < std::time::Duration::from_secs(1), "{waited:?}");
+    assert!(
+        log_of(&env).contains(" warn  SIGINT received again, exiting now\n"),
+        "{}",
+        log_of(&env)
+    );
+    assert!(!env.plus.join("daemon.sock").exists());
+}
