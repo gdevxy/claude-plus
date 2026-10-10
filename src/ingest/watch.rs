@@ -29,23 +29,45 @@ pub struct Batch {
 }
 
 pub struct Changes {
-    receiver: UnboundedReceiver<Notice>,
-    root: PathBuf,
-    _watcher: RecommendedWatcher,
+    batches: UnboundedReceiver<Batch>,
+    batching: tokio::task::JoinHandle<()>,
+    _watcher: Option<RecommendedWatcher>,
+}
+
+impl Drop for Changes {
+    fn drop(&mut self) {
+        self.batching.abort();
+    }
 }
 
 impl Changes {
     pub async fn next_batch(&mut self) -> Option<Batch> {
-        loop {
-            let batch = debounce(&mut self.receiver, QUIET, MAX_WAIT).await?;
-            let root = self.root.clone();
-            let noticed = batch.paths.clone();
-            let paths = tokio::task::spawn_blocking(move || expand(&root, noticed))
-                .await
-                .ok()?;
-            if !paths.is_empty() || batch.rescan || batch.root_lost {
-                return Some(Batch { paths, ..batch });
+        self.batches.recv().await
+    }
+
+    fn batching(
+        mut notices: UnboundedReceiver<Notice>,
+        root: PathBuf,
+        watcher: Option<RecommendedWatcher>,
+    ) -> Self {
+        let (sender, batches) = unbounded_channel();
+        let batching = tokio::spawn(async move {
+            while let Some(batch) = debounce(&mut notices, QUIET, MAX_WAIT).await {
+                let (root, noticed) = (root.clone(), batch.paths.clone());
+                let Ok(paths) = tokio::task::spawn_blocking(move || expand(&root, noticed)).await
+                else {
+                    break;
+                };
+                let wanted = !paths.is_empty() || batch.rescan || batch.root_lost;
+                if wanted && sender.send(Batch { paths, ..batch }).is_err() {
+                    break;
+                }
             }
+        });
+        Self {
+            batches,
+            batching,
+            _watcher: watcher,
         }
     }
 }
@@ -63,11 +85,7 @@ pub fn watch(projects_dir: &Path) -> Result<Changes> {
     watcher
         .watch(&canonical, RecursiveMode::Recursive)
         .with_context(|| format!("cannot watch {}", projects_dir.display()))?;
-    Ok(Changes {
-        receiver,
-        root,
-        _watcher: watcher,
-    })
+    Ok(Changes::batching(receiver, root, Some(watcher)))
 }
 
 fn forward(
@@ -212,6 +230,22 @@ mod tests {
         let (sender, mut receiver) = unbounded_channel::<Notice>();
         drop(sender);
         assert_eq!(debounce(&mut receiver, QUIET, MAX_WAIT).await, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_survives_a_caller_that_stops_waiting_for_it() {
+        let (sender, notices) = unbounded_channel();
+        let mut changes = Changes::batching(notices, PathBuf::from("/p"), None);
+        sender.send(Notice::Changed(path("a"))).unwrap();
+        tokio::select! {
+            _ = changes.next_batch() => panic!("flushed before the quiet period"),
+            () = tokio::time::sleep(QUIET / 2) => {}
+        }
+        let batch = tokio::time::timeout(Duration::from_secs(5), changes.next_batch())
+            .await
+            .expect("the batch was lost")
+            .unwrap();
+        assert_eq!(batch.paths, BTreeSet::from([path("a")]));
     }
 
     #[tokio::test(start_paused = true)]
