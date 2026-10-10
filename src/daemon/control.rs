@@ -26,6 +26,7 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ensured {
     Running(Health),
+    KeptNewer(Health),
     Started(Health),
     Restarted { previous: String, health: Health },
 }
@@ -39,6 +40,7 @@ pub enum Stopped {
 #[derive(Debug, Clone, PartialEq)]
 enum Next {
     Keep(Health),
+    KeepNewer(Health),
     Start,
     Replace(Health),
     Wait(Option<u32>),
@@ -47,9 +49,67 @@ enum Next {
 fn next_step(status: Status, version: &str) -> Next {
     match status {
         Status::Running(health) if health.version == version => Next::Keep(health),
+        Status::Running(health) if is_older(version, &health.version) => Next::KeepNewer(health),
         Status::Running(health) => Next::Replace(health),
         Status::NotRunning => Next::Start,
         Status::Unresponsive { pid } => Next::Wait(pid),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Identifier<'a> {
+    Numeric(u64),
+    Text(&'a str),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Version<'a> {
+    core: (u64, u64, u64),
+    pre: Vec<Identifier<'a>>,
+}
+
+impl<'a> Version<'a> {
+    fn parse(text: &'a str) -> Option<Self> {
+        let text = text.split_once('+').map_or(text, |(version, _)| version);
+        let (core, pre) = text
+            .split_once('-')
+            .map_or((text, None), |(c, p)| (c, Some(p)));
+        let mut numbers = core.split('.').map(|n| n.parse::<u64>().ok());
+        let core = (numbers.next()??, numbers.next()??, numbers.next()??);
+        if numbers.next().is_some() {
+            return None;
+        }
+        let pre = match pre {
+            None => Vec::new(),
+            Some(pre) => pre
+                .split('.')
+                .map(|id| match id.parse() {
+                    Ok(number) => Some(Identifier::Numeric(number)),
+                    Err(_) if !id.is_empty() => Some(Identifier::Text(id)),
+                    Err(_) => None,
+                })
+                .collect::<Option<_>>()?,
+        };
+        Some(Self { core, pre })
+    }
+
+    fn precedes(&self, other: &Self) -> bool {
+        match self.core.cmp(&other.core) {
+            std::cmp::Ordering::Equal => match (self.pre.is_empty(), other.pre.is_empty()) {
+                (true, _) => false,
+                (false, true) => true,
+                (false, false) => self.pre < other.pre,
+            },
+            order => order.is_lt(),
+        }
+    }
+}
+
+fn is_older(version: &str, than: &str) -> bool {
+    match (Version::parse(version), Version::parse(than)) {
+        (Some(version), Some(than)) => version.precedes(&than),
+        (None, Some(_)) => true,
+        _ => false,
     }
 }
 
@@ -70,6 +130,7 @@ pub fn ensure(paths: &Paths) -> Result<Ensured> {
     check_socket_path(&paths.socket())?;
     match next_step(status(paths)?, VERSION) {
         Next::Keep(health) => Ok(Ensured::Running(health)),
+        Next::KeepNewer(health) => Ok(Ensured::KeptNewer(health)),
         Next::Start => start(paths),
         Next::Replace(old) => {
             stop(paths)?;
@@ -232,11 +293,49 @@ mod tests {
             next_step(Status::Running(health("0.0.9")), "0.1.0"),
             Next::Replace(health("0.0.9"))
         );
+        assert_eq!(
+            next_step(Status::Running(health("0.10.0")), "0.9.1"),
+            Next::KeepNewer(health("0.10.0"))
+        );
+        assert_eq!(
+            next_step(Status::Running(health("0.1.0")), "0.1.0-rc.1"),
+            Next::KeepNewer(health("0.1.0"))
+        );
+        assert_eq!(
+            next_step(Status::Running(health("0.1.0-rc.1")), "0.1.0"),
+            Next::Replace(health("0.1.0-rc.1"))
+        );
+        assert_eq!(
+            next_step(Status::Running(health("garbage")), "0.1.0"),
+            Next::Replace(health("garbage"))
+        );
         assert_eq!(next_step(Status::NotRunning, "0.1.0"), Next::Start);
         assert_eq!(
             next_step(Status::Unresponsive { pid: Some(7) }, "0.1.0"),
             Next::Wait(Some(7))
         );
+    }
+
+    #[test]
+    fn versions_compare_by_semver_precedence() {
+        let ordered = [
+            "0.9.0",
+            "0.10.0-alpha",
+            "0.10.0-alpha.1",
+            "0.10.0-alpha.beta",
+            "0.10.0-beta.2",
+            "0.10.0-beta.11",
+            "0.10.0-rc.1",
+            "0.10.0",
+            "1.0.0+build.5",
+            "1.2.3",
+        ];
+        for pair in ordered.windows(2) {
+            assert!(is_older(pair[0], pair[1]), "{} < {}", pair[0], pair[1]);
+            assert!(!is_older(pair[1], pair[0]), "{} > {}", pair[1], pair[0]);
+        }
+        assert!(!is_older("1.0.0+a", "1.0.0+b"));
+        assert!(is_older("1.0", "1.0.0"));
     }
 
     #[test]
