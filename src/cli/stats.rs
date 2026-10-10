@@ -5,6 +5,7 @@ use comfy_table::{Cell, CellAlignment, Table, presets::UTF8_FULL_CONDENSED};
 use super::format::{count, usd};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
+use crate::store::DailyCost;
 
 const MINUTES_PER_DAY: i64 = 24 * 60;
 
@@ -46,7 +47,7 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
         table.add_row(vec![
             Cell::new(row.day.to_string()),
             Cell::new(&row.model),
-            Cell::new(count(row.requests)).set_alignment(CellAlignment::Right),
+            Cell::new(requests_text(row)).set_alignment(CellAlignment::Right),
             Cell::new(cost_text(row.cost_usd, row.unpriced)).set_alignment(CellAlignment::Right),
         ]);
     }
@@ -64,6 +65,14 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn requests_text(row: &DailyCost) -> String {
+    if row.requests == 0 && row.reconciled_usd > 0.0 {
+        "-".to_string()
+    } else {
+        count(row.requests)
+    }
 }
 
 fn cost_text(cost_usd: f64, unpriced: u64) -> String {

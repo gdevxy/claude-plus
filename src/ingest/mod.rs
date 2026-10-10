@@ -4,7 +4,7 @@ mod lines;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::pricing::PriceTable;
 use crate::store::{
@@ -88,7 +88,11 @@ impl<'a> Ingestor<'a> {
             }
             on_file(index + 1, files.len());
         }
-        report.reconciliation = Some(self.store.reconcile(self.prices)?);
+        let reconciliation = self
+            .store
+            .ensure_reconciled(self.prices, report.files_changed > 0)
+            .context("reconciling with Claude Code counters")?;
+        report.reconciliation = Some(reconciliation);
         Ok(report)
     }
 
@@ -431,6 +435,46 @@ mod tests {
         assert_eq!(reconciliation.sessions_adjusted, 1);
         assert!((reconciliation.adjusted_usd - 0.01).abs() < 1e-12);
         assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn unchanged_import_keeps_existing_reconciliation() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-sonnet-5-5",
+            r#"{"input_tokens":1,"output_tokens":3}"#,
+        );
+        let counter = |output: u64| {
+            format!(
+                r#"{{"type":"cost-state","sessionId":"s1","totalCostUSD":0.01,"modelUsage":{{"claude-sonnet-5-5":{{"inputTokens":1,"outputTokens":{output}}}}}}}"#
+            )
+        };
+        let path = fx.write("-w-proj/s1.jsonl", &format!("{line}\n{}\n", counter(1003)));
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let mut w = store.writer().unwrap();
+        let file_id = w.file(&path.to_string_lossy(), 0, 0).unwrap();
+        w.cost_state(&CostStateRow {
+            file_id,
+            line_no: 99,
+            session_id: "s1".into(),
+            total_cost_usd: 0.02,
+            json: counter(2003),
+        })
+        .unwrap();
+        w.commit().unwrap();
+
+        let unchanged = fx.run(&mut store);
+        assert_eq!(unchanged.files_changed, 0);
+        assert!((unchanged.reconciliation.unwrap().adjusted_usd - 0.01).abs() < 1e-12);
+        assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
+
+        fx.append("-w-proj/s1.jsonl", "{\"type\":\"queue-operation\"}\n");
+        let changed = fx.run(&mut store);
+        assert!((changed.reconciliation.unwrap().adjusted_usd - 0.02).abs() < 1e-12);
     }
 
     #[test]

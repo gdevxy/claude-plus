@@ -37,8 +37,8 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
         )
     );
 
-    let mut store = super::open_store(paths)?;
-    let reconciliation = store.reconcile(prices)?;
+    let store = super::open_store(paths)?;
+    let reconciliation = store.reconciliation_summary()?;
     let totals = store.totals()?;
     let imported = format!(
         "{} in {} · {}",
@@ -51,8 +51,17 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
         )
     );
     println!("{}", labeled("Imported:", &imported));
-    for (model, requests) in store.unpriced_models()? {
-        let value = format!("{model} ({})", plural(requests, "request", "requests"));
+    let unpriced_requests = store.unpriced_models()?;
+    for (model, requests) in &unpriced_requests {
+        let value = format!("{model} ({})", plural(*requests, "request", "requests"));
+        println!("{}", labeled("Unpriced:", &value));
+    }
+    let counter_only = reconciliation
+        .unpriced_models
+        .iter()
+        .filter(|model| !unpriced_requests.iter().any(|(listed, _)| listed == *model));
+    for model in counter_only {
+        let value = format!("{model} (Claude Code counter only)");
         println!("{}", labeled("Unpriced:", &value));
     }
 

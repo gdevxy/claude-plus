@@ -75,13 +75,21 @@ impl PriceTable {
 
     pub fn cost(&self, model: &str, tokens: &TokenCounts) -> Option<f64> {
         let price = self.models.get(normalize_model(model))?;
-        let rates = price.rates_for(tokens.prompt_total());
+        Some(self.priced(&price.rates_for(tokens.prompt_total()), tokens))
+    }
+
+    pub fn base_cost(&self, model: &str, tokens: &TokenCounts) -> Option<f64> {
+        let price = self.models.get(normalize_model(model))?;
+        Some(self.priced(&price.base_rates(), tokens))
+    }
+
+    fn priced(&self, rates: &Rates, tokens: &TokenCounts) -> f64 {
         let usd = tokens.input as f64 * rates.input
             + tokens.cache_write_5m as f64 * rates.input * self.cache_write_5m_multiplier
             + tokens.cache_write_1h as f64 * rates.input * self.cache_write_1h_multiplier
             + tokens.cache_read as f64 * rates.cache_read
             + tokens.output as f64 * rates.output;
-        Some(usd / PER_MILLION)
+        usd / PER_MILLION
     }
 }
 
@@ -96,11 +104,15 @@ impl ModelPrice {
                 output: tier.output,
                 cache_read: tier.cache_read,
             })
-            .unwrap_or(Rates {
-                input: self.input,
-                output: self.output,
-                cache_read: self.cache_read,
-            })
+            .unwrap_or_else(|| self.base_rates())
+    }
+
+    fn base_rates(&self) -> Rates {
+        Rates {
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+        }
     }
 }
 
@@ -173,6 +185,19 @@ mod tests {
             .cost("claude-haiku-5-5", &tokens(100_001, 0, 0, 0, 0))
             .unwrap();
         assert!(close(large, 100_001.0 * 0.50 / 1e6), "{large}");
+    }
+
+    #[test]
+    fn base_cost_ignores_tiers() {
+        let table = PriceTable::bundled();
+        let large = tokens(100_001, 10, 0, 0, 0);
+        let base = table.base_cost("claude-haiku-5-5", &large).unwrap();
+        assert!(close(base, (100_001.0 * 0.1 + 10.0 * 0.5) / 1e6), "{base}");
+        assert_eq!(
+            table.base_cost("claude-sonnet-5-5", &tokens(5, 200, 0, 1000, 0)),
+            table.cost("claude-sonnet-5-5", &tokens(5, 200, 0, 1000, 0))
+        );
+        assert_eq!(table.base_cost("gpt-9", &large), None);
     }
 
     #[test]

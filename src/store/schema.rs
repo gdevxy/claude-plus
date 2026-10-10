@@ -110,6 +110,7 @@ CREATE TABLE adjustments (
     PRIMARY KEY (session_id, model, ts)
 );
 CREATE INDEX adjustments_by_ts ON adjustments(ts);
+CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no);
 "#,
 ];
 

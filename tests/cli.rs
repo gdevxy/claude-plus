@@ -58,7 +58,7 @@ fn import_reports_and_is_idempotent() {
         .success()
         .stdout(predicate::str::contains("5 new requests"))
         .stdout(predicate::str::contains("1 unparsable line"))
-        .stdout(predicate::str::contains("$0.0811"))
+        .stdout(predicate::str::contains("$0.0812"))
         .stdout(predicate::str::contains("vanished").not())
         .stdout(predicate::str::contains("Could not read").not());
     cmd(&env, &["import"])
@@ -81,7 +81,7 @@ fn stats_shows_daily_costs_per_model() {
         .stdout(predicate::str::contains("$0.0045"))
         .stdout(predicate::str::contains("claude-haiku-4-5-20251001"))
         .stdout(predicate::str::contains("Total"))
-        .stdout(predicate::str::contains("$0.0811"));
+        .stdout(predicate::str::contains("$0.0812"));
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn reindex_rebuilds_the_same_totals() {
     cmd(&env, &["stats", "--days", "36500"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("$0.0811"))
+        .stdout(predicate::str::contains("$0.0812"))
         .stdout(predicate::str::contains("includes $0.0111 reconciled"));
 }
 
@@ -167,11 +167,11 @@ const STATS_TABLE: &str = "\
 │ Day        ┆ Model                     ┆ Requests ┆    Cost │
 ╞════════════╪═══════════════════════════╪══════════╪═════════╡
 │ 2026-10-01 ┆ claude-opus-5-5           ┆        1 ┆ $0.0640 │
-│ 2026-10-02 ┆ claude-haiku-4-5-20251001 ┆        1 ┆ $0.0003 │
+│ 2026-10-02 ┆ claude-haiku-4-5-20251001 ┆        1 ┆ $0.0004 │
 │ 2026-10-02 ┆ claude-sonnet-5-5         ┆        1 ┆ $0.0045 │
-│ 2026-10-03 ┆ claude-haiku-4-5-20251001 ┆        0 ┆ $0.0011 │
+│ 2026-10-03 ┆ claude-haiku-4-5-20251001 ┆        - ┆ $0.0011 │
 │ 2026-10-03 ┆ claude-sonnet-5-5         ┆        2 ┆ $0.0112 │
-│ Total      ┆                           ┆        5 ┆ $0.0811 │
+│ Total      ┆                           ┆        5 ┆ $0.0812 │
 └────────────┴───────────────────────────┴──────────┴─────────┘
   includes $0.0111 reconciled from Claude Code session counters
 ";
@@ -181,7 +181,7 @@ fn import_output_is_exact() {
     let env = env();
     assert_eq!(
         stdout_of(&env, &["import"]),
-        "✻ Imported 16 lines from 4 changed files · 5 new requests · 1 unparsable line\n  History: 5 requests across 2 sessions · $0.0811 priced\n"
+        "✻ Imported 16 lines from 4 changed files · 5 new requests · 1 unparsable line\n  History: 5 requests across 2 sessions · $0.0812 priced\n"
     );
 }
 
@@ -215,7 +215,7 @@ fn doctor_output_is_exact() {
                Claude Code deletes older transcripts, claude-plus keeps its own copy
   Price table: bundled prices 2026-10-10
   Imported:    5 requests in 4 files · 1 unparsable line
-  Cross-check: 2 sessions · transcripts $0.0701 · Claude Code $0.0811 · reconciled $0.0811
+  Cross-check: 2 sessions · transcripts $0.0701 · Claude Code $0.0812 · reconciled $0.0812
 ",
         claude = env.claude.display(),
         plus = env.plus.display()
@@ -372,7 +372,7 @@ fn doctor_reports_reconciliation() {
     let doctor = stdout_of(&env, &["doctor"]);
     assert!(
         doctor.ends_with(
-            "  Cross-check: 3 sessions · transcripts $0.0801 · Claude Code $0.0854 · reconciled $0.0912
+            "  Cross-check: 3 sessions · transcripts $0.0801 · Claude Code $0.0855 · reconciled $0.0912
   Uncounted:   1 session with subagents has no Claude Code counter, its subagent output may be understated
   Over:        1 session where transcripts exceed Claude Code's counter
 "
@@ -407,4 +407,61 @@ fn zero_days_is_rejected() {
     let env = env();
     cmd(&env, &["stats", "--days", "0"]).assert().failure();
     cmd(&env, &["stats", "--days", "36501"]).assert().failure();
+}
+
+fn doctor_header(env: &Env, transcript_files: u64, imported: &str) -> String {
+    format!(
+        "✻ claude-plus doctor
+  Claude dir:  {claude} · {transcript_files} transcript files
+  Data dir:    {plus}
+  Retention:   cleanupPeriodDays: 30 (default)
+               Claude Code deletes older transcripts, claude-plus keeps its own copy
+  Price table: bundled prices 2026-10-10
+  Imported:    {imported}
+",
+        claude = env.claude.display(),
+        plus = env.plus.display()
+    )
+}
+
+#[test]
+fn doctor_lists_counter_only_unpriced_models() {
+    let env = env();
+    let session = "77777777-7777-7777-7777-777777777777";
+    let dir = env.claude.join("projects/-work-extra");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{session}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            assistant_line(session, "req_m1", "2026-10-03T10:00:00Z", false),
+            format_args!(
+                r#"{{"type":"cost-state","sessionId":"{session}","totalCostUSD":0.0101,"modelUsage":{{"claude-sonnet-5-5":{{"inputTokens":1,"outputTokens":1000}},"claude-mystery-9":{{"inputTokens":10,"outputTokens":10}}}}}}"#
+            )
+        ),
+    )
+    .unwrap();
+    cmd(&env, &["import"]).assert().success();
+    let expected = doctor_header(&env, 5, "6 requests in 5 files · 1 unparsable line")
+        + "  Unpriced:    claude-mystery-9 (Claude Code counter only)
+  Cross-check: 3 sessions · transcripts $0.0801 · Claude Code $0.0913 · reconciled $0.0912
+";
+    assert_eq!(stdout_of(&env, &["doctor"]), expected);
+}
+
+#[test]
+fn doctor_does_not_write_to_the_database() {
+    let env = env();
+    cmd(&env, &["import"]).assert().success();
+    let database = env.plus.join("data.db");
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute("DELETE FROM adjustments", [])
+        .unwrap();
+    cmd(&env, &["doctor"]).assert().success();
+    let remaining: i64 = rusqlite::Connection::open(&database)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM adjustments", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0);
 }

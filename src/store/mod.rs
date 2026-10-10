@@ -202,14 +202,13 @@ impl Store {
     }
 
     pub fn cost_state_deltas(&self) -> Result<Vec<CostStateDelta>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT c.session_id, (SELECT COALESCE(SUM(cost_usd), 0) FROM requests r WHERE r.session_id = c.session_id),
                     (SELECT COALESCE(SUM(cost_usd), 0) FROM adjustments a WHERE a.session_id = c.session_id), c.total_cost_usd
              FROM cost_states c
-             WHERE NOT EXISTS (SELECT 1 FROM cost_states later WHERE later.session_id = c.session_id
-                               AND (later.file_id, later.line_no) > (c.file_id, c.line_no))
-             ORDER BY c.session_id",
-        )?;
+             WHERE {} ORDER BY c.session_id",
+            reconcile::LATEST_COST_STATE
+        ))?;
         let rows = statement.query_map([], |r| {
             Ok(CostStateDelta {
                 session_id: r.get(0)?,

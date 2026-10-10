@@ -8,5 +8,5 @@ this line is not json
 {"type":"assistant","sessionId":"11111111-1111-1111-1111-111111111111","timestamp":"2026-10-02T08:00:00Z","cwd":"/work/demo","requestId":"req_sonnet","message":{"id":"msg_sonnet","model":"claude-sonnet-5-5","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":1000,"cache_creation":{"ephemeral_5m_input_tokens":1000,"ephemeral_1h_input_tokens":0}}}}
 {"type":"assistant","sessionId":"11111111-1111-1111-1111-111111111111","timestamp":"2026-10-02T08:00:01Z","requestId":"req_synth","message":{"model":"<synthetic>","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}
 {"type":"system","subtype":"compact_boundary","sessionId":"11111111-1111-1111-1111-111111111111","timestamp":"2026-10-02T08:05:00Z","compactMetadata":{"trigger":"auto","preTokens":180000,"postTokens":20000}}
-{"type":"cost-state","sessionId":"11111111-1111-1111-1111-111111111111","totalCostUSD":0.0689,"modelUsage":{}}
+{"type":"cost-state","sessionId":"11111111-1111-1111-1111-111111111111","totalCostUSD":0.06896,"modelUsage":{}}
 {"type":"assistant","sessionId":
