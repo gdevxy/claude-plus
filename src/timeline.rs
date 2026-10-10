@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde_json::Value;
 
 use crate::pricing::normalize_model;
@@ -38,6 +40,11 @@ impl Observed {
         self.tokens.cache_read + self.tokens.cache_write()
     }
 
+    fn identity(&self) -> (i64, Thread, String, u64, u64, u64) {
+        let (thread, model, input, read, write) = self.fingerprint();
+        (self.ts_ms, thread, model.to_string(), input, read, write)
+    }
+
     fn fingerprint(&self) -> (Thread, &str, u64, u64, u64) {
         (
             self.thread.clone(),
@@ -59,7 +66,11 @@ impl Timeline {
         let mut observed: Vec<Observed> = requests.iter().map(from_transcript).collect();
         let mut matched = vec![false; observed.len()];
         let mut live = Vec::new();
+        let mut seen = HashSet::new();
         for step in steps.iter().filter_map(from_step) {
+            if !seen.insert(step.identity()) {
+                continue;
+            }
             let twin = observed.iter().enumerate().position(|(index, request)| {
                 !matched[index]
                     && request.fingerprint() == step.fingerprint()
@@ -210,6 +221,32 @@ mod tests {
         assert_eq!(latest.ts_ms, 1_030_000);
         assert_eq!(latest.tokens.cache_write(), 50);
         assert_eq!(latest.effort.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn a_step_reported_twice_is_counted_once() {
+        let timeline = Timeline::build(
+            &[point(1_000, 5, 9000, 300, None)],
+            &[
+                step(1_000_400, 5, 9000, 300, None),
+                step(1_000_400, 5, 9000, 300, None),
+                step(1_030_000, 8, 9300, 50, None),
+                step(1_030_000, 8, 9300, 50, None),
+                step(1_030_000, 8, 9300, 50, Some("a1")),
+            ],
+        );
+        assert_eq!(
+            timeline
+                .requests
+                .iter()
+                .map(|r| (r.ts_ms, r.source, r.thread.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1_000_000, Source::Transcript, Thread::Main),
+                (1_030_000, Source::Live, Thread::Main),
+                (1_030_000, Source::Live, Thread::Agent("a1".into())),
+            ]
+        );
     }
 
     #[test]

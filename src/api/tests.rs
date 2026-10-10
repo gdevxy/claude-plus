@@ -284,6 +284,22 @@ fn a_batch_sent_again_is_stored_once_and_counted_once() {
 }
 
 #[test]
+fn a_step_already_in_the_transcript_and_its_repeat_are_not_counted_again() {
+    let server = Server::start();
+    server.client().import().unwrap();
+    let transcript_ms = 1_790_848_805_000;
+    let repeated = step(None, transcript_ms + 400, 10, 20_000, 5000);
+    server
+        .client()
+        .send_events(&json!({"events": [repeated.clone(), repeated]}))
+        .unwrap();
+    let live = server.client().snapshot(SESSION).unwrap().live;
+    assert_eq!(live.forecast.unwrap().samples, 1);
+    assert_eq!(live.cache.last_touch_ms, Some(transcript_ms));
+    assert_eq!(live.cache.hit_ratio, Some(20_000.0 / 25_010.0));
+}
+
+#[test]
 fn bad_requests_are_answered_with_a_reason() {
     let server = Server::start();
     let cases = [
