@@ -256,6 +256,21 @@ fn the_snapshot_reports_the_cache_forecast_and_limits() {
         ),
         (2, 25_300, 312, 900)
     );
+    let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-9);
+    assert!(close(
+        forecast.warm_usd,
+        (25_300.0 * 0.2 + 312.0 * 8.0 + 900.0 * 20.0) / 1e6
+    ));
+    assert!(close(
+        forecast.cold_usd,
+        (25_612.0 * 8.0 + 900.0 * 20.0) / 1e6
+    ));
+    assert!(close(live.cache.hit_ratio, 45_000.0 / 50_322.0));
+    assert!(close(
+        Some(live.cache.saved_usd),
+        45_000.0 * (4.0 - 0.2) / 1e6
+    ));
+    assert_eq!((live.cache.rebuilds, live.cache.rebuild_usd), (0, 0.0));
     assert_eq!(live.limits.len(), 1);
     assert_eq!(
         (live.limits[0].window.as_str(), live.limits[0].used_pct),
