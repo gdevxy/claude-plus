@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::{OptionalExtension, Transaction, params};
 
+use super::GENERATION_MARK;
 use crate::transcript::TokenCounts;
 
 #[derive(Debug, Clone, Copy)]
@@ -140,18 +141,29 @@ impl Writer<'_> {
         Ok(())
     }
 
-    pub fn reset_file(&mut self, file_id: i64) -> Result<()> {
+    pub fn retire_file(&mut self, file_id: i64) -> Result<String> {
+        let path: String = self
+            .tx
+            .prepare_cached("SELECT path FROM files WHERE id = ?1")?
+            .query_row([file_id], |r| r.get(0))?;
+        let prefix = format!("{path}{GENERATION_MARK}");
+        let mut taken = self
+            .tx
+            .prepare_cached("SELECT substr(path, ?2) FROM files WHERE substr(path, 1, ?3) = ?1")?;
+        let highest = taken
+            .query_map(
+                params![prefix, prefix.len() as i64 + 1, prefix.len() as i64],
+                |r| r.get::<_, String>(0),
+            )?
+            .filter_map(|suffix| suffix.ok()?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        let retired = format!("{prefix}{}", highest + 1);
         self.exec(
-            "UPDATE files SET offset = 0, lines = 0, parse_errors = 0 WHERE id = ?1",
-            [file_id],
+            "UPDATE files SET path = ?2 WHERE id = ?1",
+            params![file_id, retired],
         )?;
-        for table in ["raw_records", "attachments", "compactions", "cost_states"] {
-            self.exec(
-                &format!("DELETE FROM {table} WHERE file_id = ?1"),
-                [file_id],
-            )?;
-        }
-        Ok(())
+        Ok(retired)
     }
 
     pub fn raw(&mut self, file_id: i64, line_no: u64, kind: &str, json: &str) -> Result<()> {

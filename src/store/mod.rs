@@ -12,6 +12,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 pub use reconcile::Reconciliation;
 pub use writer::*;
 
+pub(crate) const GENERATION_MARK: &str = "#gen-";
+
 pub struct Store {
     conn: Connection,
 }
@@ -291,6 +293,17 @@ fn daily_entry<'a, Tz: TimeZone>(
     }))
 }
 
+fn live_path(path: &str) -> &str {
+    match path.rsplit_once(GENERATION_MARK) {
+        Some((live, generation))
+            if !generation.is_empty() && generation.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            live
+        }
+        _ => path,
+    }
+}
+
 pub(crate) fn raw_files(conn: &Connection) -> Result<Vec<(i64, String)>> {
     let mut statement = conn.prepare(
         "SELECT id, path FROM files WHERE id IN (SELECT DISTINCT file_id FROM raw_records) ORDER BY id",
@@ -303,7 +316,7 @@ pub(crate) fn raw_records(conn: &Connection, file_id: i64, kinds: &[&str]) -> Re
     let path: String = conn.query_row("SELECT path FROM files WHERE id = ?1", [file_id], |r| {
         r.get(0)
     })?;
-    let location = crate::ingest::TranscriptFile::from_path(Path::new(&path));
+    let location = crate::ingest::TranscriptFile::from_path(Path::new(live_path(&path)));
     let mut sql = String::from("SELECT line_no, kind, json FROM raw_records WHERE file_id = ?1");
     if !kinds.is_empty() {
         let placeholders = vec!["?"; kinds.len()].join(",");
@@ -606,64 +619,57 @@ mod tests {
     }
 
     #[test]
-    fn reset_file_removes_rows_keyed_by_file() {
+    fn retiring_a_file_keeps_its_rows_under_a_free_generation_path() {
         let mut store = Store::open_in_memory().unwrap();
         let mut w = store.writer().unwrap();
-        let file = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
-        w.raw(file, 1, "attachment", "{}").unwrap();
-        w.attachment(&AttachmentRow {
-            file_id: file,
-            line_no: 1,
-            session_id: "s".into(),
-            ts: None,
-            kind: "k".into(),
-            chars: 1,
-            names: vec![],
-        })
-        .unwrap();
-        w.compaction(&CompactionRow {
-            file_id: file,
-            line_no: 2,
-            session_id: "s".into(),
-            ts: None,
-            trigger: None,
-            pre_tokens: None,
-            post_tokens: None,
-        })
-        .unwrap();
+        let first = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
+        w.raw(first, 1, "attachment", "{}").unwrap();
         w.cost_state(&CostStateRow {
-            file_id: file,
-            line_no: 3,
+            file_id: first,
+            line_no: 2,
             session_id: "s".into(),
             total_cost_usd: 1.0,
             json: "{}".into(),
         })
         .unwrap();
-        w.advance_file(
-            file,
-            &FileProgress {
-                offset: 50,
-                lines: 3,
-                size: 50,
-                mtime: 1,
-                head_len: 50,
-                head_hash: 9,
-            },
-            2,
-        )
-        .unwrap();
-        w.reset_file(file).unwrap();
+        assert_eq!(w.retire_file(first).unwrap(), "/p/proj/s1.jsonl#gen-1");
+        let second = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
+        assert_ne!(second, first);
+        w.raw(second, 1, "user", "{}").unwrap();
+        assert_eq!(w.retire_file(second).unwrap(), "/p/proj/s1.jsonl#gen-2");
         w.commit().unwrap();
-        for table in ["raw_records", "attachments", "compactions", "cost_states"] {
-            let count: i64 = store
-                .conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(count, 0, "{table}");
-        }
-        let checkpoint = store.checkpoint("/p/proj/s1.jsonl").unwrap().unwrap();
-        assert_eq!((checkpoint.offset, checkpoint.lines), (0, 0));
-        assert_eq!(store.parse_error_total().unwrap(), 0);
+
+        assert_eq!(store.checkpoint("/p/proj/s1.jsonl").unwrap(), None);
+        assert_eq!(
+            store.raw_files().unwrap(),
+            vec![
+                (first, "/p/proj/s1.jsonl#gen-1".to_string()),
+                (second, "/p/proj/s1.jsonl#gen-2".to_string())
+            ]
+        );
+        let retired = store.raw_records(first, &[]).unwrap();
+        assert_eq!(
+            (
+                retired[0].project.as_str(),
+                retired[0].session_hint.as_str()
+            ),
+            ("proj", "s1")
+        );
+        let cost_states: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM cost_states", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cost_states, 1);
+    }
+
+    #[test]
+    fn generation_numbers_ignore_similar_paths() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.file("/p/proj/s1.jsonl.bak#gen-7", 0, 0).unwrap();
+        w.file("/p/proj/s10.jsonl#gen-3", 0, 0).unwrap();
+        let live = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
+        assert_eq!(w.retire_file(live).unwrap(), "/p/proj/s1.jsonl#gen-1");
     }
 
     #[test]

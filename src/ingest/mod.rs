@@ -52,6 +52,12 @@ impl IngestReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rebuilt {
+    pub requests: u64,
+    pub records: u64,
+}
+
 pub struct Ingestor<'a> {
     store: &'a mut Store,
     prices: &'a PriceTable,
@@ -96,6 +102,39 @@ impl<'a> Ingestor<'a> {
         Ok(report)
     }
 
+    pub fn reindex(&mut self, on_file: &mut dyn FnMut(usize, usize)) -> Result<Rebuilt> {
+        let mut writer = self.store.writer()?;
+        writer.clear_derived()?;
+        let mut report = IngestReport::default();
+        let mut records = 0u64;
+        let files = writer.raw_files()?;
+        for (index, (file_id, path)) in files.iter().enumerate() {
+            let location = TranscriptFile::from_path(Path::new(path));
+            for row in writer.raw_records(*file_id, &[])? {
+                let Ok(parsed) = parse_line(&row.json) else {
+                    continue;
+                };
+                apply(
+                    &mut writer,
+                    self.prices,
+                    &location,
+                    row.file_id,
+                    row.line_no,
+                    &parsed,
+                    &mut report,
+                )?;
+                records += 1;
+            }
+            on_file(index + 1, files.len());
+        }
+        writer.reconcile(self.prices)?;
+        writer.commit()?;
+        Ok(Rebuilt {
+            requests: report.requests_inserted,
+            records,
+        })
+    }
+
     pub fn ingest_file(&mut self, file: &TranscriptFile) -> Result<IngestReport> {
         self.ingest_file_limited(file, u64::MAX)
     }
@@ -138,14 +177,13 @@ impl<'a> Ingestor<'a> {
             lines::head_fingerprint(&file.path, lines::HEAD_BYTES.min(size))?;
 
         let mut writer = self.store.writer()?;
+        if let Some(cp) = checkpoint.as_ref().filter(|_| replaced) {
+            writer.retire_file(cp.id)?;
+        }
         let file_id = writer.file(&path, size, mtime)?;
         let (mut offset, mut line_no) = match &checkpoint {
             Some(cp) if !replaced => (cp.offset, cp.lines),
-            Some(_) => {
-                writer.reset_file(file_id)?;
-                (0, 0)
-            }
-            None => (0, 0),
+            _ => (0, 0),
         };
         report.files_changed = 1;
 
@@ -739,8 +777,13 @@ mod tests {
             .unwrap();
     }
 
-    fn raw_json(store: &Store) -> String {
-        let (file_id, _) = store.raw_files().unwrap()[0].clone();
+    fn raw_json(store: &Store, path: &str) -> String {
+        let (file_id, _) = store
+            .raw_files()
+            .unwrap()
+            .into_iter()
+            .find(|(_, stored)| stored == path)
+            .unwrap();
         store
             .raw_records(file_id, &[])
             .unwrap()
@@ -767,8 +810,96 @@ mod tests {
         set_mtime_offset(&path, 10);
         let report = fx.run(&mut store);
         assert_eq!(report.requests_inserted, 1);
-        assert!(!raw_json(&store).contains("r1"));
-        assert!(raw_json(&store).contains("r2"));
+        let live = path.to_string_lossy().into_owned();
+        assert!(!raw_json(&store, &live).contains("r1"));
+        assert!(raw_json(&store, &live).contains("r2"));
+        assert!(raw_json(&store, &format!("{live}#gen-1")).contains("r1"));
+    }
+
+    type Snapshot = (crate::store::Totals, Vec<crate::store::DailyCost>);
+
+    fn snapshot(store: &Store) -> Snapshot {
+        (
+            store.totals().unwrap(),
+            store.daily_costs(0, i64::MAX, &chrono::Utc).unwrap(),
+        )
+    }
+
+    fn reindex(store: &mut Store) -> Rebuilt {
+        let prices = PriceTable::bundled();
+        Ingestor::new(store, &prices)
+            .reindex(&mut |_, _| {})
+            .unwrap()
+    }
+
+    #[test]
+    fn reindex_matches_import_across_replacement_and_deletion() {
+        let fx = Fixture::new();
+        let r1 = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let r2 = r1.replace("r1", "r2");
+        let r3 = assistant(
+            "s2",
+            "r3",
+            "2026-10-02T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let replaced = fx.write("-w-proj/s1.jsonl", &format!("{r1}\n"));
+        let deleted = fx.write("-w-proj/s2.jsonl", &format!("{r3}\n"));
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        fx.write("-w-proj/s1.jsonl", &format!("{r2}\n"));
+        set_mtime_offset(&replaced, 10);
+        std::fs::remove_file(deleted).unwrap();
+        fx.run(&mut store);
+        let imported = snapshot(&store);
+        assert_eq!(imported.0.requests, 3);
+
+        let rebuilt = reindex(&mut store);
+        assert_eq!((rebuilt.requests, rebuilt.records), (3, 3));
+        assert_eq!(snapshot(&store), imported);
+    }
+
+    #[test]
+    fn replaced_generations_are_never_reingested() {
+        let fx = Fixture::new();
+        let a = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let path = fx.write("-w-proj/s1.jsonl", &format!("{a}\n"));
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        for (generation, request) in ["r2", "r3"].iter().enumerate() {
+            fx.write(
+                "-w-proj/s1.jsonl",
+                &format!("{}\n", a.replace("r1", request)),
+            );
+            set_mtime_offset(&path, 10 * (generation as u64 + 1));
+            assert_eq!(fx.run(&mut store).requests_inserted, 1);
+        }
+        let again = fx.run(&mut store);
+        assert_eq!((again.files_seen, again.files_changed), (1, 0));
+        let live = path.to_string_lossy().into_owned();
+        assert_eq!(
+            store
+                .raw_files()
+                .unwrap()
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect::<Vec<_>>(),
+            vec![format!("{live}#gen-1"), format!("{live}#gen-2"), live]
+        );
+        assert_eq!(store.totals().unwrap().requests, 3);
     }
 
     #[test]
@@ -795,13 +926,15 @@ mod tests {
             "claude-opus-5-5",
             OPUS_USAGE,
         );
-        fx.write("-w-proj/s1.jsonl", &format!("{a}\n"));
+        let path = fx.write("-w-proj/s1.jsonl", &format!("{a}\n"));
         let mut store = Store::open_in_memory().unwrap();
         fx.run(&mut store);
         fx.write("-w-proj/s1.jsonl", &format!("{b}\n{c}\n"));
         let report = fx.run(&mut store);
         assert_eq!((report.requests_inserted, report.parse_errors), (2, 0));
-        assert!(!raw_json(&store).contains("r1"));
+        let live = path.to_string_lossy().into_owned();
+        assert!(!raw_json(&store, &live).contains("r1"));
+        assert!(raw_json(&store, &format!("{live}#gen-1")).contains("r1"));
     }
 
     #[test]
