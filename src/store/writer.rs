@@ -3,6 +3,16 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::transcript::TokenCounts;
 
+#[derive(Debug, Clone, Copy)]
+pub struct FileProgress {
+    pub offset: u64,
+    pub lines: u64,
+    pub size: u64,
+    pub mtime: i64,
+    pub head_len: u64,
+    pub head_hash: u64,
+}
+
 pub struct Writer<'a> {
     pub(super) tx: Transaction<'a>,
 }
@@ -111,15 +121,21 @@ impl Writer<'_> {
     pub fn advance_file(
         &mut self,
         file_id: i64,
-        offset: u64,
-        lines: u64,
-        size: u64,
-        mtime: i64,
+        progress: &FileProgress,
         new_parse_errors: u64,
     ) -> Result<()> {
         self.exec(
-            "UPDATE files SET offset = ?2, lines = ?3, size = ?4, mtime = ?5, parse_errors = parse_errors + ?6 WHERE id = ?1",
-            params![file_id, offset as i64, lines as i64, size as i64, mtime, new_parse_errors as i64],
+            "UPDATE files SET offset = ?2, lines = ?3, size = ?4, mtime = ?5, head_len = ?6, head_hash = ?7, parse_errors = parse_errors + ?8 WHERE id = ?1",
+            params![
+                file_id,
+                progress.offset as i64,
+                progress.lines as i64,
+                progress.size as i64,
+                progress.mtime,
+                progress.head_len as i64,
+                progress.head_hash as i64,
+                new_parse_errors as i64
+            ],
         )?;
         Ok(())
     }

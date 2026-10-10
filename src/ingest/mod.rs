@@ -1,13 +1,17 @@
 mod discover;
 mod lines;
 
+use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::Result;
 
 use crate::pricing::PriceTable;
-use crate::store::{Store, Writer};
-use crate::transcript::Parsed;
+use crate::store::{
+    AttachmentRow, CompactionRow, CostStateRow, FileProgress, RequestRow, RequestWrite, SessionRow,
+    Store, ToolResultRow, ToolUseRow, Writer,
+};
+use crate::transcript::{Parsed, Record, parse_line, text::shrink};
 
 pub use discover::{TranscriptFile, discover};
 
@@ -29,13 +33,9 @@ pub struct IngestReport {
     pub duplicate_requests: u64,
     pub unpriced_requests: u64,
     pub parse_errors: u64,
+    pub files_vanished: u64,
+    pub failures: Vec<(String, String)>,
 }
-
-use crate::store::{
-    AttachmentRow, CompactionRow, CostStateRow, RequestRow, RequestWrite, SessionRow,
-    ToolResultRow, ToolUseRow,
-};
-use crate::transcript::{Record, parse_line, text::shrink};
 
 impl IngestReport {
     pub fn add(&mut self, other: &IngestReport) {
@@ -46,6 +46,8 @@ impl IngestReport {
         self.duplicate_requests += other.duplicate_requests;
         self.unpriced_requests += other.unpriced_requests;
         self.parse_errors += other.parse_errors;
+        self.files_vanished += other.files_vanished;
+        self.failures.extend(other.failures.iter().cloned());
     }
 }
 
@@ -65,9 +67,24 @@ impl<'a> Ingestor<'a> {
         on_file: &mut dyn FnMut(usize, usize),
     ) -> Result<IngestReport> {
         let files = discover(projects_dir)?;
+        self.ingest_listed(&files, on_file)
+    }
+
+    pub(crate) fn ingest_listed(
+        &mut self,
+        files: &[TranscriptFile],
+        on_file: &mut dyn FnMut(usize, usize),
+    ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
         for (index, file) in files.iter().enumerate() {
-            report.add(&self.ingest_file(file)?);
+            match self.ingest_file(file) {
+                Ok(file_report) => report.add(&file_report),
+                Err(error) if is_not_found(&error) => report.files_vanished += 1,
+                Err(error) => report.failures.push((
+                    file.path.to_string_lossy().into_owned(),
+                    format!("{error:#}"),
+                )),
+            }
             on_file(index + 1, files.len());
         }
         Ok(report)
@@ -104,10 +121,20 @@ impl<'a> Ingestor<'a> {
             return Ok(report);
         }
 
+        let replaced = match &checkpoint {
+            Some(cp) if size < cp.offset => true,
+            Some(cp) if cp.offset > 0 && cp.head_len > 0 => {
+                lines::head_fingerprint(&file.path, cp.head_len)? != (cp.head_len, cp.head_hash)
+            }
+            _ => false,
+        };
+        let (head_len, head_hash) =
+            lines::head_fingerprint(&file.path, lines::HEAD_BYTES.min(size))?;
+
         let mut writer = self.store.writer()?;
         let file_id = writer.file(&path, size, mtime)?;
         let (mut offset, mut line_no) = match &checkpoint {
-            Some(cp) if size >= cp.offset => (cp.offset, cp.lines),
+            Some(cp) if !replaced => (cp.offset, cp.lines),
             Some(_) => {
                 writer.reset_file(file_id)?;
                 (0, 0)
@@ -116,6 +143,14 @@ impl<'a> Ingestor<'a> {
         };
         report.files_changed = 1;
 
+        let progress = |offset, lines| FileProgress {
+            offset,
+            lines,
+            size,
+            mtime,
+            head_len,
+            head_hash,
+        };
         let mut batch_errors = 0;
         let mut in_batch = 0;
         for line in lines::complete_lines(&file.path, offset)? {
@@ -146,17 +181,23 @@ impl<'a> Ingestor<'a> {
             }
             in_batch += 1;
             if in_batch == BATCH_LINES {
-                writer.advance_file(file_id, offset, line_no, size, mtime, batch_errors)?;
+                writer.advance_file(file_id, &progress(offset, line_no), batch_errors)?;
                 writer.commit()?;
                 writer = self.store.writer()?;
                 batch_errors = 0;
                 in_batch = 0;
             }
         }
-        writer.advance_file(file_id, offset, line_no, size, mtime, batch_errors)?;
+        writer.advance_file(file_id, &progress(offset, line_no), batch_errors)?;
         writer.commit()?;
         Ok(report)
     }
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == ErrorKind::NotFound)
 }
 
 pub fn apply(
@@ -628,5 +669,133 @@ mod tests {
         );
         assert!(raw[1].json.len() < 1000, "tool output must be shrunk");
         assert!(raw[1].json.contains(r#""$chars":5000"#));
+    }
+
+    fn set_mtime_offset(path: &std::path::Path, seconds: u64) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    fn raw_json(store: &Store) -> String {
+        let (file_id, _) = store.raw_files().unwrap()[0].clone();
+        store
+            .raw_records(file_id, &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.json.clone())
+            .collect()
+    }
+
+    #[test]
+    fn same_size_replacement_is_reread() {
+        let fx = Fixture::new();
+        let a = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let b = a.replace("r1", "r2");
+        let path = fx.write("-w-proj/s1.jsonl", &format!("{a}\n"));
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        fx.write("-w-proj/s1.jsonl", &format!("{b}\n"));
+        set_mtime_offset(&path, 10);
+        let report = fx.run(&mut store);
+        assert_eq!(report.requests_inserted, 1);
+        assert!(!raw_json(&store).contains("r1"));
+        assert!(raw_json(&store).contains("r2"));
+    }
+
+    #[test]
+    fn larger_replacement_is_reread() {
+        let fx = Fixture::new();
+        let a = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let b = assistant(
+            "s1",
+            "r2",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let c = assistant(
+            "s1",
+            "r3",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        fx.write("-w-proj/s1.jsonl", &format!("{a}\n"));
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        fx.write("-w-proj/s1.jsonl", &format!("{b}\n{c}\n"));
+        let report = fx.run(&mut store);
+        assert_eq!((report.requests_inserted, report.parse_errors), (2, 0));
+        assert!(!raw_json(&store).contains("r1"));
+    }
+
+    #[test]
+    fn small_file_growth_is_not_a_replacement() {
+        let fx = Fixture::new();
+        let line = r#"{"type":"queue-operation"}"#;
+        let path = fx.write("-w-proj/s1.jsonl", &format!("{line}\n"));
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        for expected_lines in [2, 3] {
+            fx.append("-w-proj/s1.jsonl", &format!("{line}\n"));
+            set_mtime_offset(&path, expected_lines * 10);
+            let report = fx.run(&mut store);
+            assert_eq!((report.lines, report.parse_errors), (1, 0));
+            let checkpoint = store.checkpoint(&path.to_string_lossy()).unwrap().unwrap();
+            assert_eq!(checkpoint.lines, expected_lines);
+        }
+    }
+
+    #[test]
+    fn vanished_file_is_skipped() {
+        let fx = Fixture::new();
+        let missing = TranscriptFile::from_path(&fx.projects.join("-w-proj/gone.jsonl"));
+        let mut store = Store::open_in_memory().unwrap();
+        let prices = PriceTable::bundled();
+        let report = Ingestor::new(&mut store, &prices)
+            .ingest_listed(&[missing], &mut |_, _| {})
+            .unwrap();
+        assert_eq!((report.files_vanished, report.failures.len()), (1, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_is_reported_and_others_continue() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let locked = fx.write("-w-proj/a.jsonl", &format!("{line}\n"));
+        fx.write(
+            "-w-proj/b.jsonl",
+            &format!("{}\n", line.replace("r1", "r2")),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&locked).is_ok() {
+            return;
+        }
+        let mut store = Store::open_in_memory().unwrap();
+        let report = fx.run(&mut store);
+        assert_eq!(report.requests_inserted, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].0.ends_with("a.jsonl"));
     }
 }

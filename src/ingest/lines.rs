@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::Result;
@@ -33,6 +33,17 @@ pub fn complete_lines(path: &Path, offset: u64) -> Result<impl Iterator<Item = R
             Err(error) => Some(Err(error.into())),
         }
     }))
+}
+
+pub const HEAD_BYTES: u64 = 4096;
+
+pub fn head_fingerprint(path: &Path, max_len: u64) -> Result<(u64, u64)> {
+    let mut buffer = Vec::new();
+    File::open(path)?.take(max_len).read_to_end(&mut buffer)?;
+    let hash = buffer.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    Ok((buffer.len() as u64, hash))
 }
 
 #[cfg(test)]

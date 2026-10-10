@@ -20,6 +20,8 @@ pub struct FileCheckpoint {
     pub lines: u64,
     pub size: u64,
     pub mtime: i64,
+    pub head_len: u64,
+    pub head_hash: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,7 +109,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, offset, lines, size, mtime FROM files WHERE path = ?1",
+                "SELECT id, offset, lines, size, mtime, head_len, head_hash FROM files WHERE path = ?1",
                 [path],
                 |r| {
                     Ok(FileCheckpoint {
@@ -116,6 +118,8 @@ impl Store {
                         lines: r.get::<_, i64>(2)? as u64,
                         size: r.get::<_, i64>(3)? as u64,
                         mtime: r.get(4)?,
+                        head_len: r.get::<_, i64>(5)? as u64,
+                        head_hash: r.get::<_, i64>(6)? as u64,
                     })
                 },
             )
@@ -328,7 +332,19 @@ mod tests {
         let mut w = store.writer().unwrap();
         let id = w.file("/p/a.jsonl", 10, 5).unwrap();
         assert_eq!(w.file("/p/a.jsonl", 10, 5).unwrap(), id);
-        w.advance_file(id, 120, 3, 200, 7, 1).unwrap();
+        w.advance_file(
+            id,
+            &FileProgress {
+                offset: 120,
+                lines: 3,
+                size: 200,
+                mtime: 7,
+                head_len: 64,
+                head_hash: 0xdead_beef_dead_beef,
+            },
+            1,
+        )
+        .unwrap();
         w.commit().unwrap();
         assert_eq!(
             store.checkpoint("/p/a.jsonl").unwrap(),
@@ -337,7 +353,9 @@ mod tests {
                 offset: 120,
                 lines: 3,
                 size: 200,
-                mtime: 7
+                mtime: 7,
+                head_len: 64,
+                head_hash: 0xdead_beef_dead_beef
             })
         );
         assert_eq!(store.parse_error_total().unwrap(), 1);
@@ -530,7 +548,19 @@ mod tests {
             json: "{}".into(),
         })
         .unwrap();
-        w.advance_file(file, 50, 3, 50, 1, 2).unwrap();
+        w.advance_file(
+            file,
+            &FileProgress {
+                offset: 50,
+                lines: 3,
+                size: 50,
+                mtime: 1,
+                head_len: 50,
+                head_hash: 9,
+            },
+            2,
+        )
+        .unwrap();
         w.reset_file(file).unwrap();
         w.commit().unwrap();
         for table in ["raw_records", "attachments", "compactions", "cost_states"] {

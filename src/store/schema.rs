@@ -1,4 +1,5 @@
-pub const MIGRATIONS: &[&str] = &[r#"
+pub const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE files (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -91,7 +92,12 @@ CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-"#];
+"#,
+    r#"
+ALTER TABLE files ADD COLUMN head_len INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN head_hash INTEGER NOT NULL DEFAULT 0;
+"#,
+];
 
 pub const DERIVED_TABLES: &[&str] = &[
     "requests",
