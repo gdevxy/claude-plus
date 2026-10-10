@@ -740,3 +740,26 @@ fn doctor_reports_a_pending_rebuild() {
     cmd(&env, &["import"]).assert().success();
     assert!(stdout_of(&env, &["doctor"]).contains("Cross-check:"));
 }
+
+#[test]
+fn doctor_counts_retired_generations_apart() {
+    let env = env();
+    let session = "88888888-8888-8888-8888-888888888888";
+    let dir = env.claude.join("projects/-work-extra");
+    std::fs::create_dir_all(&dir).unwrap();
+    let transcript = dir.join(format!("{session}.jsonl"));
+    let lines = |requests: &[&str]| -> String {
+        requests
+            .iter()
+            .map(|request| assistant_line(session, request, "2026-10-03T10:00:00Z", false) + "\n")
+            .collect()
+    };
+    std::fs::write(&transcript, lines(&["req_g1", "req_g2"])).unwrap();
+    cmd(&env, &["import"]).assert().success();
+    std::fs::write(&transcript, lines(&["req_g3"])).unwrap();
+    cmd(&env, &["import"]).assert().success();
+    assert!(
+        stdout_of(&env, &["doctor"])
+            .contains("  Imported:    8 requests in 5 files (1 retired) · 1 unparsable line\n")
+    );
+}

@@ -70,6 +70,12 @@ pub struct CostStateDelta {
     pub claude_usd: Option<f64>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FileCounts {
+    pub live: u64,
+    pub retired: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawRow {
     pub file_id: i64,
@@ -325,10 +331,18 @@ impl Store {
             .unwrap()
     }
 
-    pub fn file_count(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0))? as u64)
+    pub fn file_counts(&self) -> Result<FileCounts> {
+        let mut statement = self.conn.prepare("SELECT path FROM files")?;
+        let mut counts = FileCounts::default();
+        for path in statement.query_map([], |r| r.get::<_, String>(0))? {
+            let path = path?;
+            if live_path(&path) == path {
+                counts.live += 1;
+            } else {
+                counts.retired += 1;
+            }
+        }
+        Ok(counts)
     }
 }
 

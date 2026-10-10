@@ -79,10 +79,15 @@ fn readable_store(paths: &Paths) -> Result<Option<Store>> {
 fn print_database(store: &Store) -> Result<()> {
     let reconciliation = store.reconciliation_summary()?;
     let totals = store.totals()?;
+    let files = store.file_counts()?;
+    let retired = match files.retired {
+        0 => String::new(),
+        retired => format!(" ({retired} retired)"),
+    };
     let imported = format!(
-        "{} in {} · {}",
+        "{} in {}{retired} · {}",
         plural(totals.requests, "request", "requests"),
-        plural(store.file_count()?, "file", "files"),
+        plural(files.live, "file", "files"),
         plural(
             store.parse_error_total()?,
             "unparsable line",
