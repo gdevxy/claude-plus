@@ -20,6 +20,7 @@ pub use writer::*;
 pub(crate) const GENERATION_MARK: &str = "#gen-";
 const REDERIVE_PENDING: &str = "rederive_pending";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const STATEMENT_CACHE: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 #[error("another claude-plus is writing, try again in a moment")]
@@ -146,6 +147,8 @@ impl Store {
     }
 
     fn migrated(conn: Connection, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
+        conn.pragma_update(None, "foreign_keys", true)?;
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         let mut store = Self { conn };
         store.refuse_newer_schema()?;
         let current = store.schema_version()?;
@@ -236,7 +239,7 @@ impl Store {
         until_ts: i64,
     ) -> Result<Vec<(i64, String, Option<f64>)>> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT ts, model, cost_usd FROM {table} WHERE ts >= ?1 AND ts < ?2 ORDER BY ts"
+            "SELECT ts, model, cost_usd FROM {table} WHERE ts >= ?1 AND ts < ?2"
         ))?;
         let rows = statement.query_map([since_ts, until_ts], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -409,9 +412,12 @@ pub(crate) fn raw_files(conn: &Connection) -> Result<Vec<(i64, String)>> {
 }
 
 pub(crate) fn raw_records(conn: &Connection, file_id: i64, kinds: &[&str]) -> Result<Vec<RawRow>> {
-    let path: String = conn.query_row("SELECT path FROM files WHERE id = ?1", [file_id], |r| {
-        r.get(0)
-    })?;
+    let path: String = conn
+        .query_row("SELECT path FROM files WHERE id = ?1", [file_id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .with_context(|| format!("no transcript file with id {file_id}"))?;
     let location = Location::from_path(Path::new(live_path(&path)));
     let mut sql = String::from("SELECT line_no, kind, json FROM raw_records WHERE file_id = ?1");
     if !kinds.is_empty() {
@@ -489,6 +495,161 @@ mod tests {
         w.commit().unwrap();
         let totals = store.totals().unwrap();
         assert_eq!((totals.requests, totals.priced_cost_usd), (1, 3.0));
+    }
+
+    #[test]
+    fn a_longer_stream_replaces_every_token_field() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.request(&request("r1", 100, "m", Some(1.0))).unwrap();
+        let mut last = request("r1", 100, "m", Some(2.0));
+        last.tokens = TokenCounts {
+            input: 11,
+            output: 12,
+            thinking: 13,
+            cache_read: 14,
+            cache_write_5m: 15,
+            cache_write_1h: 16,
+        };
+        assert_eq!(w.request(&last).unwrap(), RequestWrite::Updated);
+        w.commit().unwrap();
+        assert_eq!(
+            store.dump("requests"),
+            vec![
+                r#"Text("r1")|Text("s1")|Integer(100)|Text("m")|Integer(11)|Integer(12)|Integer(13)|Integer(14)|Integer(15)|Integer(16)|Real(2.0)|Integer(0)|Null|Null|Null|Null"#
+            ]
+        );
+    }
+
+    #[test]
+    fn writer_stores_tools_attachments_and_compactions() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let file = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
+        let tool_use = ToolUseRow {
+            id: "t1".into(),
+            session_id: "s1".into(),
+            ts: 5,
+            name: "Read".into(),
+            input_chars: 7,
+        };
+        w.tool_use(&tool_use).unwrap();
+        w.tool_use(&ToolUseRow {
+            name: "Other".into(),
+            ..tool_use
+        })
+        .unwrap();
+        let result = ToolResultRow {
+            tool_use_id: "t1".into(),
+            session_id: "s1".into(),
+            ts: 6,
+            chars: 40,
+            images: 2,
+            is_error: true,
+        };
+        w.tool_result(&result).unwrap();
+        w.tool_result(&ToolResultRow { chars: 1, ..result })
+            .unwrap();
+        w.attachment(&AttachmentRow {
+            file_id: file,
+            line_no: 3,
+            session_id: "s1".into(),
+            ts: Some(7),
+            kind: "instructions".into(),
+            chars: 9,
+            names: vec!["/h/CLAUDE.md".into(), "a".into()],
+        })
+        .unwrap();
+        w.compaction(&CompactionRow {
+            file_id: file,
+            line_no: 4,
+            session_id: "s1".into(),
+            ts: None,
+            trigger: Some("auto".into()),
+            pre_tokens: Some(100),
+            post_tokens: None,
+        })
+        .unwrap();
+        w.commit().unwrap();
+        assert_eq!(
+            store.dump("tool_uses"),
+            vec![r#"Text("t1")|Text("s1")|Integer(5)|Text("Read")|Integer(7)"#]
+        );
+        assert_eq!(
+            store.dump("tool_results"),
+            vec![r#"Text("t1")|Text("s1")|Integer(6)|Integer(40)|Integer(2)|Integer(1)"#]
+        );
+        assert_eq!(
+            store.dump("attachments"),
+            vec![format!(
+                r#"Integer({file})|Integer(3)|Text("s1")|Integer(7)|Text("instructions")|Integer(9)|Text("[\"/h/CLAUDE.md\",\"a\"]")"#
+            )]
+        );
+        assert_eq!(
+            store.dump("compactions"),
+            vec![format!(
+                r#"Integer({file})|Integer(4)|Text("s1")|Null|Text("auto")|Integer(100)|Null"#
+            )]
+        );
+    }
+
+    #[test]
+    fn cost_state_deltas_are_per_session() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let file = w.file("/p/proj/s.jsonl", 0, 0).unwrap();
+        for (key, session, cost) in [("a", "s1", 0.25), ("b", "s2", 0.5), ("c", "s2", 0.25)] {
+            w.request(&RequestRow {
+                session_id: session.into(),
+                ..request(key, 1, "m", Some(cost))
+            })
+            .unwrap();
+        }
+        for (line_no, session, total) in [(1, "s2", 0.8), (2, "s1", 0.3)] {
+            w.cost_state(&CostStateRow {
+                file_id: file,
+                line_no,
+                session_id: session.into(),
+                total_cost_usd: Some(total),
+                model_count: 1,
+                json: "{}".into(),
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        let deltas: Vec<(String, f64, Option<f64>)> = store
+            .cost_state_deltas()
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.session_id, d.ours_usd, d.claude_usd))
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                ("s1".to_string(), 0.25, Some(0.3)),
+                ("s2".to_string(), 0.75, Some(0.8))
+            ]
+        );
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced() {
+        let store = Store::open_in_memory().unwrap();
+        let enabled: bool = store
+            .conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+            .unwrap();
+        assert!(enabled);
+    }
+
+    #[test]
+    fn raw_rows_need_a_known_file() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        assert!(w.raw(42, 1, "user", "{}").is_err());
+        drop(w);
+        let error = store.raw_records(42, &[]).unwrap_err();
+        assert_eq!(error.to_string(), "no transcript file with id 42");
     }
 
     #[test]
