@@ -1,54 +1,10 @@
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use common::{Env, STATS_TABLE, cmd, env, stdout_of, stdout_of_with};
 use predicates::prelude::*;
-
-struct Env {
-    _temp: tempfile::TempDir,
-    claude: PathBuf,
-    plus: PathBuf,
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    for entry in walkdir::WalkDir::new(from) {
-        let entry = entry.unwrap();
-        let target = to.join(entry.path().strip_prefix(from).unwrap());
-        if entry.file_type().is_dir() {
-            std::fs::create_dir_all(&target).unwrap();
-        } else {
-            std::fs::copy(entry.path(), &target).unwrap();
-        }
-    }
-}
-
-fn env() -> Env {
-    let temp = tempfile::tempdir().unwrap();
-    let claude = temp.path().join("claude");
-    let plus = temp.path().join("plus");
-    copy_dir(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .as_path(),
-        &claude,
-    );
-    Env {
-        _temp: temp,
-        claude,
-        plus,
-    }
-}
-
-fn cmd(env: &Env, args: &[&str]) -> Command {
-    let mut command = Command::cargo_bin("claude-plus").unwrap();
-    command
-        .args(args)
-        .env("CLAUDE_CONFIG_DIR", &env.claude)
-        .env("CLAUDE_PLUS_HOME", &env.plus)
-        .env("TZ", "UTC")
-        .env("CLAUDE_PLUS_NOW", "2026-10-03T12:00:00Z")
-        .env("NO_COLOR", "1");
-    command
-}
 
 #[test]
 fn import_reports_and_is_idempotent() {
@@ -131,16 +87,6 @@ fn missing_claude_dir_is_friendly() {
         .stdout(predicate::str::contains("No Claude Code transcripts found"));
 }
 
-fn stdout_of(env: &Env, args: &[&str]) -> String {
-    let output = cmd(env, args)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    String::from_utf8(output).unwrap()
-}
-
 fn write_unpriced_transcript(env: &Env) {
     let dir = env.claude.join("projects/-work-other");
     std::fs::create_dir_all(&dir).unwrap();
@@ -153,29 +99,6 @@ fn write_unpriced_transcript(env: &Env) {
     )
     .unwrap();
 }
-
-fn stdout_of_with(env: &Env, args: &[&str], vars: &[(&str, &str)]) -> String {
-    let mut command = cmd(env, args);
-    for (key, value) in vars {
-        command.env(key, value);
-    }
-    String::from_utf8(command.assert().success().get_output().stdout.clone()).unwrap()
-}
-
-const STATS_TABLE: &str = "\
-┌────────────┬───────────────────────────┬──────────┬─────────┐
-│ Day        ┆ Model                     ┆ Requests ┆    Cost │
-╞════════════╪═══════════════════════════╪══════════╪═════════╡
-│ 2026-10-01 ┆ claude-opus-5-5           ┆        1 ┆ $0.0640 │
-│ 2026-10-02 ┆ claude-haiku-4-5-20251001 ┆        1 ┆ $0.0004 │
-│ 2026-10-02 ┆ claude-sonnet-5-5         ┆        1 ┆ $0.0045 │
-│ 2026-10-03 ┆ claude-haiku-4-5-20251001 ┆        - ┆ $0.0011 │
-│ 2026-10-03 ┆ claude-sonnet-5-5         ┆        2 ┆ $0.0112 │
-├────────────┼───────────────────────────┼──────────┼─────────┤
-│ Total      ┆                           ┆        5 ┆ $0.0812 │
-└────────────┴───────────────────────────┴──────────┴─────────┘
-  includes $0.0111 reconciled from Claude Code session counters
-";
 
 #[test]
 fn import_output_is_exact() {
@@ -703,6 +626,7 @@ fn help_describes_every_command() {
         "  stats    Show daily cost per model, importing first\n",
         "  doctor   Check the setup and compare totals with Claude Code, read-only\n",
         "  reindex  Rebuild every derived table from the stored records\n",
+        "  daemon   Run the daemon that keeps the store live, in the foreground\n",
     ] {
         assert!(help.contains(line), "missing {line:?} in\n{help}");
     }

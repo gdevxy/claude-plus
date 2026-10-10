@@ -40,6 +40,18 @@ pub fn count(value: u64) -> String {
     out
 }
 
+pub fn duration(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    match seconds {
+        s if s < MINUTE => format!("{s}s"),
+        s if s < HOUR => format!("{}m {}s", s / MINUTE, s % MINUTE),
+        s if s < DAY => format!("{}h {}m", s / HOUR, s % HOUR / MINUTE),
+        s => format!("{}d {}h", s / DAY, s % DAY / HOUR),
+    }
+}
+
 pub fn plural(value: u64, singular: &str, plural: &str) -> String {
     format!(
         "{} {}",
@@ -91,6 +103,16 @@ mod tests {
         assert_eq!(usd_with(1234.5, 2), "$1,234.50");
         assert_eq!(usd_with(2.0, 4), "$2.0000");
         assert_eq!(usd_with(-0.001, 2), "$0.00");
+    }
+
+    #[test]
+    fn durations_show_the_two_largest_units() {
+        assert_eq!(duration(0), "0s");
+        assert_eq!(duration(59), "59s");
+        assert_eq!(duration(60), "1m 0s");
+        assert_eq!(duration(192), "3m 12s");
+        assert_eq!(duration(3600 + 5 * 60 + 9), "1h 5m");
+        assert_eq!(duration(3 * 86_400 + 4 * 3600 + 7), "3d 4h");
     }
 
     #[test]

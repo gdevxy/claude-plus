@@ -1,3 +1,4 @@
+mod daemon;
 mod doctor;
 pub mod format;
 mod import;
@@ -41,6 +42,26 @@ enum Command {
     Doctor,
     #[command(about = "Rebuild every derived table from the stored records")]
     Reindex,
+    #[command(
+        about = "Run the daemon that keeps the store live, in the foreground",
+        args_conflicts_with_subcommands = true
+    )]
+    Daemon {
+        #[arg(long, help = "Start a detached daemon unless one answers, then return")]
+        ensure: bool,
+        #[arg(long, hide = true)]
+        detached: bool,
+        #[arg(long, hide = true, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+        rescan_secs: u64,
+        #[command(subcommand)]
+        action: Option<DaemonAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    #[command(about = "Stop the running daemon")]
+    Stop,
 }
 
 pub fn run() -> Result<()> {
@@ -52,6 +73,16 @@ pub fn run() -> Result<()> {
         Command::Stats { days } => stats::run(&paths, &prices, days),
         Command::Doctor => doctor::run(&paths, &prices),
         Command::Reindex => reindex::run(&paths, &prices),
+        Command::Daemon {
+            action: Some(DaemonAction::Stop),
+            ..
+        } => daemon::stop(&paths),
+        Command::Daemon { ensure: true, .. } => daemon::ensure(&paths),
+        Command::Daemon {
+            detached,
+            rescan_secs,
+            ..
+        } => daemon::run(&paths, prices, detached, rescan_secs),
     }
 }
 

@@ -148,40 +148,59 @@ where
         (&Method::GET, "/health") => json(StatusCode::OK, &health(&state)),
         (&Method::GET, "/snapshot") => snapshot(state, request.uri().query()).await,
         (&Method::POST, "/events") => events(state, request.into_body()).await,
-        (&Method::POST, "/import") => match state.writer.import().await {
-            Ok(outcome) => json(
-                StatusCode::OK,
-                &ImportOutcome {
-                    report: outcome.report,
-                    reconcile_error: outcome.reconcile_error,
-                },
-            ),
-            Err(error) => failure(StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")),
-        },
-        (&Method::POST, "/reindex") => match state.writer.reindex().await {
-            Ok(rebuilt) => json(StatusCode::OK, &rebuilt),
-            Err(error) => failure(StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")),
-        },
+        (&Method::POST, "/import") => {
+            state.log.info("import requested over the socket");
+            import(&state).await
+        }
+        (&Method::POST, "/reindex") => {
+            state.log.info("reindex requested over the socket");
+            reindex(&state).await
+        }
         (&Method::POST, "/shutdown") => {
+            state.log.info("shutdown requested over the socket");
             state.shutdown.trigger();
             json(StatusCode::ACCEPTED, &serde_json::json!({"stopping": true}))
         }
-        _ => match ROUTES.iter().find(|(route, _)| *route == path) {
-            Some((_, allowed)) => {
-                let mut reply = failure(
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    format!("use {allowed} for {path}"),
-                );
-                reply
-                    .headers_mut()
-                    .insert(ALLOW, allowed.as_str().parse().expect("valid header"));
-                reply
-            }
-            None => failure(
-                StatusCode::NOT_FOUND,
-                format!("no route for {method} {path}"),
-            ),
-        },
+        _ => not_routed(&method, &path),
+    }
+}
+
+async fn import(state: &State) -> Reply {
+    match state.writer.import().await {
+        Ok(outcome) => json(
+            StatusCode::OK,
+            &ImportOutcome {
+                report: outcome.report,
+                reconcile_error: outcome.reconcile_error,
+            },
+        ),
+        Err(error) => failure(StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")),
+    }
+}
+
+async fn reindex(state: &State) -> Reply {
+    match state.writer.reindex().await {
+        Ok(rebuilt) => json(StatusCode::OK, &rebuilt),
+        Err(error) => failure(StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")),
+    }
+}
+
+fn not_routed(method: &Method, path: &str) -> Reply {
+    match ROUTES.iter().find(|(route, _)| *route == path) {
+        Some((_, allowed)) => {
+            let mut reply = failure(
+                StatusCode::METHOD_NOT_ALLOWED,
+                format!("use {allowed} for {path}"),
+            );
+            reply
+                .headers_mut()
+                .insert(ALLOW, allowed.as_str().parse().expect("valid header"));
+            reply
+        }
+        None => failure(
+            StatusCode::NOT_FOUND,
+            format!("no route for {method} {path}"),
+        ),
     }
 }
 
