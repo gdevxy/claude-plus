@@ -22,6 +22,7 @@ pub use writer::*;
 const GENERATION_MARK: &str = "#gen-";
 const REINDEX_PENDING: &str = "reindex_pending";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const READ_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 const STATEMENT_CACHE: usize = 64;
 const WAL_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
 
@@ -132,6 +133,7 @@ impl Store {
                 path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
+            conn.busy_timeout(READ_BUSY_TIMEOUT)?;
             let store = Self { conn };
             store.refuse_unsupported_schema()?;
             Ok(store)
@@ -1228,6 +1230,20 @@ mod tests {
             .unwrap();
         let store = Store::open_read_only(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), 0);
+    }
+
+    #[test]
+    fn readers_wait_briefly_for_a_busy_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        Store::open(&path).unwrap();
+        let reader = Store::open_read_only(&path).unwrap();
+        let timeout: i64 = reader
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, READ_BUSY_TIMEOUT.as_millis() as i64);
+        assert_eq!(READ_BUSY_TIMEOUT, std::time::Duration::from_millis(200));
     }
 
     #[cfg(unix)]
