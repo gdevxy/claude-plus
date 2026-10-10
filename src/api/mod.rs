@@ -246,14 +246,9 @@ fn health(state: &State) -> Health {
             watching: state.watching.load(Ordering::Relaxed),
             last_error: status.last_error.as_ref().map(|f| f.message.clone()),
             last_error_at_ms: status.last_error.as_ref().map(|f| epoch_ms(f.at)),
-            rebuilding: rebuilding(state),
+            rebuilding: status.rebuilding,
         },
     }
-}
-
-fn rebuilding(state: &State) -> bool {
-    let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
-    reader.reindex_pending().unwrap_or(false)
 }
 
 async fn snapshot(state: Arc<State>, query: Option<&str>) -> Reply {

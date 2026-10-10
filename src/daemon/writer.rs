@@ -39,6 +39,7 @@ pub struct IngestStatus {
     pub last_ingest: Option<SystemTime>,
     pub progress: Option<(usize, usize)>,
     pub last_error: Option<Failure>,
+    pub rebuilding: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -190,10 +191,14 @@ pub fn spawn(
     log: Arc<Log>,
 ) -> Result<(WriterHandle, JoinHandle<()>)> {
     let (jobs, queue) = mpsc::channel();
+    let status = IngestStatus {
+        rebuilding: store.reindex_pending()?,
+        ..IngestStatus::default()
+    };
     let handle = WriterHandle {
         jobs,
         shared: Arc::new(Shared {
-            status: Mutex::default(),
+            status: Mutex::new(status),
             collectors: Mutex::default(),
             next_collector: AtomicU64::new(0),
             exited: watch::Sender::new(false),
@@ -254,11 +259,14 @@ impl Worker {
                 }
                 Job::Scan(reply) => {
                     let outcome = self.scan(&mut drain);
+                    self.publish_rebuilding(None);
                     self.finish_ingest(outcome, reply, true);
                 }
                 Job::Events(rows, reply) => answer(reply, store_events(&mut self.store, &rows)),
                 Job::Reindex(reply) => {
+                    self.publish_rebuilding(Some(true));
                     let rebuilt = self.reindex(&mut drain);
+                    self.publish_rebuilding(None);
                     answer(reply, self.unless_cancelled(rebuilt));
                 }
                 Job::Stop => break,
@@ -270,6 +278,21 @@ impl Worker {
                 Job::Panic => panic!("the writer was asked to panic"),
             }
         }
+    }
+
+    fn publish_rebuilding(&self, known: Option<bool>) {
+        let rebuilding = match known {
+            Some(rebuilding) => rebuilding,
+            None => match self.store.reindex_pending() {
+                Ok(pending) => pending,
+                Err(error) => {
+                    self.log
+                        .warn(format!("cannot read the reindex marker: {error:#}"));
+                    return;
+                }
+            },
+        };
+        lock(&self.shared.status).rebuilding = rebuilding;
     }
 
     fn ingestor<'a>(&'a mut self, drain: &'a mut dyn FnMut(&mut Store)) -> Ingestor<'a> {
@@ -609,6 +632,52 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn the_writer_says_it_is_rebuilding_until_the_reindex_is_done() {
+        let fx = Fixture::new();
+        let lines: String = (0..crate::ingest::BATCH_LINES + 10)
+            .map(|i| line("a", &format!("r{i}")))
+            .collect();
+        fx.write("a.jsonl", &lines);
+        fx.handle.import().await.unwrap();
+        assert!(!fx.handle.status().rebuilding);
+        let reindex = tokio::spawn({
+            let handle = fx.handle.clone();
+            async move { handle.reindex().await }
+        });
+        tokio::task::yield_now().await;
+        let mid_reindex = fx.handle.hold();
+        while !fx.reader().reindex_pending().unwrap() {
+            tokio::task::yield_now().await;
+        }
+        assert!(fx.handle.status().rebuilding);
+        mid_reindex.send(()).unwrap();
+        reindex.await.unwrap().unwrap();
+        assert!(!fx.handle.status().rebuilding);
+    }
+
+    #[tokio::test]
+    async fn a_writer_started_on_an_unfinished_reindex_says_it_is_rebuilding() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data.db")).unwrap();
+        let mut w = store.writer().unwrap();
+        w.mark_reindex_pending(true).unwrap();
+        w.commit().unwrap();
+        let log = Arc::new(Log::open(&temp.path().join("daemon.log"), false).unwrap());
+        let (handle, thread) = spawn(
+            store,
+            PriceTable::bundled(),
+            temp.path().join("projects"),
+            log,
+        )
+        .unwrap();
+        assert!(handle.status().rebuilding);
+        handle.import().await.unwrap();
+        assert!(!handle.status().rebuilding);
+        handle.stop();
+        thread.join().unwrap();
     }
 
     #[tokio::test]

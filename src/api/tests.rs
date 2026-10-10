@@ -17,11 +17,16 @@ struct Server {
     socket: PathBuf,
     shutdown: Shutdown,
     writer: WriterHandle,
+    state: Arc<State>,
     serving: Option<JoinHandle<Result<()>>>,
 }
 
 impl Server {
     fn start() -> Self {
+        Self::start_with(|_| {})
+    }
+
+    fn start_with(prepare: impl FnOnce(&mut Store)) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let projects = temp.path().join("claude/projects");
         std::fs::create_dir_all(projects.join("-work-demo")).unwrap();
@@ -33,7 +38,8 @@ impl Server {
         )
         .unwrap();
         let database = temp.path().join("data.db");
-        let store = Store::open(&database).unwrap();
+        let mut store = Store::open(&database).unwrap();
+        prepare(&mut store);
         let reader = Store::open_read_only(&database).unwrap();
         let log = Arc::new(Log::open(&temp.path().join("daemon.log"), false).unwrap());
         let (writer, _) =
@@ -52,18 +58,22 @@ impl Server {
             log,
             request_timeout: TEST_REQUEST_TIMEOUT,
         });
-        let serving = std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(serve(listener, state))
+        let serving = std::thread::spawn({
+            let state = state.clone();
+            move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(serve(listener, state))
+            }
         });
         Self {
             temp,
             socket,
             shutdown,
             writer,
+            state,
             serving: Some(serving),
         }
     }
@@ -441,13 +451,24 @@ fn a_missing_daemon_is_reported_as_not_running() {
 }
 
 #[test]
-fn snapshots_are_refused_while_the_store_is_being_rebuilt() {
+fn health_answers_while_a_snapshot_holds_the_reader() {
     let server = Server::start();
-    server.client().import().unwrap();
-    let mut store = Store::open(&server.temp.path().join("data.db")).unwrap();
-    let mut writer = store.writer().unwrap();
-    writer.mark_reindex_pending(true).unwrap();
-    writer.commit().unwrap();
+    let held = server.state.reader.lock().unwrap();
+    let health = server
+        .client()
+        .with_timeout(Duration::from_millis(500))
+        .health();
+    drop(held);
+    assert!(health.is_ok(), "{health:?}");
+}
+
+#[test]
+fn snapshots_are_refused_while_the_store_is_being_rebuilt() {
+    let server = Server::start_with(|store| {
+        let mut writer = store.writer().unwrap();
+        writer.mark_reindex_pending(true).unwrap();
+        writer.commit().unwrap();
+    });
     assert_eq!(
         server.raw(Method::GET, &format!("/snapshot?session={SESSION}"), ""),
         (503, json!({"error": "the store is being rebuilt"}))
