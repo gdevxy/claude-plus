@@ -257,12 +257,14 @@ async fn snapshot(state: Arc<State>, query: Option<&str>) -> Reply {
     }
     let built = tokio::task::spawn_blocking(move || -> Result<Option<Snapshot>> {
         let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
-        if reader.reindex_pending()? {
-            return Ok(None);
-        }
-        let totals = reader.session_totals(&session)?;
-        let measure = reader.latest_event(&session, MEASURE_KIND)?;
-        Snapshot::of(&session, totals, measure, epoch_ms(SystemTime::now())).map(Some)
+        reader.reading(|reader| {
+            if reader.reindex_pending()? {
+                return Ok(None);
+            }
+            let totals = reader.session_totals(&session)?;
+            let measure = reader.latest_event(&session, MEASURE_KIND)?;
+            Snapshot::of(&session, totals, measure, epoch_ms(SystemTime::now())).map(Some)
+        })
     })
     .await;
     match built {

@@ -141,6 +141,13 @@ impl Store {
         open().map_err(|error| opening_error(path, error))
     }
 
+    pub fn reading<T>(&self, read: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        let result = read(self)?;
+        snapshot.commit()?;
+        Ok(result)
+    }
+
     pub fn schema_version(&self) -> Result<usize> {
         user_version(&self.conn)
     }
@@ -1230,6 +1237,28 @@ mod tests {
             .unwrap();
         let store = Store::open_read_only(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), 0);
+    }
+
+    #[test]
+    fn reads_made_together_ignore_commits_made_between_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        let mut store = Store::open(&path).unwrap();
+        let mut w = store.writer().unwrap();
+        w.request(&request("r1", 100, "m", Some(1.0))).unwrap();
+        w.commit().unwrap();
+        let reader = Store::open_read_only(&path).unwrap();
+        let (before, after) = reader
+            .reading(|r| {
+                let before = r.session_totals("s1")?.requests;
+                let mut w = store.writer()?;
+                w.request(&request("r2", 200, "m", Some(1.0)))?;
+                w.commit()?;
+                Ok((before, r.session_totals("s1")?.requests))
+            })
+            .unwrap();
+        assert_eq!((before, after), (1, 1));
+        assert_eq!(reader.session_totals("s1").unwrap().requests, 2);
     }
 
     #[test]
