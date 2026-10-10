@@ -580,6 +580,28 @@ describe('plus mod', () => {
     await ui.unmount()
   })
 
+  test('hooks return at once while the daemon is silent', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    wiring.silent = true
+    let measured = false
+    const measuring = $.session.measure(MEASURE).then(() => {
+      measured = true
+    })
+    await clock.settle()
+    expect(measured).toBe(true)
+    await measuring
+    let completed = false
+    const completing = $.turn.complete({ turnId: 't1', reason: 'answer', answer: '', durationMs: 900, isAborted: false }).then(() => {
+      completed = true
+    })
+    await clock.settle()
+    expect(completed).toBe(true)
+    await completing
+  })
+
   test('a silent daemon is reported once the 500 ms timeout passes', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)
