@@ -25,7 +25,6 @@ export const LAST_MINUTE_MS = 60_000
 export const HOUR_MS = 3_600_000
 export const FIVE_MINUTES_MS = 300_000
 export const CONTEXT_WARNING = 80
-export const CONTEXT_ERROR = 95
 export const LIMIT_WARNING = 80
 export const WHY_COLUMNS = 2
 export const DETAIL_INDENT = 8
@@ -266,7 +265,7 @@ export function screen(input: ScreenInput): Line[] {
   const width = Math.max(MIN_CONTENT, input.width - 2 * PADDING)
   const snapshot = current(input)
   const sections = [
-    notice(input),
+    notice(input, width),
     headline(input, snapshot, width),
     context(input, width),
     cache(input, snapshot, width),
@@ -279,6 +278,10 @@ export function screen(input: ScreenInput): Line[] {
 
 function gap(index: number): Line {
   return { key: `gap-${index}`, segments: [{ text: ' ' }] }
+}
+
+function fitting(width: number, ...choices: string[]): string {
+  return choices.find(choice => choice.length <= width) ?? choices[choices.length - 1] ?? ''
 }
 
 function plain(key: string, text: string, style: Style = {}): Line {
@@ -324,7 +327,7 @@ function meter(key: string, label: string, fraction: number, value: string, widt
   }
 }
 
-function notice(input: ScreenInput): Line[] {
+function notice(input: ScreenInput, width: number): Line[] {
   const { status, detail } = input.daemon
   if (status === 'ok') return []
   if (status === 'starting') return [prose('daemon', 'Starting the claude-plus daemon…', { dim: true })]
@@ -333,7 +336,9 @@ function notice(input: ScreenInput): Line[] {
     return [prose('daemon', 'claude-plus is not installed yet. Install it, or set its path in the plugin options', { color: 'warning' })]
   }
   if (status === 'unreachable') {
-    return [prose('daemon', 'The daemon is not answering · run claude-plus daemon --ensure', { color: 'warning' })]
+    const whole = 'The daemon is not answering · run claude-plus daemon --ensure'
+    if (whole.length <= width) return [prose('daemon', whole, { color: 'warning' })]
+    return [prose('daemon', 'The daemon is not answering', { color: 'warning' }), prose('daemon-fix', 'Run claude-plus daemon --ensure', { color: 'warning' })]
   }
   return [prose('daemon', `The daemon could not start: ${detail ?? 'no reason given'}`, { color: 'error' })]
 }
@@ -355,7 +360,8 @@ function headline(input: ScreenInput, snapshot: Snapshot | null, width: number):
   const unpriced = snapshot?.totals.unpriced_requests ?? 0
   if (unpriced > 0) {
     const noun = unpriced === 1 ? 'request on an unknown model is' : 'requests on unknown models are'
-    lines.push(prose('unpriced', `${unpriced} ${noun} not priced`, { dim: true }))
+    const short = unpriced === 1 ? 'unpriced request' : 'unpriced requests'
+    lines.push(prose('unpriced', fitting(width, `${unpriced} ${noun} not priced`, `${unpriced} ${short}`), { dim: true }))
   }
   return lines
 }
@@ -363,12 +369,12 @@ function headline(input: ScreenInput, snapshot: Snapshot | null, width: number):
 function context(input: ScreenInput, width: number): Line[] {
   const measure = input.local.measure
   if (measure === null || measure.contextPercent === null) {
-    return [plain('context', 'Context', { bold: true }), prose('context-empty', 'Context appears after your first prompt', { dim: true })]
+    return [plain('context', 'Context', { bold: true }), prose('context-empty', 'Context shows after your first prompt', { dim: true })]
   }
   const used = shown(input.motions, 'context', measure.contextPercent, input.nowMs)
   const amount =
     measure.contextTokens === null ? tokens(measure.contextWindow) : `${tokens(measure.contextTokens)} / ${tokens(measure.contextWindow)}`
-  const color: ThemeKey = used >= CONTEXT_ERROR ? 'error' : used >= CONTEXT_WARNING ? 'warning' : 'text'
+  const color: ThemeKey = used >= CONTEXT_WARNING ? 'warning' : 'text'
   return [
     pair('context', 'Context', amount, width, {}, { bold: true }),
     meter('context-bar', '', used / 100, percent(used).padStart(4), width, color),
@@ -389,7 +395,7 @@ function cache(input: ScreenInput, snapshot: Snapshot | null, width: number): Li
   const state = clock.state === 'warm' ? 'warm' : 'cold'
   const right = clock.state === 'warm' ? `${countdown(clock.remainingMs)} left` : 'expired'
   const title = 'Cache '
-  const left = `${title}${glyph.text} ${state} · ${ttl}`
+  const left = `${title}${glyph.text} ${state} (${ttl})`
   const padded = spread(left, right, width - WHY_COLUMNS)
   const urgent = clock.state === 'warm' && clock.remainingMs <= LAST_MINUTE_MS
   lines.push({
@@ -412,9 +418,17 @@ function cache(input: ScreenInput, snapshot: Snapshot | null, width: number): Li
   })
   const live = snapshot?.live.cache
   if (clock.state === 'cold' && forecast?.cold_usd != null) {
-    lines.push(prose('cache-note', `Cache went cold while you were away, rewarming will cost ~${money(forecast.cold_usd)}`))
+    const price = `~${money(forecast.cold_usd)}`
+    const whole = `Cache went cold while you were away, rewarming will cost ${price}`
+    if (whole.length <= width) {
+      lines.push(prose('cache-note', whole))
+    } else {
+      lines.push(prose('cache-note', 'Cache went cold while you were away'))
+      lines.push(pair('cache-rewarm', '  Rewarming will cost', price, width, {}, { dim: true }))
+    }
   } else if (live !== undefined && live.saved_usd >= 0.01) {
-    lines.push(prose('cache-note', `Cache hits saved you ${money(live.saved_usd)} this session`, { color: 'success' }))
+    const saved = `Cache hits saved you ${money(live.saved_usd)}`
+    lines.push(prose('cache-note', fitting(width, `${saved} this session`, saved), { color: 'success' }))
   }
   if (live !== undefined && live.hit_ratio !== null) {
     const hit = shown(input.motions, 'hit', live.hit_ratio * 100, input.nowMs)
@@ -470,7 +484,7 @@ function forecast(input: ScreenInput, snapshot: Snapshot | null, width: number):
       prose(
         'explain-forecast',
         `Your ${tokens(next.prefix_tokens)} token prompt is read from the cache when warm and written again when cold. ` +
-          `${tokens(next.new_tokens)} new and ${tokens(next.output_tokens)} output tokens are the medians of your last ${next.samples} requests.`,
+          `${tokens(next.new_tokens)} new and ${tokens(next.output_tokens)} output tokens are typical of your last ${next.samples} requests.`,
         { dim: true },
       ),
     )
@@ -503,16 +517,30 @@ function limits(input: ScreenInput, snapshot: Snapshot | null, width: number): L
   const windows = limitsOf({ ...input, snapshot })
   if (windows.length === 0) return []
   const lines: Line[] = [heading('limits', 'Plan limits', width, 'limits')]
-  for (const limit of windows) {
+  const room = width - DETAIL_INDENT
+  const details = windows.map(limit => limitDetail(limit, input.nowMs))
+  const compact = details.some(detail => detail !== null && detail.long.length > room)
+  windows.forEach((limit, index) => {
     const used = shown(input.motions, `limit:${limit.window}`, limit.used_pct, input.nowMs)
     const color: ThemeKey = used >= LIMIT_WARNING ? 'warning' : 'text'
     lines.push(meter(`limit-${limit.window}`, `  ${windowName(limit.window).padEnd(5)}`, used / 100, percent(used).padStart(4), width, color))
-    const detail = limitDetail(limit, input.nowMs)
-    if (detail !== null) lines.push(detail)
-  }
+    const detail = details[index]
+    if (detail === undefined || detail === null) return
+    lines.push({
+      key: `limit-${limit.window}-detail`,
+      segments: [{ text: (compact ? detail.short : detail.long).padEnd(room), ...(detail.warning ? { color: 'warning' } : { dim: true }) }],
+      indent: DETAIL_INDENT,
+    })
+  })
   const five = windows.find(limit => limit.window === 'five_hour')
   if (snapshot !== null && five !== undefined && five.calibration.pct_per_usd === null) {
-    lines.push(prose('limits-learning', 'Learning how your plan counts tokens… a few more turns ✻', { dim: true }))
+    const learning = 'Learning how your plan counts tokens…'
+    const count = `${five.calibration.pairs} of ${five.calibration.needed} readings ✻`
+    if (learning.length + 1 + count.length <= width) {
+      lines.push(prose('limits-learning', `${learning} ${count}`, { dim: true }))
+    } else {
+      lines.push(prose('limits-learning', learning, { dim: true }), prose('limits-learning-count', count, { dim: true }))
+    }
   }
   if (input.expanded.includes('limits')) {
     const learned = five?.calibration
@@ -529,15 +557,15 @@ function familyName(family: string): string {
   return family.charAt(0).toUpperCase() + family.slice(1)
 }
 
-function limitDetail(limit: LimitWindow, nowMs: number): Line | null {
-  const key = `limit-${limit.window}-detail`
-  const parts: string[] = []
-  if (limit.resets_at_ms !== null) parts.push(`resets in ${duration(Math.max(0, limit.resets_at_ms - nowMs))}`)
+type Detail = { long: string; short: string; warning: boolean }
+
+function limitDetail(limit: LimitWindow, nowMs: number): Detail | null {
+  const resets = limit.resets_at_ms === null ? null : duration(Math.max(0, limit.resets_at_ms - nowMs))
   const pace = limit.pace
-  if (pace?.full_at_ms != null) {
-    parts.push(`full in ${duration(Math.max(0, pace.full_at_ms - nowMs))} at this pace`)
-    return prose(key, parts.join(' · '), { color: 'warning' }, DETAIL_INDENT)
-  }
-  if (pace?.projected_pct != null) parts.push(`on pace for ${percent(pace.projected_pct)}`)
-  return parts.length > 0 ? prose(key, parts.join(' · '), { dim: true }, DETAIL_INDENT) : null
+  const full = pace?.full_at_ms == null ? null : duration(Math.max(0, pace.full_at_ms - nowMs))
+  const projected = full !== null || pace?.projected_pct == null ? null : percent(pace.projected_pct)
+  const joined = (parts: (string | null)[]) => parts.filter((part): part is string => part !== null).join(' · ')
+  const long = joined([resets && `resets in ${resets}`, full && `full in ${full} at this pace`, projected && `on pace for ${projected}`])
+  if (long === '') return null
+  return { long, short: joined([resets && `resets ${resets}`, full && `full in ${full}`, projected && `pace ${projected}`]), warning: full !== null }
 }

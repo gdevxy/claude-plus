@@ -20,6 +20,7 @@ import {
   toggled,
 } from '../hooks/state'
 import { MINUTE_MS, NOW_MS, local, snapshot } from './fixtures'
+import { overflows, painted, trimmed } from './paint'
 
 const OK = { status: 'ok', detail: null } as const
 
@@ -31,52 +32,323 @@ function text(line: Line): string {
   return line.segments.map(segment => segment.text).join('')
 }
 
-function frame(lines: Line[]): string[] {
-  return lines.map(line => `${text(line)}${line.why === undefined ? '' : ' ?'}`)
-}
-
 function line(lines: Line[], key: string): Line {
   const found = lines.find(candidate => candidate.key === key)
   if (found === undefined) throw new Error(`no line ${key}`)
   return found
 }
 
-describe('live screen', () => {
-  test('draws the whole session at 40 columns', () => {
-    expect(frame(screen(input()))).toEqual([
-      'Opus 5.5 · high                  $4.18',
-      ' ',
-      'Context                     46k / 200k',
-      '███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
-      ' ',
-      'Cache ✻ warm · 1h         52:14 left ?',
-      '█████████████████████████████████▏░░░░',
-      'Cache hits saved you $3.20 this session',
-      '  Hit ratio                        93%',
-      '  Rebuilds                1 · ~$0.40 ?',
-      ' ',
-      'Next turn                            ?',
-      '  if warm         ~$0.03 · <0.1% of 5h',
-      '  if cold          ~$0.40 · 0.2% of 5h',
-      '  on Sonnet 5.5    ~$0.20, then ~$0.02',
-      ' ',
-      'Session                               ',
-      '  Tokens in / out             2M / 61k',
-      '  Turns · subagents             14 · 2',
-      ' ',
-      'Plan limits                          ?',
-      '  5h    █████████████▌░░░░░░░░░░░  54%',
-      'resets in 2h 10m · on pace for 81%',
-      '  7d    ███████▊░░░░░░░░░░░░░░░░░  31%',
-      'resets in 3d',
-    ])
-  })
+const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, string[]> }[] = [
+  {
+    name: 'the whole session',
+    state: {},
+    rows: {
+      40: [
+        ' Opus 5.5 · high                  $4.18',
+        '',
+        ' Context                     46k / 200k',
+        ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache ✻ warm (1h)         52:14 left ?',
+        ' █████████████████████████████████▏░░░░',
+        ' Cache hits saved you $3.20',
+        '   Hit ratio                        93%',
+        '   Rebuilds                1 · ~$0.40 ?',
+        '',
+        ' Next turn                            ?',
+        '   if warm         ~$0.03 · <0.1% of 5h',
+        '   if cold          ~$0.40 · 0.2% of 5h',
+        '   on Sonnet 5.5    ~$0.20, then ~$0.02',
+        '',
+        ' Session',
+        '   Tokens in / out             2M / 61k',
+        '   Turns · subagents             14 · 2',
+        '',
+        ' Plan limits                          ?',
+        '   5h    █████████████▌░░░░░░░░░░░  54%',
+        '         resets 2h 10m · pace 81%',
+        '   7d    ███████▊░░░░░░░░░░░░░░░░░  31%',
+        '         resets 3d',
+      ],
+      60: [
+        ' Opus 5.5 · high                                      $4.18',
+        '',
+        ' Context                                         46k / 200k',
+        ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache ✻ warm (1h)                             52:14 left ?',
+        ' ██████████████████████████████████████████████████▌░░░░░░░',
+        ' Cache hits saved you $3.20 this session',
+        '   Hit ratio                                            93%',
+        '   Rebuilds                                    1 · ~$0.40 ?',
+        '',
+        ' Next turn                                                ?',
+        '   if warm                             ~$0.03 · <0.1% of 5h',
+        '   if cold                              ~$0.40 · 0.2% of 5h',
+        '   on Sonnet 5.5                        ~$0.20, then ~$0.02',
+        '',
+        ' Session',
+        '   Tokens in / out                                 2M / 61k',
+        '   Turns · subagents                                 14 · 2',
+        '',
+        ' Plan limits                                              ?',
+        '   5h    ████████████████████████▎░░░░░░░░░░░░░░░░░░░░  54%',
+        '         resets in 2h 10m · on pace for 81%',
+        '   7d    ██████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
+        '         resets in 3d',
+      ],
+      100: [
+        ' Opus 5.5 · high                                                                              $4.18',
+        '',
+        ' Context                                                                                 46k / 200k',
+        ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache ✻ warm (1h)                                                                     52:14 left ?',
+        ' █████████████████████████████████████████████████████████████████████████████████████▍░░░░░░░░░░░░',
+        ' Cache hits saved you $3.20 this session',
+        '   Hit ratio                                                                                    93%',
+        '   Rebuilds                                                                            1 · ~$0.40 ?',
+        '',
+        ' Next turn                                                                                        ?',
+        '   if warm                                                                     ~$0.03 · <0.1% of 5h',
+        '   if cold                                                                      ~$0.40 · 0.2% of 5h',
+        '   on Sonnet 5.5                                                                ~$0.20, then ~$0.02',
+        '',
+        ' Session',
+        '   Tokens in / out                                                                         2M / 61k',
+        '   Turns · subagents                                                                         14 · 2',
+        '',
+        ' Plan limits                                                                                      ?',
+        '   5h    █████████████████████████████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  54%',
+        '         resets in 2h 10m · on pace for 81%',
+        '   7d    ██████████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
+        '         resets in 3d',
+      ],
+    },
+  },
+  {
+    name: 'Claude Code alone while the daemon is missing',
+    state: { snapshot: null, local: local({ step: { atMs: NOW_MS - 1000, model: 'claude-opus-5-5', input: 12, output: 800, cacheRead: 25_000, cacheWrite: 300 } }), daemon: { status: 'missing', detail: null } },
+    rows: {
+      40: [
+        ' claude-plus is not installed yet.',
+        ' Install it, or set its path in the',
+        ' plugin options',
+        '',
+        ' Opus 5.5                         $4.18',
+        '',
+        ' Context                     46k / 200k',
+        ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache ✻ warm (~1h)        59:59 left ?',
+        ' ██████████████████████████████████████',
+        '',
+        ' Session',
+        '   Turns                             14',
+        '   Last request      25.3k in · 800 out',
+        '',
+        ' Plan limits                          ?',
+        '   5h    █████████████▌░░░░░░░░░░░  54%',
+        '         resets in 2h 10m',
+      ],
+      60: [
+        ' claude-plus is not installed yet. Install it, or set its',
+        ' path in the plugin options',
+        '',
+        ' Opus 5.5                                             $4.18',
+        '',
+        ' Context                                         46k / 200k',
+        ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache ✻ warm (~1h)                            59:59 left ?',
+        ' ██████████████████████████████████████████████████████████',
+        '',
+        ' Session',
+        '   Turns                                                 14',
+        '   Last request                          25.3k in · 800 out',
+        '',
+        ' Plan limits                                              ?',
+        '   5h    ████████████████████████▎░░░░░░░░░░░░░░░░░░░░  54%',
+        '         resets in 2h 10m',
+      ],
+      100: [
+        ' claude-plus is not installed yet. Install it, or set its path in the plugin options',
+        '',
+        ' Opus 5.5                                                                                     $4.18',
+        '',
+        ' Context                                                                                 46k / 200k',
+        ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache ✻ warm (~1h)                                                                    59:59 left ?',
+        ' ██████████████████████████████████████████████████████████████████████████████████████████████████',
+        '',
+        ' Session',
+        '   Turns                                                                                         14',
+        '   Last request                                                                  25.3k in · 800 out',
+        '',
+        ' Plan limits                                                                                      ?',
+        '   5h    █████████████████████████████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  54%',
+        '         resets in 2h 10m',
+      ],
+    },
+  },
+  {
+    name: 'a fresh session before the first prompt',
+    state: { snapshot: null, local: { session: 's1', model: null, effort: null, turns: 0, working: false, measure: null, step: null }, daemon: { status: 'starting', detail: null } },
+    rows: {
+      40: [
+        ' Starting the claude-plus daemon…',
+        '',
+        ' Claude',
+        '',
+        ' Context',
+        ' Context shows after your first prompt',
+        '',
+        ' Cache',
+        ' Cache starts with your first prompt ✻',
+        '',
+        ' Session',
+        '   Turns                              0',
+      ],
+      60: [
+        ' Starting the claude-plus daemon…',
+        '',
+        ' Claude',
+        '',
+        ' Context',
+        ' Context shows after your first prompt',
+        '',
+        ' Cache',
+        ' Cache starts with your first prompt ✻',
+        '',
+        ' Session',
+        '   Turns                                                  0',
+      ],
+      100: [
+        ' Starting the claude-plus daemon…',
+        '',
+        ' Claude',
+        '',
+        ' Context',
+        ' Context shows after your first prompt',
+        '',
+        ' Cache',
+        ' Cache starts with your first prompt ✻',
+        '',
+        ' Session',
+        '   Turns                                                                                          0',
+      ],
+    },
+  },
+  {
+    name: 'a cache that went cold',
+    state: { nowMs: NOW_MS + 53 * MINUTE_MS },
+    rows: {
+      40: [
+        ' Opus 5.5 · high                  $4.18',
+        '',
+        ' Context                     46k / 200k',
+        ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache · cold (1h)            expired ?',
+        ' ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░',
+        ' Cache went cold while you were away',
+        '   Rewarming will cost           ~$0.40',
+        '   Hit ratio                        93%',
+        '   Rebuilds                1 · ~$0.40 ?',
+        '',
+        ' Next turn                            ?',
+        '   if warm         ~$0.03 · <0.1% of 5h',
+        '   if cold          ~$0.40 · 0.2% of 5h',
+        '   on Sonnet 5.5    ~$0.20, then ~$0.02',
+        '',
+        ' Session',
+        '   Tokens in / out             2M / 61k',
+        '   Turns · subagents             14 · 2',
+        '',
+        ' Plan limits                          ?',
+        '   5h    █████████████▌░░░░░░░░░░░  54%',
+        '         resets 1h 17m · pace 81%',
+        '   7d    ███████▊░░░░░░░░░░░░░░░░░  31%',
+        '         resets 2d 23h',
+      ],
+      60: [
+        ' Opus 5.5 · high                                      $4.18',
+        '',
+        ' Context                                         46k / 200k',
+        ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache · cold (1h)                                expired ?',
+        ' ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░',
+        ' Cache went cold while you were away',
+        '   Rewarming will cost                               ~$0.40',
+        '   Hit ratio                                            93%',
+        '   Rebuilds                                    1 · ~$0.40 ?',
+        '',
+        ' Next turn                                                ?',
+        '   if warm                             ~$0.03 · <0.1% of 5h',
+        '   if cold                              ~$0.40 · 0.2% of 5h',
+        '   on Sonnet 5.5                        ~$0.20, then ~$0.02',
+        '',
+        ' Session',
+        '   Tokens in / out                                 2M / 61k',
+        '   Turns · subagents                                 14 · 2',
+        '',
+        ' Plan limits                                              ?',
+        '   5h    ████████████████████████▎░░░░░░░░░░░░░░░░░░░░  54%',
+        '         resets in 1h 17m · on pace for 81%',
+        '   7d    ██████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
+        '         resets in 2d 23h',
+      ],
+      100: [
+        ' Opus 5.5 · high                                                                              $4.18',
+        '',
+        ' Context                                                                                 46k / 200k',
+        ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+        '',
+        ' Cache · cold (1h)                                                                        expired ?',
+        ' ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░',
+        ' Cache went cold while you were away, rewarming will cost ~$0.40',
+        '   Hit ratio                                                                                    93%',
+        '   Rebuilds                                                                            1 · ~$0.40 ?',
+        '',
+        ' Next turn                                                                                        ?',
+        '   if warm                                                                     ~$0.03 · <0.1% of 5h',
+        '   if cold                                                                      ~$0.40 · 0.2% of 5h',
+        '   on Sonnet 5.5                                                                ~$0.20, then ~$0.02',
+        '',
+        ' Session',
+        '   Tokens in / out                                                                         2M / 61k',
+        '   Turns · subagents                                                                         14 · 2',
+        '',
+        ' Plan limits                                                                                      ?',
+        '   5h    █████████████████████████████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  54%',
+        '         resets in 1h 17m · on pace for 81%',
+        '   7d    ██████████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
+        '         resets in 2d 23h',
+      ],
+    },
+  },
+]
 
+describe('frames', () => {
+  for (const frame of FRAMES) {
+    for (const width of [40, 60, 100]) {
+      test(`draws ${frame.name} at ${width} columns`, () => {
+        const rows = painted(screen(input({ width, ...frame.state })), width)
+        expect(rows.filter(row => row.length > width)).toEqual([])
+        expect(trimmed(rows)).toEqual(frame.rows[width])
+      })
+    }
+  }
+})
+
+describe('live screen', () => {
   for (const width of [40, 60, 100]) {
     test(`every unwrapped line fills exactly ${width - 2} columns`, () => {
       const lines = screen(input({ width, expanded: ['cache', 'rebuilds', 'forecast', 'limits'] }))
       for (const drawn of lines.filter(candidate => candidate.wrap !== true && !candidate.key.startsWith('gap-'))) {
-        expect([drawn.key, text(drawn).length + (drawn.why === undefined ? 0 : WHY_COLUMNS)]).toEqual([drawn.key, width - 2])
+        expect([drawn.key, (drawn.indent ?? 0) + text(drawn).length + (drawn.why === undefined ? 0 : WHY_COLUMNS)]).toEqual([drawn.key, width - 2])
       }
     })
   }
@@ -99,11 +371,7 @@ describe('live screen', () => {
     const urgent = screen(input({ nowMs: NOW_MS + 51 * MINUTE_MS + 30_000 }))
     expect(line(urgent, 'cache').segments[3]).toEqual({ text: '0:44 left', color: 'warning' })
     const cold = screen(input({ nowMs: NOW_MS + 53 * MINUTE_MS }))
-    expect(frame(cold).slice(5, 8)).toEqual([
-      'Cache · cold · 1h            expired ?',
-      '░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░',
-      'Cache went cold while you were away, rewarming will cost ~$0.40',
-    ])
+    expect(line(cold, 'cache').segments[3]).toEqual({ text: 'expired', dim: true })
     expect(line(cold, 'next-warm').segments[1]?.dim).toBe(true)
     expect(line(cold, 'next-cold').segments[1]?.dim).toBeUndefined()
   })
@@ -117,7 +385,7 @@ describe('live screen', () => {
       'The last rebuild, 40m ago, wrote the prompt again because the cache expired during an idle gap.',
     )
     expect(text(line(lines, 'explain-forecast'))).toBe(
-      'Your 46k token prompt is read from the cache when warm and written again when cold. 2k new and 600 output tokens are the medians of your last 10 requests.',
+      'Your 46k token prompt is read from the cache when warm and written again when cold. 2k new and 600 output tokens are typical of your last 10 requests.',
     )
     expect(text(line(lines, 'explain-limits'))).toBe(
       'From 23 readings, 1% of your 5h window is about $2.00 of API-priced usage on Opus. The pace projects the last 30 minutes to the reset.',
@@ -131,44 +399,22 @@ describe('live screen', () => {
     expect(line(lines, 'limit-five_hour').segments[1]?.color).toBe('warning')
     expect(line(lines, 'limit-five_hour-detail')).toEqual({
       key: 'limit-five_hour-detail',
-      segments: [{ text: 'resets in 2h 10m · full in 54m at this pace', color: 'warning' }],
-      wrap: true,
+      segments: [{ text: 'resets 2h 10m · full in 54m'.padEnd(30), color: 'warning' }],
       indent: 8,
     })
+    expect(text(line(screen(input({ width: 100, snapshot: snapshot({ limits: [filling, seven!] }) })), 'limit-five_hour-detail')).trimEnd()).toBe(
+      'resets in 2h 10m · full in 54m at this pace',
+    )
   })
 
   test('says it is still learning until the plan has enough readings', () => {
     const [five] = snapshot().live.limits
     const learning = { ...five!, calibration: { family: 'opus', pairs: 3, needed: 20, pct_per_usd: null } }
     const lines = screen(input({ snapshot: snapshot({ limits: [learning] }), expanded: ['limits'] }))
-    expect(text(line(lines, 'limits-learning'))).toBe('Learning how your plan counts tokens… a few more turns ✻')
+    expect([text(line(lines, 'limits-learning')), text(line(lines, 'limits-learning-count'))]).toEqual(['Learning how your plan counts tokens…', '3 of 20 readings ✻'])
     expect(text(line(lines, 'explain-limits'))).toBe(
       'Each turn pairs the percent Claude Code reports with what it would cost on the API; 3 of 20 readings so far. The pace projects the last 30 minutes to the reset.',
     )
-  })
-
-  test('keeps working from Claude Code alone while the daemon is missing', () => {
-    const step = { atMs: NOW_MS - 1000, model: 'claude-opus-5-5', input: 12, output: 800, cacheRead: 25_000, cacheWrite: 300 }
-    const lines = screen(input({ snapshot: null, local: local({ step }), daemon: { status: 'missing', detail: null } }))
-    expect(frame(lines)).toEqual([
-      'claude-plus is not installed yet. Install it, or set its path in the plugin options',
-      ' ',
-      'Opus 5.5                         $4.18',
-      ' ',
-      'Context                     46k / 200k',
-      '███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
-      ' ',
-      'Cache ✻ warm · ~1h        59:59 left ?',
-      '██████████████████████████████████████',
-      ' ',
-      'Session                               ',
-      '  Turns                             14',
-      '  Last request      25.3k in · 800 out',
-      ' ',
-      'Plan limits                          ?',
-      '  5h    █████████████▌░░░░░░░░░░░  54%',
-      'resets in 2h 10m',
-    ])
   })
 
   test('keeps cost, limits and effort fresh from Claude Code while the daemon is down', () => {
@@ -194,27 +440,11 @@ describe('live screen', () => {
     expect(lines.some(candidate => candidate.key === 'limit-five_hour-detail')).toBe(false)
   })
 
-  test('greets a fresh session before the first prompt', () => {
-    const fresh = { session: 's1', model: null, effort: null, turns: 0, working: false, measure: null, step: null }
-    expect(frame(screen(input({ snapshot: null, local: fresh, daemon: { status: 'starting', detail: null } })))).toEqual([
-      'Starting the claude-plus daemon…',
-      ' ',
-      'Claude',
-      ' ',
-      'Context',
-      'Context appears after your first prompt',
-      ' ',
-      'Cache                                 ',
-      'Cache starts with your first prompt ✻',
-      ' ',
-      'Session                               ',
-      '  Turns                              0',
-    ])
-  })
-
   test('names the daemon problem in plain words', () => {
     const unreachable = screen(input({ daemon: { status: 'unreachable', detail: 'no answer within 500 ms' } }))
-    expect(text(line(unreachable, 'daemon'))).toBe('The daemon is not answering · run claude-plus daemon --ensure')
+    expect([text(line(unreachable, 'daemon')), text(line(unreachable, 'daemon-fix'))]).toEqual(['The daemon is not answering', 'Run claude-plus daemon --ensure'])
+    const wide = screen(input({ width: 100, daemon: { status: 'unreachable', detail: 'no answer within 500 ms' } }))
+    expect(text(line(wide, 'daemon'))).toBe('The daemon is not answering · run claude-plus daemon --ensure')
     const rebuilding = screen(input({ daemon: { status: 'rebuilding', detail: null } }))
     expect(text(line(rebuilding, 'daemon'))).toBe('Rebuilding the claude-plus index… numbers return in a moment')
     const failed = screen(input({ daemon: { status: 'failed', detail: 'the database is locked' } }))
@@ -225,6 +455,52 @@ describe('live screen', () => {
     const lines = screen(input({ local: local({ session: 's2' }) }))
     expect(lines.some(candidate => candidate.key === 'next')).toBe(false)
     expect(text(line(lines, 'session-turns'))).toBe('  Turns                             14')
+  })
+})
+
+const FILLING = (): ScreenInput['snapshot'] => {
+  const [five, seven] = snapshot().live.limits
+  return snapshot({ limits: [{ ...five!, used_pct: 82, pace: { pct_per_hour: 20, projected_pct: 125, full_at_ms: NOW_MS + 54 * MINUTE_MS } }, seven!] })
+}
+
+const LEARNING = (): ScreenInput['snapshot'] => {
+  const [five] = snapshot().live.limits
+  return snapshot({ limits: [{ ...five!, calibration: { family: 'opus', pairs: 3, needed: 20, pct_per_usd: null } }] })
+}
+
+const STATES: Record<string, Partial<ScreenInput>> = {
+  'the whole session': { expanded: ['cache', 'rebuilds', 'forecast', 'limits'] },
+  'a cold cache': { nowMs: NOW_MS + 53 * MINUTE_MS },
+  'a fresh session': { snapshot: null, local: { ...local(), model: null, turns: 0, measure: null }, daemon: { status: 'starting', detail: null } },
+  'a missing daemon': { snapshot: null, daemon: { status: 'missing', detail: null } },
+  'an unreachable daemon': { daemon: { status: 'unreachable', detail: 'ECONNREFUSED' } },
+  'a filling window': { snapshot: FILLING() },
+  'a plan still learning': { snapshot: LEARNING() },
+  'unpriced requests': { snapshot: { ...snapshot(), totals: { ...snapshot().totals, unpriced_requests: 2 } } },
+}
+
+describe('fitting', () => {
+  for (const width of [40, 60, 100]) {
+    for (const [name, state] of Object.entries(STATES)) {
+      test(`${name} at ${width} columns cuts no row and splits no value`, () => {
+        expect(overflows(screen(input({ width, ...state })), width)).toEqual([])
+      })
+    }
+  }
+
+  test('the cache line keeps one separator, cold or warm', () => {
+    expect(text(line(screen(input()), 'cache'))).toBe('Cache ✻ warm (1h)         52:14 left')
+    expect(text(line(screen(input({ nowMs: NOW_MS + 53 * MINUTE_MS })), 'cache'))).toBe('Cache · cold (1h)            expired')
+  })
+
+  test('a nearly full context warns without calling it an error', () => {
+    const lines = screen(input({ local: local({ measure: { ...local().measure!, contextPercent: 96 } }) }))
+    expect(line(lines, 'context-bar').segments[1]?.color).toBe('warning')
+  })
+
+  test('the plan learning note counts its readings', () => {
+    const lines = screen(input({ width: 100, snapshot: LEARNING() }))
+    expect(text(line(lines, 'limits-learning'))).toBe('Learning how your plan counts tokens… 3 of 20 readings ✻')
   })
 })
 

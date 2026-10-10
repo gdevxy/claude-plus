@@ -4,6 +4,7 @@ import type { HttpInit, On } from 'claude-code'
 
 import type { Snapshot } from '../types'
 import { MINUTE_MS, NOW_MS, snapshot } from './fixtures'
+import { paintTree, trimmed } from './paint'
 
 type Wiring = {
   session: string
@@ -27,6 +28,96 @@ const MEASURE = {
   rateLimits: [{ kind: 'five_hour', percentUsed: 54, resetsAt: new Date(NOW_MS + 130 * MINUTE_MS).toISOString() }],
   cost: { usd: 4.18 },
   changed: ['context' as const],
+}
+
+const PANE_FRAMES: Record<number, string[]> = {
+  40: [
+    ' ✻ claude-plus                     Live',
+    '',
+    ' Opus 5.5 · high                  $4.18',
+    '',
+    ' Context                     46k / 200k',
+    ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    '',
+    ' Cache ✻ warm (1h)         52:13 left ?',
+    ' █████████████████████████████████▏░░░░',
+    ' Cache hits saved you $3.20',
+    '   Hit ratio                        93%',
+    '   Rebuilds                1 · ~$0.40 ?',
+    '',
+    ' Next turn                            ?',
+    '   if warm         ~$0.03 · <0.1% of 5h',
+    '   if cold          ~$0.40 · 0.2% of 5h',
+    '   on Sonnet 5.5    ~$0.20, then ~$0.02',
+    '',
+    ' Session',
+    '   Tokens in / out             2M / 61k',
+    '   Turns · subagents             14 · 2',
+    '',
+    ' Plan limits                          ?',
+    '   5h    █████████████▌░░░░░░░░░░░  54%',
+    '         resets 2h 9m · pace 81%',
+    '   7d    ███████▊░░░░░░░░░░░░░░░░░  31%',
+    '         resets 2d 23h',
+  ],
+  60: [
+    ' ✻ claude-plus                                         Live',
+    '',
+    ' Opus 5.5 · high                                      $4.18',
+    '',
+    ' Context                                         46k / 200k',
+    ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    '',
+    ' Cache ✻ warm (1h)                             52:13 left ?',
+    ' ██████████████████████████████████████████████████▌░░░░░░░',
+    ' Cache hits saved you $3.20 this session',
+    '   Hit ratio                                            93%',
+    '   Rebuilds                                    1 · ~$0.40 ?',
+    '',
+    ' Next turn                                                ?',
+    '   if warm                             ~$0.03 · <0.1% of 5h',
+    '   if cold                              ~$0.40 · 0.2% of 5h',
+    '   on Sonnet 5.5                        ~$0.20, then ~$0.02',
+    '',
+    ' Session',
+    '   Tokens in / out                                 2M / 61k',
+    '   Turns · subagents                                 14 · 2',
+    '',
+    ' Plan limits                                              ?',
+    '   5h    ████████████████████████▎░░░░░░░░░░░░░░░░░░░░  54%',
+    '         resets in 2h 9m · on pace for 81%',
+    '   7d    ██████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
+    '         resets in 2d 23h',
+  ],
+  100: [
+    ' ✻ claude-plus                                                                                 Live',
+    '',
+    ' Opus 5.5 · high                                                                              $4.18',
+    '',
+    ' Context                                                                                 46k / 200k',
+    ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    '',
+    ' Cache ✻ warm (1h)                                                                     52:13 left ?',
+    ' █████████████████████████████████████████████████████████████████████████████████████▎░░░░░░░░░░░░',
+    ' Cache hits saved you $3.20 this session',
+    '   Hit ratio                                                                                    93%',
+    '   Rebuilds                                                                            1 · ~$0.40 ?',
+    '',
+    ' Next turn                                                                                        ?',
+    '   if warm                                                                     ~$0.03 · <0.1% of 5h',
+    '   if cold                                                                      ~$0.40 · 0.2% of 5h',
+    '   on Sonnet 5.5                                                                ~$0.20, then ~$0.02',
+    '',
+    ' Session',
+    '   Tokens in / out                                                                         2M / 61k',
+    '   Turns · subagents                                                                         14 · 2',
+    '',
+    ' Plan limits                                                                                      ?',
+    '   5h    █████████████████████████████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  54%',
+    '         resets in 2h 9m · on pace for 81%',
+    '   7d    ██████████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
+    '         resets in 2d 23h',
+  ],
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
@@ -243,12 +334,10 @@ describe('plus mod', () => {
       await $.session.measure(MEASURE)
       await clock.advance(1000)
       const ui = await mount($, columns)
-      const headline = await ui.find({ key: 'headline' })
-      expect(headline?.text).toBe(`Opus 5.5 · high${' '.repeat(columns - 2 - 20)}$4.18`)
-      expect((await ui.find({ key: 'header' }))?.text).toBe('✻ claude-plusLive')
       expect((await ui.find({ key: 'tab-live' }))?.props).toEqual({ key: 'tab-live', hotkey: '1', plain: true, dimColor: false, label: 'Live' })
-      expect((await ui.find({ key: 'cache' }))?.text).toContain('52:13 left')
-      expect((await ui.find({ key: 'limit-five_hour' }))?.text.length).toBe(columns - 2)
+      const rows = paintTree(await ui.drawn(), columns)
+      expect(rows.filter(row => row.length > columns)).toEqual([])
+      expect(trimmed(rows)).toEqual(PANE_FRAMES[columns])
       await ui.unmount()
     })
   }
@@ -305,7 +394,7 @@ describe('plus mod', () => {
     const ui = await mount($, 60)
     expect(await ui.find({ key: 'explain-forecast' })).toBeUndefined()
     await ui.press({ key: 'why-forecast' })
-    expect((await ui.find({ key: 'explain-forecast' }))?.text).toContain('medians of your last 10 requests')
+    expect((await ui.find({ key: 'explain-forecast' }))?.text).toContain('typical of your last 10 requests')
     await ui.press({ key: 'why-forecast' })
     expect(await ui.find({ key: 'explain-forecast' })).toBeUndefined()
   })
@@ -331,7 +420,7 @@ describe('plus mod', () => {
     await clock.advance(1000)
     expect(kinds(wiring)).toContain('turn.step')
     const ui = await mount($, 40)
-    expect((await ui.find({ key: 'cache' }))?.text).toBe('Cache ✻ warm · ~1h        59:59 left?')
+    expect((await ui.find({ key: 'cache' }))?.text).toBe('Cache ✻ warm (~1h)        59:59 left?')
     expect((await ui.find({ key: 'session-step' }))?.text).toBe('  Last request      25.3k in · 800 out')
   })
 
@@ -387,7 +476,8 @@ describe('plus mod', () => {
     await clock.advance(3000)
     await clock.advance(500)
     const ui = await mount($, 60)
-    expect((await ui.find({ key: 'daemon' }))?.text).toBe('The daemon is not answering · run claude-plus daemon --ensure')
+    expect((await ui.find({ key: 'daemon' }))?.text).toBe('The daemon is not answering')
+    expect((await ui.find({ key: 'daemon-fix' }))?.text).toBe('Run claude-plus daemon --ensure')
   })
 
   test('numbers ease to a new snapshot over 300 ms', async ($, on) => {
