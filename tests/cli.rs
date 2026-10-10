@@ -474,12 +474,10 @@ fn doctor_lists_counter_only_unpriced_models() {
 
 struct FileState {
     user_version: i64,
-    size: u64,
-    modified: std::time::SystemTime,
+    bytes: Vec<u8>,
 }
 
 fn file_state(database: &Path) -> FileState {
-    let metadata = std::fs::metadata(database).unwrap();
     let user_version =
         rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap()
@@ -487,8 +485,7 @@ fn file_state(database: &Path) -> FileState {
             .unwrap();
     FileState {
         user_version,
-        size: metadata.len(),
-        modified: metadata.modified().unwrap(),
+        bytes: std::fs::read(database).unwrap(),
     }
 }
 
@@ -504,7 +501,6 @@ fn doctor_leaves_an_older_database_untouched() {
         )
         .unwrap();
     let before = file_state(&database);
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     let doctor = stdout_of(&env, &["doctor"]);
     assert!(
         doctor.ends_with("  Database:    schema v2, run claude-plus import to upgrade\n"),
@@ -512,7 +508,7 @@ fn doctor_leaves_an_older_database_untouched() {
     );
     let after = file_state(&database);
     assert_eq!(after.user_version, 2);
-    assert_eq!((after.size, after.modified), (before.size, before.modified));
+    assert!(after.bytes == before.bytes, "doctor changed data.db");
 }
 
 #[test]
