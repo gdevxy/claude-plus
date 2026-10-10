@@ -33,6 +33,7 @@ use wire::{
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_SOCKET_PATH: usize = if cfg!(target_os = "linux") { 107 } else { 103 };
+const WRITER_EXITED: &str = "the claude-plus writer stopped unexpectedly";
 pub const REBUILDING: &str = "the store is being rebuilt";
 const DRAIN: Duration = Duration::from_secs(2);
 const ROUTES: &[(&str, Method)] = &[
@@ -114,8 +115,16 @@ pub fn listen(socket: &Path) -> Result<UnixListener> {
 pub async fn serve(listener: UnixListener, state: Arc<State>) -> Result<()> {
     let listener = tokio::net::UnixListener::from_std(listener)?;
     let graceful = GracefulShutdown::new();
+    let mut writer_exited = false;
     loop {
         tokio::select! {
+            biased;
+            () = state.shutdown.triggered() => break,
+            () = state.writer.exited() => {
+                state.log.error(format!("{WRITER_EXITED}, stopping"));
+                writer_exited = true;
+                break;
+            }
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else {
                     continue;
@@ -134,11 +143,13 @@ pub async fn serve(listener: UnixListener, state: Arc<State>) -> Result<()> {
                     let _ = connection.await;
                 });
             }
-            () = state.shutdown.triggered() => break,
         }
     }
     state.writer.cancel();
     let _ = tokio::time::timeout(DRAIN, graceful.shutdown()).await;
+    if writer_exited {
+        bail!(WRITER_EXITED);
+    }
     Ok(())
 }
 

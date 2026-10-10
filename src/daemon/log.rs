@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -58,6 +58,24 @@ impl Log {
     }
 }
 
+pub fn log_panics(log: Arc<Log>) {
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        let location = info
+            .location()
+            .map(|at| format!(" at {}:{}:{}", at.file(), at.line(), at.column()))
+            .unwrap_or_default();
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("Box<dyn Any>");
+        log.error(format!("thread {name} panicked{location}: {message}"));
+    }));
+}
+
 fn line(at: DateTime<Utc>, level: &str, message: impl Display) -> String {
     format!(
         "{} {level:<5} {message}",
@@ -108,5 +126,26 @@ mod tests {
         drop(log);
         Log::open(&path, false).unwrap().info("third");
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+    }
+
+    #[test]
+    fn panics_are_written_to_the_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.log");
+        let log = std::sync::Arc::new(Log::open(&path, false).unwrap());
+        log_panics(log);
+        let panicked = std::thread::Builder::new()
+            .name("doomed".into())
+            .spawn(|| panic!("the store vanished"))
+            .unwrap()
+            .join();
+        let _ = std::panic::take_hook();
+        assert!(panicked.is_err());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(" error thread doomed panicked at src/daemon/log.rs:"),
+            "{text}"
+        );
+        assert!(text.trim_end().ends_with(": the store vanished"), "{text}");
     }
 }

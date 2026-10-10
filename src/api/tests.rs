@@ -385,3 +385,15 @@ fn a_body_that_never_arrives_is_answered_with_a_timeout() {
     );
     assert!(waited < Duration::from_secs(2), "{waited:?}");
 }
+
+#[test]
+fn the_server_stops_when_the_writer_dies() {
+    let mut server = Server::start();
+    server.writer.panic_for_test();
+    let error = server.serving.take().unwrap().join().unwrap().unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the claude-plus writer stopped unexpectedly"
+    );
+    assert!(server.client().health().is_err());
+}

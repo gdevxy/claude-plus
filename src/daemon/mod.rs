@@ -37,6 +37,7 @@ pub fn run(paths: &Paths, prices: PriceTable, mode: Mode, rescan_every: Duration
     api::check_socket_path(&paths.socket())?;
     paths.ensure_data_dir()?;
     let log = Arc::new(Log::open(&paths.daemon_log(), mode == Mode::Foreground)?);
+    log::log_panics(log.clone());
     let result = run_locked(paths, prices, mode, rescan_every, &log);
     if let Err(error) = &result
         && mode == Mode::Detached

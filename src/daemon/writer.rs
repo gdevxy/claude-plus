@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, anyhow};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use super::log::Log;
 use crate::ingest::{IngestReport, Ingestor, Rebuilt, TranscriptFile};
@@ -64,13 +64,23 @@ enum Job {
     Stop,
     #[cfg(test)]
     Hold(mpsc::Receiver<()>),
+    #[cfg(test)]
+    Panic,
 }
 
-#[derive(Default)]
 struct Shared {
     status: Mutex<IngestStatus>,
     collectors: Mutex<BTreeMap<u64, IngestReport>>,
     next_collector: AtomicU64,
+    exited: watch::Sender<bool>,
+}
+
+struct SignalsExit(Arc<Shared>);
+
+impl Drop for SignalsExit {
+    fn drop(&mut self) {
+        self.0.exited.send_replace(true);
+    }
 }
 
 #[derive(Clone)]
@@ -117,6 +127,11 @@ impl WriterHandle {
         lock(&self.shared.status).clone()
     }
 
+    pub async fn exited(&self) {
+        let mut exited = self.shared.exited.subscribe();
+        let _ = exited.wait_for(|exited| *exited).await;
+    }
+
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -135,6 +150,11 @@ impl WriterHandle {
 
     fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_for_test(&self) {
+        self.send(Job::Panic);
     }
 
     #[cfg(test)]
@@ -167,7 +187,12 @@ pub fn spawn(
     let (jobs, queue) = mpsc::channel();
     let handle = WriterHandle {
         jobs,
-        shared: Arc::new(Shared::default()),
+        shared: Arc::new(Shared {
+            status: Mutex::default(),
+            collectors: Mutex::default(),
+            next_collector: AtomicU64::new(0),
+            exited: watch::Sender::new(false),
+        }),
         cancel: Arc::new(AtomicBool::new(false)),
     };
     let mut worker = Worker {
@@ -180,7 +205,10 @@ pub fn spawn(
     };
     let thread = std::thread::Builder::new()
         .name("claude-plus-writer".into())
-        .spawn(move || worker.run(queue))?;
+        .spawn(move || {
+            let _exit = SignalsExit(worker.shared.clone());
+            worker.run(queue);
+        })?;
     Ok((handle, thread))
 }
 
@@ -231,6 +259,8 @@ impl Worker {
                 Job::Hold(held) => {
                     let _ = held.recv();
                 }
+                #[cfg(test)]
+                Job::Panic => panic!("the writer was asked to panic"),
             }
         }
     }
@@ -613,5 +643,16 @@ mod tests {
         assert_eq!(fx.handle.status().last_error, None);
         assert_eq!(fx.reader().totals().unwrap().requests, 2);
         fx.stop();
+    }
+
+    #[tokio::test]
+    async fn a_writer_that_panics_is_reported_as_exited() {
+        let mut fx = Fixture::new();
+        fx.handle.panic_for_test();
+        tokio::time::timeout(Duration::from_secs(10), fx.handle.exited())
+            .await
+            .unwrap();
+        assert_eq!(fx.handle.import().await.unwrap_err().to_string(), STOPPING);
+        assert!(fx.thread.take().unwrap().join().is_err());
     }
 }
