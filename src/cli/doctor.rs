@@ -140,6 +140,10 @@ fn print_database(store: &Store) -> Result<()> {
     Ok(())
 }
 
+const DEFAULT_RETENTION_DAYS: u64 = 30;
+const RETENTION_HINT: &str =
+    "Claude Code deletes older transcripts, claude-plus keeps its own copy";
+
 fn retention(paths: &Paths) -> (String, Option<&'static str>) {
     let configured = std::fs::read_to_string(paths.settings_file())
         .ok()
@@ -149,11 +153,11 @@ fn retention(paths: &Paths) -> (String, Option<&'static str>) {
                 .get("cleanupPeriodDays")
                 .and_then(serde_json::Value::as_u64)
         });
-    match configured {
-        Some(days) => (format!("cleanupPeriodDays: {days}"), None),
-        None => (
-            "cleanupPeriodDays: 30 (default)".to_string(),
-            Some("Claude Code deletes older transcripts, claude-plus keeps its own copy"),
-        ),
-    }
+    let days = configured.unwrap_or(DEFAULT_RETENTION_DAYS);
+    let value = match configured {
+        Some(days) => format!("cleanupPeriodDays: {days}"),
+        None => format!("cleanupPeriodDays: {days} (default)"),
+    };
+    let hint = (days <= DEFAULT_RETENTION_DAYS).then_some(RETENTION_HINT);
+    (value, hint)
 }

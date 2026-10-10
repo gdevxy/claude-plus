@@ -239,7 +239,26 @@ fn doctor_shows_configured_retention() {
         .stdout(predicate::str::contains(
             "Retention:   cleanupPeriodDays: 90\n",
         ))
-        .stdout(predicate::str::contains("(default)").not());
+        .stdout(predicate::str::contains("(default)").not())
+        .stdout(predicate::str::contains("deletes older transcripts").not());
+}
+
+#[test]
+fn doctor_warns_about_short_configured_retention() {
+    let env = env();
+    for days in [14, 30] {
+        std::fs::write(
+            env.claude.join("settings.json"),
+            format!(r#"{{"cleanupPeriodDays": {days}}}"#),
+        )
+        .unwrap();
+        cmd(&env, &["doctor"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "  Retention:   cleanupPeriodDays: {days}\n               Claude Code deletes older transcripts, claude-plus keeps its own copy\n"
+            )));
+    }
 }
 
 #[test]
