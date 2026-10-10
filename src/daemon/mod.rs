@@ -102,14 +102,22 @@ fn run_locked(
             writer.scan();
             let served = api::serve(listener, state.clone()).await;
             tail.abort();
-            signals.abort();
+            writer.stop();
+            join_before_aborting(move || writer_thread.join(), signals).await;
             served
         });
-    writer.stop();
-    let _ = writer_thread.join();
     let _ = std::fs::remove_file(paths.socket());
     log.info("stopped");
     served
+}
+
+async fn join_before_aborting<T: Send + 'static>(
+    join: impl FnOnce() -> T + Send + 'static,
+    signals: tokio::task::JoinHandle<()>,
+) -> Option<T> {
+    let joined = tokio::task::spawn_blocking(join).await.ok();
+    signals.abort();
+    joined
 }
 
 async fn next_signal(terminate: &mut Signal, interrupt: &mut Signal) -> (&'static str, i32) {
@@ -186,5 +194,30 @@ async fn next_batch(changes: &mut Option<Changes>) -> Option<Batch> {
     match changes {
         Some(changes) => changes.next_batch().await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn signals_are_still_handled_while_the_writer_finishes() {
+        let (second, signalled) = tokio::sync::oneshot::channel::<()>();
+        let (handled, was_handled) = std::sync::mpsc::channel();
+        let signals = tokio::spawn(async move {
+            if signalled.await.is_ok() {
+                let _ = handled.send(());
+            }
+        });
+        let joined = join_before_aborting(
+            move || {
+                second.send(()).unwrap();
+                was_handled.recv_timeout(Duration::from_secs(2)).is_ok()
+            },
+            signals,
+        )
+        .await;
+        assert_eq!(joined, Some(true));
     }
 }
