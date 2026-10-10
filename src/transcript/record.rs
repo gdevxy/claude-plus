@@ -94,7 +94,7 @@ pub struct CompactRecord {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CostStateRecord {
     pub session_id: Option<String>,
-    pub total_cost_usd: f64,
+    pub total_cost_usd: Option<f64>,
     pub model_usage: BTreeMap<String, ModelUsage>,
 }
 
@@ -325,10 +325,7 @@ fn cost_state(raw: &Value) -> CostStateRecord {
         .unwrap_or_default();
     CostStateRecord {
         session_id: text(raw, "/sessionId"),
-        total_cost_usd: raw
-            .pointer("/totalCostUSD")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
+        total_cost_usd: raw.pointer("/totalCostUSD").and_then(Value::as_f64),
         model_usage,
     }
 }

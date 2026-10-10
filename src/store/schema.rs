@@ -112,6 +112,29 @@ CREATE TABLE adjustments (
 CREATE INDEX adjustments_by_ts ON adjustments(ts);
 CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no);
 "#,
+    r#"
+CREATE TABLE cost_states_v4 (
+    file_id INTEGER NOT NULL,
+    line_no INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    total_cost_usd REAL,
+    model_count INTEGER NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY (file_id, line_no)
+);
+INSERT INTO cost_states_v4 (file_id, line_no, session_id, total_cost_usd, model_count, json)
+SELECT file_id, line_no, session_id,
+       CASE WHEN json_type(json, '$.totalCostUSD') IN ('integer', 'real')
+            THEN json_extract(json, '$.totalCostUSD') END,
+       CASE WHEN json_type(json, '$.modelUsage') = 'object'
+            THEN (SELECT COUNT(*) FROM json_each(cost_states.json, '$.modelUsage') AS usage WHERE usage.type = 'object')
+            ELSE 0 END,
+       json
+FROM cost_states;
+DROP TABLE cost_states;
+ALTER TABLE cost_states_v4 RENAME TO cost_states;
+CREATE INDEX cost_states_by_session ON cost_states(session_id, file_id, line_no);
+"#,
 ];
 
 pub const DERIVED_TABLES: &[&str] = &[

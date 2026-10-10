@@ -215,7 +215,8 @@ fn doctor_output_is_exact() {
                Claude Code deletes older transcripts, claude-plus keeps its own copy
   Price table: bundled prices 2026-10-10
   Imported:    5 requests in 4 files · 1 unparsable line
-  Cross-check: 2 sessions · transcripts $0.0701 · Claude Code $0.0812 · reconciled $0.0812
+  Cross-check: 1 session · transcripts $0.0012 · Claude Code $0.0123 · reconciled $0.0123
+  Uncounted:   1 session with subagents has no Claude Code counter, its subagent output may be understated
 ",
         claude = env.claude.display(),
         plus = env.plus.display()
@@ -372,8 +373,8 @@ fn doctor_reports_reconciliation() {
     let doctor = stdout_of(&env, &["doctor"]);
     assert!(
         doctor.ends_with(
-            "  Cross-check: 3 sessions · transcripts $0.0801 · Claude Code $0.0855 · reconciled $0.0912
-  Uncounted:   1 session with subagents has no Claude Code counter, its subagent output may be understated
+            "  Cross-check: 2 sessions · transcripts $0.0112 · Claude Code $0.0165 · reconciled $0.0223
+  Uncounted:   2 sessions with subagents have no Claude Code counter, their subagent output may be understated
   Over:        1 session where transcripts exceed Claude Code's counter
 "
         ),
@@ -444,7 +445,8 @@ fn doctor_lists_counter_only_unpriced_models() {
     cmd(&env, &["import"]).assert().success();
     let expected = doctor_header(&env, 5, "6 requests in 5 files · 1 unparsable line")
         + "  Unpriced:    claude-mystery-9 (Claude Code counter only)
-  Cross-check: 3 sessions · transcripts $0.0801 · Claude Code $0.0913 · reconciled $0.0912
+  Cross-check: 2 sessions · transcripts $0.0112 · Claude Code $0.0224 · reconciled $0.0223
+  Uncounted:   1 session with subagents has no Claude Code counter, its subagent output may be understated
 ";
     assert_eq!(stdout_of(&env, &["doctor"]), expected);
 }
@@ -527,8 +529,8 @@ fn doctor_reads_a_database_with_live_wal_files() {
     assert!(env.plus.join("data.db-shm").exists());
     let doctor = stdout_of(&env, &["doctor"]);
     assert!(
-        doctor.ends_with(
-            "  Cross-check: 2 sessions · transcripts $0.0701 · Claude Code $0.0812 · reconciled $0.0801\n"
+        doctor.contains(
+            "  Cross-check: 1 session · transcripts $0.0012 · Claude Code $0.0123 · reconciled $0.0112\n"
         ),
         "{doctor}"
     );

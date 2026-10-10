@@ -9,8 +9,10 @@ use crate::transcript::{ModelUsage, Record, TokenCounts, parse_line};
 
 const OVERAGE_TOLERANCE: f64 = 1.01;
 const BUCKET_SECONDS: i64 = 3600;
-pub(super) const LATEST_COST_STATE: &str = "NOT EXISTS (SELECT 1 FROM cost_states later
-    WHERE later.session_id = c.session_id AND (later.file_id, later.line_no) > (c.file_id, c.line_no))";
+pub(super) const LATEST_COST_STATE: &str =
+    "c.model_count > 0 AND NOT EXISTS (SELECT 1 FROM cost_states later
+    WHERE later.session_id = c.session_id AND later.model_count > 0
+      AND (later.file_id, later.line_no) > (c.file_id, c.line_no))";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Reconciliation {
@@ -184,7 +186,8 @@ fn summary(conn: &Connection) -> Result<Reconciliation> {
     )? as u64;
     let sessions_without_counter = conn.query_row(
         "SELECT COUNT(DISTINCT session_id) FROM requests r
-         WHERE is_sidechain = 1 AND NOT EXISTS (SELECT 1 FROM cost_states c WHERE c.session_id = r.session_id)",
+         WHERE is_sidechain = 1
+           AND NOT EXISTS (SELECT 1 FROM cost_states c WHERE c.session_id = r.session_id AND c.model_count > 0)",
         [],
         |r| r.get::<_, i64>(0),
     )? as u64;
@@ -394,6 +397,14 @@ mod tests {
         }
 
         fn counter(&mut self, total_cost_usd: f64, counters: &[Counter]) {
+            self.write_counter(Some(total_cost_usd), counters);
+        }
+
+        fn counter_without_total(&mut self, counters: &[Counter]) {
+            self.write_counter(None, counters);
+        }
+
+        fn write_counter(&mut self, total_cost_usd: Option<f64>, counters: &[Counter]) {
             self.next_line += 1;
             let model_usage: serde_json::Map<String, serde_json::Value> = counters
                 .iter()
@@ -411,12 +422,14 @@ mod tests {
                     )
                 })
                 .collect();
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "type": "cost-state",
                 "sessionId": self.id,
-                "totalCostUSD": total_cost_usd,
                 "modelUsage": model_usage
             });
+            if let Some(total) = total_cost_usd {
+                json["totalCostUSD"] = total.into();
+            }
             let mut w = self.store.writer().unwrap();
             let file = w.file(&format!("/p/proj/{}.jsonl", self.id), 0, 0).unwrap();
             w.cost_state(&CostStateRow {
@@ -424,6 +437,7 @@ mod tests {
                 line_no: self.next_line,
                 session_id: self.id.into(),
                 total_cost_usd,
+                model_count: counters.len() as u64,
                 json: json.to_string(),
             })
             .unwrap();
@@ -622,7 +636,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let mut over = Session::new(&mut store, "over");
         over.request(T, "claude-sonnet-5-5", tokens(1000, 1000, 0), false);
-        over.counter(0.005, &[]);
+        over.counter(0.005, &[counter("claude-sonnet-5-5", 1000, 400, 0)]);
         let mut short = Session::new(&mut store, "short");
         short.request(T, "claude-sonnet-5-5", tokens(1, 1, 0), false);
         short.counter(
@@ -677,7 +691,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let mut s = Session::new(&mut store, "s1");
         s.request(T, "claude-sonnet-5-5", tokens(0, 1000, 0), false);
-        s.counter(0.00995, &[]);
+        s.counter(0.00995, &[counter("claude-sonnet-5-5", 0, 1000, 0)]);
         let result = store.reconcile(&PriceTable::bundled()).unwrap();
         assert_eq!(result.sessions_over, 0);
     }
@@ -704,11 +718,43 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let mut s = Session::new(&mut store, "s1");
         s.request(T, "claude-sonnet-5-5", tokens(1, 1, 0), false);
+        s.counter(1.0, &[counter("claude-sonnet-5-5", 1, 100, 0)]);
         s.counter(1.0, &[counter("claude-sonnet-5-5", 1, 500, 0)]);
-        s.counter(1.0, &[]);
+        s.counter(0.0, &[]);
         let result = store.reconcile(&PriceTable::bundled()).unwrap();
-        assert_eq!(rows(&store), vec![]);
-        assert_eq!(result.sessions_adjusted, 0);
+        assert_eq!(
+            rows(&store),
+            vec![Row {
+                session_id: "s1".into(),
+                model: "claude-sonnet-5-5".into(),
+                ts: T,
+                tokens: [0, 499, 0, 0],
+                cost_usd: Some(499.0 * 10.0 / 1e6),
+            }]
+        );
+        assert_eq!(
+            (result.sessions_adjusted, result.sessions_without_counter),
+            (1, 0)
+        );
+        let deltas = store.cost_state_deltas().unwrap();
+        assert_eq!(
+            deltas
+                .iter()
+                .map(|d| (d.session_id.as_str(), d.claude_usd))
+                .collect::<Vec<_>>(),
+            vec![("s1", Some(1.0))]
+        );
+    }
+
+    #[test]
+    fn missing_total_cost_stays_unknown() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut s = Session::new(&mut store, "s1");
+        s.request(T, "claude-sonnet-5-5", tokens(1, 1, 0), false);
+        s.counter_without_total(&[counter("claude-sonnet-5-5", 1, 1, 0)]);
+        let result = store.reconcile(&PriceTable::bundled()).unwrap();
+        assert_eq!(result.sessions_over, 0);
+        assert_eq!(store.cost_state_deltas().unwrap()[0].claude_usd, None);
     }
 
     #[test]
@@ -728,10 +774,13 @@ mod tests {
         uncounted.request(T + 2, "claude-sonnet-5-5", tokens(1, 1, 0), true);
         let mut counted = Session::new(&mut store, "counted");
         counted.request(T, "claude-sonnet-5-5", tokens(1, 1, 0), true);
-        counted.counter(1.0, &[]);
+        counted.counter(1.0, &[counter("claude-sonnet-5-5", 1, 1, 0)]);
+        let mut empty = Session::new(&mut store, "empty");
+        empty.request(T, "claude-sonnet-5-5", tokens(1, 1, 0), true);
+        empty.counter(0.0, &[]);
         Session::new(&mut store, "plain").request(T, "claude-sonnet-5-5", tokens(1, 1, 0), false);
         let result = store.reconcile(&PriceTable::bundled()).unwrap();
-        assert_eq!(result.sessions_without_counter, 1);
+        assert_eq!(result.sessions_without_counter, 2);
     }
 
     #[test]

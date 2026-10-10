@@ -94,7 +94,8 @@ pub struct CostStateRow {
     pub file_id: i64,
     pub line_no: u64,
     pub session_id: String,
-    pub total_cost_usd: f64,
+    pub total_cost_usd: Option<f64>,
+    pub model_count: u64,
     pub json: String,
 }
 
@@ -265,8 +266,8 @@ impl Writer<'_> {
 
     pub fn cost_state(&mut self, row: &CostStateRow) -> Result<()> {
         self.exec(
-            "INSERT OR REPLACE INTO cost_states (file_id, line_no, session_id, total_cost_usd, json) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![row.file_id, row.line_no as i64, row.session_id, row.total_cost_usd, row.json],
+            "INSERT OR REPLACE INTO cost_states (file_id, line_no, session_id, total_cost_usd, model_count, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![row.file_id, row.line_no as i64, row.session_id, row.total_cost_usd, row.model_count as i64, row.json],
         )?;
         Ok(())
     }

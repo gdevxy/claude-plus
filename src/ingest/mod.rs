@@ -358,6 +358,7 @@ pub fn apply(
                 line_no,
                 session_id,
                 total_cost_usd: c.total_cost_usd,
+                model_count: c.model_usage.len() as u64,
                 json: parsed.raw.to_string(),
             })?;
         }
@@ -499,7 +500,8 @@ mod tests {
             file_id,
             line_no: 99,
             session_id: "s1".into(),
-            total_cost_usd: 0.02,
+            total_cost_usd: Some(0.02),
+            model_count: 1,
             json: counter(2003),
         })
         .unwrap();

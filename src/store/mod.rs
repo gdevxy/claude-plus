@@ -55,7 +55,7 @@ pub struct CostStateDelta {
     pub session_id: String,
     pub ours_usd: f64,
     pub reconciled_usd: f64,
-    pub claude_usd: f64,
+    pub claude_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -536,7 +536,8 @@ mod tests {
             file_id: file,
             line_no: 3,
             session_id: "s1".into(),
-            total_cost_usd: 0.20,
+            total_cost_usd: Some(0.20),
+            model_count: 1,
             json: "{}".into(),
         })
         .unwrap();
@@ -544,7 +545,8 @@ mod tests {
             file_id: file,
             line_no: 9,
             session_id: "s1".into(),
-            total_cost_usd: 0.75,
+            total_cost_usd: Some(0.75),
+            model_count: 1,
             json: "{}".into(),
         })
         .unwrap();
@@ -555,7 +557,7 @@ mod tests {
                 session_id: "s1".into(),
                 ours_usd: 0.75,
                 reconciled_usd: 0.0,
-                claude_usd: 0.75
+                claude_usd: Some(0.75)
             }]
         );
     }
@@ -628,7 +630,8 @@ mod tests {
             file_id: first,
             line_no: 2,
             session_id: "s".into(),
-            total_cost_usd: 1.0,
+            total_cost_usd: Some(1.0),
+            model_count: 1,
             json: "{}".into(),
         })
         .unwrap();
@@ -683,6 +686,49 @@ mod tests {
             w.commit().unwrap();
         }
         assert_eq!(Store::open(&path).unwrap().totals().unwrap().requests, 1);
+    }
+
+    fn seeded(path: &Path, version: usize, seed: &str) {
+        let conn = Connection::open(path).unwrap();
+        for migration in &schema::MIGRATIONS[..version] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.execute_batch(seed).unwrap();
+        conn.pragma_update(None, "user_version", version as i64)
+            .unwrap();
+    }
+
+    #[test]
+    fn upgrading_from_v3_classifies_stored_cost_states() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        seeded(
+            &path,
+            3,
+            r#"INSERT INTO cost_states VALUES
+                (1, 1, 's1', 0.5, '{"type":"cost-state","totalCostUSD":0.5,"modelUsage":{"m":{"outputTokens":1},"broken":7}}'),
+                (1, 2, 's1', 0.0, '{"type":"cost-state","modelUsage":{}}'),
+                (1, 3, 's1', 0.0, '{"type":"cost-state","totalCostUSD":0}');"#,
+        );
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Store::latest_schema_version()
+        );
+        let rows: Vec<(i64, Option<f64>, i64)> = store
+            .conn
+            .prepare(
+                "SELECT line_no, total_cost_usd, model_count FROM cost_states ORDER BY line_no",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(1, Some(0.5), 1), (2, None, 0), (3, Some(0.0), 0)]
+        );
     }
 
     #[test]

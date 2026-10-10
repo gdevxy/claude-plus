@@ -92,12 +92,15 @@ fn print_database(store: &Store) -> Result<()> {
     }
 
     let deltas = store.cost_state_deltas()?;
-    let comparable: Vec<_> = deltas.iter().filter(|d| d.claude_usd > 0.0).collect();
-    let transcripts: f64 = comparable.iter().map(|d| d.ours_usd).sum();
-    let claude: f64 = comparable.iter().map(|d| d.claude_usd).sum();
+    let comparable: Vec<_> = deltas
+        .iter()
+        .filter_map(|d| Some((d, d.claude_usd.filter(|usd| *usd > 0.0)?)))
+        .collect();
+    let transcripts: f64 = comparable.iter().map(|(d, _)| d.ours_usd).sum();
+    let claude: f64 = comparable.iter().map(|(_, claude)| claude).sum();
     let reconciled: f64 = comparable
         .iter()
-        .map(|d| d.ours_usd + d.reconciled_usd)
+        .map(|(d, _)| d.ours_usd + d.reconciled_usd)
         .sum();
     let cross_check = format!(
         "{} · transcripts {} · Claude Code {} · reconciled {}",

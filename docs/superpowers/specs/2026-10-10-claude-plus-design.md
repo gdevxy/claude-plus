@@ -241,7 +241,7 @@ Claude Code documents the transcript format as internal and subject to change, s
 - Thinking tokens are billed as output and already included in `output_tokens`.
 - An unknown model shows "price unknown" and is excluded from dollar totals with a visible count, never guessed.
 - Session, project and day aggregates are sums of deduplicated request costs, with subagent requests attributed to the parent session.
-- Reconciliation: for each session with a `cost-state`, the per-model shortfall of transcript usage against `modelUsage` becomes adjustment rows, spread over that model's requests by hour, priced like requests (missing cache writes at the 5-minute rate), never negative.
+- Reconciliation: for each session with a counter (the latest `cost-state` with a non-empty `modelUsage`; an empty one is not a counter), the per-model shortfall of transcript usage against `modelUsage` becomes adjustment rows, spread over that model's requests by hour, priced like requests (missing cache writes at the 5-minute rate), never negative.
 - Adjustments count in session, day and total costs, are shown as "reconciled", and never alter request rows; sessions with subagents but no counter are reported as possibly understated, never extrapolated.
 - The pricing module is cross-checked against `cost-state` records in tests.
 
