@@ -18,6 +18,7 @@ pub use writer::*;
 const GENERATION_MARK: &str = "#gen-";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const STATEMENT_CACHE: usize = 64;
+const WAL_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
 
 #[derive(Debug, thiserror::Error)]
 #[error("another claude-plus is writing, try again in a moment")]
@@ -107,7 +108,7 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::migrated(conn)
     }
@@ -342,6 +343,21 @@ fn opening_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
 pub(crate) fn begin_write(conn: &mut Connection) -> Result<Transaction<'_>> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(friendly)
+}
+
+fn use_wal(conn: &Connection) -> Result<()> {
+    let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Err(error)
+                if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(WAL_RETRY);
+            }
+            result => return result.map_err(friendly),
+        }
+    }
 }
 
 fn user_version(conn: &Connection) -> Result<usize> {
@@ -988,6 +1004,26 @@ mod tests {
             (id, 3, 4)
         );
         assert_eq!(w.checkpoint("/p/b.jsonl").unwrap(), None);
+    }
+
+    #[test]
+    fn concurrent_first_opens_create_the_schema_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let opens: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        Store::open(&path).map(|store| store.schema_version().unwrap())
+                    })
+                })
+                .collect();
+            for open in opens {
+                assert_eq!(open.join().unwrap().unwrap(), 7);
+            }
+        });
     }
 
     #[test]
