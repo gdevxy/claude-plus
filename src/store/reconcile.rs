@@ -25,7 +25,7 @@ pub struct Reconciliation {
 
 impl Store {
     pub fn reconcile(&mut self, prices: &PriceTable) -> Result<Reconciliation> {
-        let tx = self.conn.transaction()?;
+        let tx = super::begin_write(&mut self.conn)?;
         let reconciliation = rebuild(&tx, prices)?;
         tx.commit()?;
         Ok(reconciliation)

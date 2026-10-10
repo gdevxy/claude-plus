@@ -4,28 +4,32 @@ use super::format::{plural, usd};
 use crate::ingest::{IngestReport, Ingestor};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
+use crate::store::Reconciliation;
 use crate::store::Store;
 
 pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
     if super::transcripts_missing(paths) {
         return Ok(());
     }
-    let (store, report) = incremental(paths, prices)?;
-    print_summary(&store, &report)
+    let (store, report, reconciled) = incremental(paths, prices)?;
+    print_summary(&store, &report)?;
+    reconciled.map(|_| ())
 }
 
-pub fn incremental(paths: &Paths, prices: &PriceTable) -> Result<(Store, IngestReport)> {
+pub fn incremental(
+    paths: &Paths,
+    prices: &PriceTable,
+) -> Result<(Store, IngestReport, Result<Reconciliation>)> {
     let mut store = super::open_store(paths)?;
     let bar = super::progress_bar("Importing")?;
-    let report = Ingestor::new(&mut store, prices).ingest_all(
-        &paths.projects_dir(),
-        &mut |done, total| {
-            bar.set_length(total as u64);
-            bar.set_position(done as u64);
-        },
-    )?;
+    let mut ingestor = Ingestor::new(&mut store, prices);
+    let report = ingestor.ingest_all(&paths.projects_dir(), &mut |done, total| {
+        bar.set_length(total as u64);
+        bar.set_position(done as u64);
+    })?;
     bar.finish_and_clear();
-    Ok((store, report))
+    let reconciled = ingestor.reconcile();
+    Ok((store, report, reconciled))
 }
 
 pub fn issue_lines(report: &IngestReport) -> Vec<String> {

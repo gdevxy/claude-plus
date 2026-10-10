@@ -24,10 +24,11 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
     if super::transcripts_missing(paths) {
         return Ok(());
     }
-    let (store, report) = super::import::incremental(paths, prices)?;
+    let (store, report, reconciled) = super::import::incremental(paths, prices)?;
     for line in super::import::issue_lines(&report) {
         eprintln!("{line}");
     }
+    reconciled?;
     let rows = store.daily_costs(since, until, &Local)?;
 
     let mut table = Table::new();

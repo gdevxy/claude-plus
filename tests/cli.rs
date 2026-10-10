@@ -588,3 +588,26 @@ fn empty_plus_home_falls_back_to_home() {
     assert!(home.join(".claude-plus/data.db").exists());
     assert!(!env.plus.exists());
 }
+
+#[test]
+fn reconcile_failure_still_prints_the_import_report() {
+    let env = env();
+    cmd(&env, &["import"]).assert().success();
+    rusqlite::Connection::open(env.plus.join("data.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER no_adjustments BEFORE INSERT ON adjustments
+             BEGIN SELECT RAISE(ABORT, 'adjustments are locked'); END;",
+        )
+        .unwrap();
+    write_unpriced_transcript(&env);
+    cmd(&env, &["import"])
+        .assert()
+        .failure()
+        .stdout(
+            "✻ Imported 1 line from 2 changed files · 1 new request · 0 unparsable lines\n  History: 6 requests across 3 sessions · $0.0812 priced\n  1 request without a known price (see `claude-plus doctor`)\n",
+        )
+        .stderr(predicate::str::starts_with(
+            "claude-plus: reconciling with Claude Code counters: adjustments are locked",
+        ));
+}

@@ -279,6 +279,10 @@ impl Writer<'_> {
         Ok(())
     }
 
+    pub fn checkpoint(&self, path: &str) -> Result<Option<super::FileCheckpoint>> {
+        super::checkpoint(&self.tx, path)
+    }
+
     pub fn raw_files(&self) -> Result<Vec<(i64, String)>> {
         super::raw_files(&self.tx)
     }

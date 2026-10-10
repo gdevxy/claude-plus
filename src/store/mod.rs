@@ -8,13 +8,20 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, TimeZone};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 
 pub use reconcile::Reconciliation;
 pub use upgrade::Upgrade;
 pub use writer::*;
 
 pub(crate) const GENERATION_MARK: &str = "#gen-";
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, thiserror::Error)]
+#[error("another claude-plus is writing, try again in a moment")]
+pub struct Busy;
 
 pub struct Store {
     conn: Connection,
@@ -85,6 +92,7 @@ impl Store {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("cannot restrict {} to its owner", path.display()))?;
         }
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::migrated(conn, on_upgrade)
@@ -134,9 +142,7 @@ impl Store {
             let version = index as i64 + 1;
             match migration {
                 schema::Migration::Sql(sql) => {
-                    let tx = store
-                        .conn
-                        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    let tx = begin_write(&mut store.conn)?;
                     tx.execute_batch(sql)?;
                     tx.pragma_update(None, "user_version", version)?;
                     tx.commit()?;
@@ -153,29 +159,17 @@ impl Store {
 
     pub fn writer(&mut self) -> Result<Writer<'_>> {
         Ok(Writer {
-            tx: self.conn.transaction()?,
+            tx: begin_write(&mut self.conn)?,
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_busy_timeout(&self, timeout: std::time::Duration) {
+        self.conn.busy_timeout(timeout).unwrap();
+    }
+
     pub fn checkpoint(&self, path: &str) -> Result<Option<FileCheckpoint>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT id, offset, lines, size, mtime, head_len, head_hash FROM files WHERE path = ?1",
-                [path],
-                |r| {
-                    Ok(FileCheckpoint {
-                        id: r.get(0)?,
-                        offset: r.get::<_, i64>(1)? as u64,
-                        lines: r.get::<_, i64>(2)? as u64,
-                        size: r.get::<_, i64>(3)? as u64,
-                        mtime: r.get(4)?,
-                        head_len: r.get::<_, i64>(5)? as u64,
-                        head_hash: r.get::<_, i64>(6)? as u64,
-                    })
-                },
-            )
-            .optional()?)
+        checkpoint(&self.conn, path)
     }
 
     pub fn totals(&self) -> Result<Totals> {
@@ -309,6 +303,38 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0))? as u64)
     }
+}
+
+pub(crate) fn begin_write(conn: &mut Connection) -> Result<Transaction<'_>> {
+    conn.transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(friendly)
+}
+
+pub(crate) fn friendly(error: rusqlite::Error) -> anyhow::Error {
+    if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) {
+        Busy.into()
+    } else {
+        error.into()
+    }
+}
+
+pub(crate) fn checkpoint(conn: &Connection, path: &str) -> Result<Option<FileCheckpoint>> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT id, offset, lines, size, mtime, head_len, head_hash FROM files WHERE path = ?1",
+        )?
+        .query_row([path], |r| {
+            Ok(FileCheckpoint {
+                id: r.get(0)?,
+                offset: r.get::<_, i64>(1)? as u64,
+                lines: r.get::<_, i64>(2)? as u64,
+                size: r.get::<_, i64>(3)? as u64,
+                mtime: r.get(4)?,
+                head_len: r.get::<_, i64>(5)? as u64,
+                head_hash: r.get::<_, i64>(6)? as u64,
+            })
+        })
+        .optional()?)
 }
 
 fn daily_entry<'a, Tz: TimeZone>(
@@ -821,6 +847,39 @@ mod tests {
             ]
         );
         assert_eq!(store.dump("meta"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_second_writer_is_asked_to_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        let mut first = Store::open(&path).unwrap();
+        let mut second = Store::open(&path).unwrap();
+        second.set_busy_timeout(std::time::Duration::from_millis(10));
+        let _held = first.writer().unwrap();
+        let error = second.writer().err().expect("must be busy");
+        assert_eq!(
+            error.to_string(),
+            "another claude-plus is writing, try again in a moment"
+        );
+        assert!(error.is::<Busy>());
+        let error = second
+            .reconcile(&crate::pricing::PriceTable::bundled())
+            .unwrap_err();
+        assert!(error.is::<Busy>());
+    }
+
+    #[test]
+    fn writer_reads_checkpoints_inside_its_transaction() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let id = w.file("/p/a.jsonl", 3, 4).unwrap();
+        let checkpoint = w.checkpoint("/p/a.jsonl").unwrap().unwrap();
+        assert_eq!(
+            (checkpoint.id, checkpoint.size, checkpoint.mtime),
+            (id, 3, 4)
+        );
+        assert_eq!(w.checkpoint("/p/b.jsonl").unwrap(), None);
     }
 
     #[test]

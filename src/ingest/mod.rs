@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 
 use crate::pricing::PriceTable;
 use crate::store::{
-    AttachmentRow, CompactionRow, CostStateRow, FileProgress, Reconciliation, RequestRow,
+    AttachmentRow, Busy, CompactionRow, CostStateRow, FileProgress, Reconciliation, RequestRow,
     RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
 };
 use crate::transcript::redact::redact;
@@ -35,7 +35,6 @@ pub struct IngestReport {
     pub parse_errors: u64,
     pub files_vanished: u64,
     pub failures: Vec<(String, String)>,
-    pub reconciliation: Option<Reconciliation>,
 }
 
 impl IngestReport {
@@ -86,6 +85,7 @@ impl<'a> Ingestor<'a> {
         for (index, file) in files.iter().enumerate() {
             match self.ingest_file(file) {
                 Ok(file_report) => report.add(&file_report),
+                Err(error) if error.is::<Busy>() => return Err(error),
                 Err(error) if is_not_found(&error) => report.files_vanished += 1,
                 Err(error) => report.failures.push((
                     file.path.to_string_lossy().into_owned(),
@@ -94,12 +94,13 @@ impl<'a> Ingestor<'a> {
             }
             on_file(index + 1, files.len());
         }
-        let reconciliation = self
-            .store
-            .reconcile(self.prices)
-            .context("reconciling with Claude Code counters")?;
-        report.reconciliation = Some(reconciliation);
         Ok(report)
+    }
+
+    pub fn reconcile(&mut self) -> Result<Reconciliation> {
+        self.store
+            .reconcile(self.prices)
+            .context("reconciling with Claude Code counters")
     }
 
     pub fn reindex(&mut self, on_file: &mut dyn FnMut(usize, usize)) -> Result<Rebuilt> {
@@ -157,7 +158,8 @@ impl<'a> Ingestor<'a> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let path = file.path.to_string_lossy().into_owned();
-        let checkpoint = self.store.checkpoint(&path)?;
+        let mut writer = self.store.writer()?;
+        let checkpoint = writer.checkpoint(&path)?;
         if let Some(cp) = &checkpoint
             && cp.size == size
             && cp.mtime == mtime
@@ -176,7 +178,6 @@ impl<'a> Ingestor<'a> {
         let (head_len, head_hash) =
             lines::head_fingerprint(&file.path, lines::HEAD_BYTES.min(size))?;
 
-        let mut writer = self.store.writer()?;
         if let Some(cp) = checkpoint.as_ref().filter(|_| replaced) {
             writer.retire_file(cp.id)?;
         }
@@ -428,10 +429,14 @@ mod tests {
         }
 
         fn run(&self, store: &mut Store) -> IngestReport {
+            self.run_reconciled(store).0
+        }
+
+        fn run_reconciled(&self, store: &mut Store) -> (IngestReport, Reconciliation) {
             let prices = PriceTable::bundled();
-            Ingestor::new(store, &prices)
-                .ingest_all(&self.projects, &mut |_, _| {})
-                .unwrap()
+            let mut ingestor = Ingestor::new(store, &prices);
+            let report = ingestor.ingest_all(&self.projects, &mut |_, _| {}).unwrap();
+            (report, ingestor.reconcile().unwrap())
         }
     }
 
@@ -471,8 +476,7 @@ mod tests {
         let counter = r#"{"type":"cost-state","sessionId":"s1","totalCostUSD":0.01,"modelUsage":{"claude-sonnet-5-5":{"inputTokens":1,"outputTokens":1003}}}"#;
         fx.write("-w-proj/s1.jsonl", &format!("{line}\n{counter}\n"));
         let mut store = Store::open_in_memory().unwrap();
-        let report = fx.run(&mut store);
-        let reconciliation = report.reconciliation.unwrap();
+        let (_, reconciliation) = fx.run_reconciled(&mut store);
         assert_eq!(reconciliation.sessions_adjusted, 1);
         assert!((reconciliation.adjusted_usd - 0.01).abs() < 1e-12);
         assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
@@ -509,9 +513,9 @@ mod tests {
         .unwrap();
         w.commit().unwrap();
 
-        let unchanged = fx.run(&mut store);
+        let (unchanged, reconciliation) = fx.run_reconciled(&mut store);
         assert_eq!(unchanged.files_changed, 0);
-        assert!((unchanged.reconciliation.unwrap().adjusted_usd - 0.02).abs() < 1e-12);
+        assert!((reconciliation.adjusted_usd - 0.02).abs() < 1e-12);
         assert!((store.totals().unwrap().reconciled_usd - 0.02).abs() < 1e-12);
     }
 
@@ -855,6 +859,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reindex(&mut store).requests, 1);
+    }
+
+    #[test]
+    fn a_busy_store_aborts_the_import() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        fx.write("-w-proj/s1.jsonl", &format!("{line}\n"));
+        fx.write("-w-proj/s2.jsonl", &format!("{line}\n"));
+        let database = fx._temp.path().join("data.db");
+        let mut holder = Store::open(&database).unwrap();
+        let mut store = Store::open(&database).unwrap();
+        store.set_busy_timeout(std::time::Duration::from_millis(10));
+        let _held = holder.writer().unwrap();
+        let prices = PriceTable::bundled();
+        let error = Ingestor::new(&mut store, &prices)
+            .ingest_all(&fx.projects, &mut |_, _| {})
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "another claude-plus is writing, try again in a moment"
+        );
     }
 
     fn set_mtime_offset(path: &std::path::Path, seconds: u64) {

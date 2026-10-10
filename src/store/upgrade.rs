@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
 use crate::transcript::redact::redact;
@@ -29,7 +29,7 @@ pub(super) fn redact_stored_records(
     let mut done = 0;
     let mut after = (i64::MIN, i64::MIN);
     loop {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = super::begin_write(conn)?;
         let batch = raw_batch(&tx, after)?;
         let Some(&(file_id, line_no, _)) = batch.last() else {
             break;
@@ -44,7 +44,7 @@ pub(super) fn redact_stored_records(
         done += batch.len() as u64;
         on_upgrade(Upgrade::Records { done, total });
     }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = super::begin_write(conn)?;
     let cost_states = tx
         .prepare("SELECT file_id, line_no, json FROM cost_states")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
