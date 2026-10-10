@@ -29,11 +29,13 @@ impl TokenCounts {
     }
 
     pub fn cache_write(&self) -> u64 {
-        self.cache_write_5m + self.cache_write_1h
+        self.cache_write_5m.saturating_add(self.cache_write_1h)
     }
 
     pub fn prompt_total(&self) -> u64 {
-        self.input + self.cache_read + self.cache_write()
+        self.input
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write())
     }
 
     pub fn is_empty(&self) -> bool {

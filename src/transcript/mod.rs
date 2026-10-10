@@ -73,6 +73,7 @@ mod tests {
             vec![ToolResult {
                 tool_use_id: "toolu_1".into(),
                 chars: 11,
+                images: 0,
                 is_error: false
             }]
         );
@@ -90,6 +91,64 @@ mod tests {
             panic!()
         };
         assert!(!u.is_prompt);
+    }
+
+    #[test]
+    fn system_and_tooling_messages_are_not_prompts() {
+        let user = |content: &str, extra: &str| {
+            let line =
+                serde_json::json!({"type":"user","message":{"role":"user","content":content}});
+            let mut line = line;
+            if !extra.is_empty() {
+                line[extra] = true.into();
+            }
+            let Record::User(u) = parse_value(line).unwrap().record else {
+                panic!()
+            };
+            u.is_prompt
+        };
+        for prefix in [
+            "<task-notification>x",
+            "<command-name>x",
+            "<local-command-stdout>x",
+            "<system-reminder>x",
+            "[Request interrupted by user]",
+        ] {
+            assert!(!user(prefix, ""), "{prefix}");
+            assert!(!user(&format!("  \n{prefix}"), ""), "padded {prefix}");
+        }
+        assert!(!user("hello", "isCompactSummary"));
+        assert!(!user("hello", "isVisibleInTranscriptOnly"));
+        assert!(!user("hello", "isMeta"));
+        assert!(user("fix the bug", ""));
+    }
+
+    #[test]
+    fn tool_result_images_are_counted_not_measured() {
+        let line = serde_json::json!({"type":"user","message":{"role":"user","content":[{
+        "type":"tool_result","tool_use_id":"t","content":[
+            {"type":"text","text":"abc"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"A".repeat(10000)}}
+        ]}]}});
+        let Record::User(u) = parse_value(line).unwrap().record else {
+            panic!()
+        };
+        assert_eq!((u.tool_results[0].chars, u.tool_results[0].images), (3, 1));
+    }
+
+    #[test]
+    fn overflowing_numbers_saturate() {
+        let attachment =
+            r#"{"type":"attachment","attachment":[{"$chars":18446744073709551615},{"$chars":1}]}"#;
+        let Record::Attachment(a) = parse_line(attachment).unwrap().record else {
+            panic!()
+        };
+        assert_eq!(a.chars, u64::MAX);
+        let assistant = r#"{"type":"assistant","message":{"model":"m","usage":{"input_tokens":18446744073709551615,"cache_read_input_tokens":18446744073709551615}}}"#;
+        let Record::Assistant(a) = parse_line(assistant).unwrap().record else {
+            panic!()
+        };
+        assert_eq!(a.usage.prompt_total(), u64::MAX);
     }
 
     #[test]
@@ -150,6 +209,8 @@ mod tests {
             "42",
             "{\"type\":",
             "{\"type\":17}",
+            r#"{"type":"attachment","attachment":[{"$chars":18446744073709551615},{"$chars":1}]}"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":18446744073709551615,"cache_read_input_tokens":18446744073709551615}}}"#,
             "{\"message\":{\"usage\":\"x\"},\"type\":\"assistant\"}",
         ] {
             let _ = parse_line(line);

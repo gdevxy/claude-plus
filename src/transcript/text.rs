@@ -5,10 +5,10 @@ pub const SHRUNK_KEY: &str = "$chars";
 pub fn string_chars(value: &Value) -> u64 {
     match value {
         Value::String(s) => s.chars().count() as u64,
-        Value::Array(items) => items.iter().map(string_chars).sum(),
+        Value::Array(items) => items.iter().map(string_chars).fold(0, u64::saturating_add),
         Value::Object(map) => match shrunk_length(map) {
             Some(length) => length,
-            None => map.values().map(string_chars).sum(),
+            None => map.values().map(string_chars).fold(0, u64::saturating_add),
         },
         _ => 0,
     }

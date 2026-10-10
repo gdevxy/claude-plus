@@ -71,6 +71,7 @@ pub struct UserRecord {
 pub struct ToolResult {
     pub tool_use_id: String,
     pub chars: u64,
+    pub images: u32,
     pub is_error: bool,
 }
 
@@ -103,6 +104,14 @@ pub struct TitleRecord {
     pub title: String,
     pub is_custom: bool,
 }
+
+const NON_PROMPT_PREFIXES: &[&str] = &[
+    "<task-notification",
+    "<command-",
+    "<local-command",
+    "<system-reminder",
+    "[Request interrupted",
+];
 
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
@@ -218,7 +227,8 @@ fn user(raw: &Value) -> UserRecord {
         .filter_map(|block| {
             Some(ToolResult {
                 tool_use_id: text(block, "/tool_use_id")?,
-                chars: block.get("content").map(string_chars).unwrap_or(0),
+                chars: block.get("content").map(result_chars).unwrap_or(0),
+                images: block.get("content").map(image_count).unwrap_or(0),
                 is_error: block
                     .get("is_error")
                     .and_then(Value::as_bool)
@@ -231,11 +241,22 @@ fn user(raw: &Value) -> UserRecord {
         _ => blocks(raw)
             .filter(|block| text(block, "/type").as_deref() == Some("text"))
             .map(|block| block.get("text").map(string_chars).unwrap_or(0))
-            .sum(),
+            .fold(0, u64::saturating_add),
     };
+    let flag = |pointer: &str| {
+        raw.pointer(pointer)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let is_prompt = !is_meta
+        && !flag("/isCompactSummary")
+        && !flag("/isVisibleInTranscriptOnly")
+        && tool_results.is_empty()
+        && text_chars > 0
+        && !starts_with_non_prompt_prefix(&first_text(raw));
     UserRecord {
         common: common(raw),
-        is_prompt: !is_meta && tool_results.is_empty() && text_chars > 0,
+        is_prompt,
         text_chars,
         tool_results,
     }
@@ -339,4 +360,44 @@ fn field_of_each(value: &Value, array: &str, field: &str) -> Vec<String> {
         .and_then(Value::as_array)
         .map(|items| items.iter().filter_map(|item| text(item, field)).collect())
         .unwrap_or_default()
+}
+
+fn starts_with_non_prompt_prefix(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    NON_PROMPT_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
+fn first_text(raw: &Value) -> String {
+    match raw.pointer("/message/content") {
+        Some(Value::String(s)) => s.clone(),
+        _ => blocks(raw)
+            .find(|block| text(block, "/type").as_deref() == Some("text"))
+            .and_then(|block| text(block, "/text"))
+            .unwrap_or_default(),
+    }
+}
+
+fn result_chars(content: &Value) -> u64 {
+    match content {
+        Value::Array(items) => items
+            .iter()
+            .filter(|item| text(item, "/type").as_deref() == Some("text"))
+            .filter_map(|item| item.get("text"))
+            .map(string_chars)
+            .fold(0, u64::saturating_add),
+        other => string_chars(other),
+    }
+}
+
+fn image_count(content: &Value) -> u32 {
+    content.as_array().map_or(0, |items| {
+        items
+            .iter()
+            .filter(|item| text(item, "/type").as_deref() == Some("image"))
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    })
 }
