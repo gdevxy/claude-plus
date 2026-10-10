@@ -18,6 +18,7 @@ pub use reconcile::Reconciliation;
 pub use writer::*;
 
 const GENERATION_MARK: &str = "#gen-";
+const REINDEX_PENDING: &str = "reindex_pending";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const STATEMENT_CACHE: usize = 64;
 const WAL_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
@@ -295,6 +296,24 @@ impl Store {
 
     pub fn raw_records(&self, file_id: i64, kinds: &[&str]) -> Result<Vec<RawRow>> {
         raw_records(&self.conn, file_id, kinds)
+    }
+
+    pub fn begin_reindex(&mut self) -> Result<()> {
+        self.conn.pragma_update(None, "foreign_keys", false)?;
+        let cleared = self.writer().and_then(|mut writer| {
+            writer.clear_derived()?;
+            writer.mark_reindex_pending(true)?;
+            writer.commit()
+        });
+        self.conn.pragma_update(None, "foreign_keys", true)?;
+        cleared
+    }
+
+    pub fn reindex_pending(&self) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT 1 FROM meta WHERE key = ?1")?
+            .exists([REINDEX_PENDING])?)
     }
 
     pub fn parse_error_total(&self) -> Result<u64> {
@@ -900,6 +919,40 @@ mod tests {
         assert_eq!(raw[0].location.project, "proj");
         w.commit().unwrap();
         assert_eq!(store.totals().unwrap().requests, 0);
+    }
+
+    #[test]
+    fn beginning_a_reindex_clears_derived_rows_and_keeps_foreign_keys_on() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let file = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
+        w.raw(file, 1, "assistant", "{}").unwrap();
+        w.request(&request("a", 1, "m", Some(1.0))).unwrap();
+        w.commit().unwrap();
+        store.begin_reindex().unwrap();
+        assert_eq!(store.totals().unwrap().requests, 0);
+        assert_eq!(store.raw_records(file, &[]).unwrap().len(), 1);
+        assert!(store.reindex_pending().unwrap());
+        let enabled: bool = store
+            .conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+            .unwrap();
+        assert!(enabled);
+    }
+
+    #[test]
+    fn the_reindex_marker_round_trips() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(!store.reindex_pending().unwrap());
+        let mut w = store.writer().unwrap();
+        w.mark_reindex_pending(true).unwrap();
+        w.mark_reindex_pending(true).unwrap();
+        w.commit().unwrap();
+        assert!(store.reindex_pending().unwrap());
+        let mut w = store.writer().unwrap();
+        w.mark_reindex_pending(false).unwrap();
+        w.commit().unwrap();
+        assert!(!store.reindex_pending().unwrap());
     }
 
     #[test]

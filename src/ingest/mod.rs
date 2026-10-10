@@ -4,6 +4,7 @@ mod lines;
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -62,10 +63,16 @@ pub struct Rebuilt {
     pub records: u64,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("stopped before finishing, the rest is picked up on the next run")]
+pub struct Cancelled;
+
 pub struct Ingestor<'a> {
     store: &'a mut Store,
     prices: &'a PriceTable,
     batch_lines: u64,
+    cancel: Option<&'a AtomicBool>,
+    pause: Option<&'a mut dyn FnMut(&mut Store)>,
 }
 
 impl<'a> Ingestor<'a> {
@@ -74,7 +81,29 @@ impl<'a> Ingestor<'a> {
             store,
             prices,
             batch_lines: BATCH_LINES,
+            cancel: None,
+            pause: None,
         }
+    }
+
+    pub fn cancelled_by(mut self, flag: &'a AtomicBool) -> Self {
+        self.cancel = Some(flag);
+        self
+    }
+
+    pub fn pausing_with(mut self, hook: &'a mut dyn FnMut(&mut Store)) -> Self {
+        self.pause = Some(hook);
+        self
+    }
+
+    fn pause(&mut self) {
+        if let Some(hook) = &mut self.pause {
+            hook(self.store);
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
     }
 
     pub fn ingest_all(
@@ -93,6 +122,9 @@ impl<'a> Ingestor<'a> {
     ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
         for (index, file) in files.iter().enumerate() {
+            if self.is_cancelled() {
+                break;
+            }
             match self.ingest_file(file) {
                 Ok(file_report) => report.add(&file_report),
                 Err(error) if error.is::<Busy>() => return Err(error),
@@ -103,6 +135,7 @@ impl<'a> Ingestor<'a> {
                 )),
             }
             on_file(index + 1, files.len());
+            self.pause();
         }
         Ok(report)
     }
@@ -114,38 +147,63 @@ impl<'a> Ingestor<'a> {
     }
 
     pub fn reindex(&mut self, on_file: &mut dyn FnMut(usize, usize)) -> Result<Rebuilt> {
-        let mut writer = self.store.writer()?;
-        writer.clear_derived()?;
+        let files = self.store.raw_files()?;
         let mut report = IngestReport::default();
         let mut records = 0u64;
-        let files = writer.raw_files()?;
-        for (index, (file_id, _)) in files.iter().enumerate() {
-            for row in writer.raw_records(*file_id, &[])? {
-                let Ok(parsed) = parse_line(&row.json) else {
-                    continue;
-                };
-                if row.retired && is_live_only(&parsed.record) {
-                    continue;
+        let mut next = 0;
+        self.store.begin_reindex()?;
+        let mut writer = self.store.writer()?;
+        loop {
+            let mut in_batch = 0;
+            while next < files.len() && in_batch < self.batch_lines {
+                for row in writer.raw_records(files[next].0, &[])? {
+                    let Ok(parsed) = parse_line(&row.json) else {
+                        continue;
+                    };
+                    if row.retired && is_live_only(&parsed.record) {
+                        continue;
+                    }
+                    derive(
+                        &mut writer,
+                        self.prices,
+                        &row.location,
+                        row.file_id,
+                        row.line_no,
+                        &parsed,
+                        &mut report,
+                    )?;
+                    records += 1;
+                    in_batch += 1;
                 }
-                derive(
-                    &mut writer,
-                    self.prices,
-                    &row.location,
-                    row.file_id,
-                    row.line_no,
-                    &parsed,
-                    &mut report,
-                )?;
-                records += 1;
+                next += 1;
+                on_file(next, files.len());
             }
-            on_file(index + 1, files.len());
+            if next == files.len() {
+                writer.reconcile(self.prices)?;
+                writer.mark_reindex_pending(false)?;
+                writer.commit()?;
+                return Ok(Rebuilt {
+                    requests: report.requests_inserted,
+                    records,
+                });
+            }
+            writer.commit()?;
+            if self.is_cancelled() {
+                return Err(Cancelled.into());
+            }
+            self.pause();
+            writer = self.store.writer()?;
         }
-        writer.reconcile(self.prices)?;
-        writer.commit()?;
-        Ok(Rebuilt {
-            requests: report.requests_inserted,
-            records,
-        })
+    }
+
+    pub fn finish_interrupted_reindex(
+        &mut self,
+        on_file: &mut dyn FnMut(usize, usize),
+    ) -> Result<Option<Rebuilt>> {
+        if !self.store.reindex_pending()? {
+            return Ok(None);
+        }
+        self.reindex(on_file).map(Some)
     }
 
     pub fn ingest_file(&mut self, file: &TranscriptFile) -> Result<IngestReport> {
@@ -240,6 +298,11 @@ impl<'a> Ingestor<'a> {
             if in_batch == self.batch_lines {
                 writer.advance_file(file_id, &progress(offset, line_no), batch_errors)?;
                 writer.commit()?;
+                if self.is_cancelled() {
+                    report.files_changed = 1;
+                    return Ok(report);
+                }
+                self.pause();
                 writer = self.store.writer()?;
                 batch_errors = 0;
                 in_batch = 0;
@@ -1318,6 +1381,166 @@ mod tests {
             let checkpoint = store.checkpoint(&path.to_string_lossy()).unwrap().unwrap();
             assert_eq!(checkpoint.lines, expected_lines);
         }
+    }
+
+    #[test]
+    fn reindex_commits_in_batches_and_resumes_after_an_interruption() {
+        let fx = Fixture::new();
+        let line = |session: &str, id: &str| {
+            assistant(
+                session,
+                id,
+                "2026-10-01T10:00:00Z",
+                "claude-opus-5-5",
+                OPUS_USAGE,
+            )
+        };
+        fx.write("-w-proj/s1.jsonl", &format!("{}\n", line("s1", "r1")));
+        fx.write("-w-proj/s2.jsonl", &format!("{}\n", line("s2", "boom")));
+        let database = fx._temp.path().join("data.db");
+        let mut store = Store::open(&database).unwrap();
+        fx.run(&mut store);
+        let imported = snapshot(&store);
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_on_boom BEFORE INSERT ON requests WHEN NEW.key = 'boom'
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        let prices = PriceTable::bundled();
+        let mut ingestor = Ingestor::new(&mut store, &prices);
+        ingestor.batch_lines = 1;
+        assert!(ingestor.reindex(&mut |_, _| {}).is_err());
+        assert_eq!(store.totals().unwrap().requests, 1);
+        assert!(store.reindex_pending().unwrap());
+
+        conn.execute_batch("DROP TRIGGER fail_on_boom").unwrap();
+        let rebuilt = Ingestor::new(&mut store, &prices)
+            .finish_interrupted_reindex(&mut |_, _| {})
+            .unwrap();
+        assert_eq!(
+            rebuilt,
+            Some(Rebuilt {
+                requests: 2,
+                records: 2
+            })
+        );
+        assert!(!store.reindex_pending().unwrap());
+        assert_eq!(snapshot(&store), imported);
+        let again = Ingestor::new(&mut store, &prices)
+            .finish_interrupted_reindex(&mut |_, _| {})
+            .unwrap();
+        assert_eq!(again, None);
+    }
+
+    #[test]
+    fn a_cancelled_reindex_stays_pending() {
+        let fx = Fixture::new();
+        for session in ["s1", "s2"] {
+            fx.write(
+                &format!("-w-proj/{session}.jsonl"),
+                &format!(
+                    "{}\n",
+                    assistant(
+                        session,
+                        session,
+                        "2026-10-01T10:00:00Z",
+                        "claude-opus-5-5",
+                        OPUS_USAGE
+                    )
+                ),
+            );
+        }
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let prices = PriceTable::bundled();
+        let cancel = AtomicBool::new(true);
+        let mut ingestor = Ingestor::new(&mut store, &prices).cancelled_by(&cancel);
+        ingestor.batch_lines = 1;
+        let error = ingestor.reindex(&mut |_, _| {}).unwrap_err();
+        assert!(error.is::<Cancelled>());
+        assert!(store.reindex_pending().unwrap());
+        assert_eq!(store.totals().unwrap().requests, 1);
+    }
+
+    #[test]
+    fn a_cancelled_import_stops_at_a_batch_boundary_and_resumes() {
+        let fx = Fixture::new();
+        let lines = |session: &str| -> String {
+            (0..3)
+                .map(|i| {
+                    assistant(
+                        session,
+                        &format!("{session}-r{i}"),
+                        "2026-10-01T10:00:00Z",
+                        "claude-opus-5-5",
+                        OPUS_USAGE,
+                    ) + "\n"
+                })
+                .collect()
+        };
+        let path = fx.write("-w-proj/s1.jsonl", &lines("s1"));
+        fx.write("-w-proj/s2.jsonl", &lines("s2"));
+        let mut store = Store::open_in_memory().unwrap();
+        let prices = PriceTable::bundled();
+        let cancel = AtomicBool::new(true);
+        let files = discover(&fx.projects).unwrap();
+        let mut ingestor = Ingestor::new(&mut store, &prices).cancelled_by(&cancel);
+        ingestor.batch_lines = 2;
+        let skipped = ingestor.ingest_listed(&files, &mut |_, _| {}).unwrap();
+        assert_eq!(skipped.files_seen, 0);
+        let partial = ingestor.ingest_file(&files[0]).unwrap();
+        assert_eq!((partial.lines, partial.files_changed), (2, 1));
+        let checkpoint = store.checkpoint(&path.to_string_lossy()).unwrap().unwrap();
+        assert_eq!(checkpoint.lines, 2);
+        let rest = fx.run(&mut store);
+        assert_eq!(rest.requests_inserted, 4);
+        assert_eq!(store.totals().unwrap().requests, 6);
+    }
+
+    #[test]
+    fn the_pause_hook_runs_between_batches_and_files_outside_a_transaction() {
+        let fx = Fixture::new();
+        let lines = |session: &str| -> String {
+            (0..3)
+                .map(|i| {
+                    assistant(
+                        session,
+                        &format!("{session}-r{i}"),
+                        "2026-10-01T10:00:00Z",
+                        "claude-opus-5-5",
+                        OPUS_USAGE,
+                    ) + "\n"
+                })
+                .collect()
+        };
+        fx.write("-w-proj/s1.jsonl", &lines("s1"));
+        fx.write("-w-proj/s2.jsonl", &lines("s2"));
+        let mut store = Store::open_in_memory().unwrap();
+        let prices = PriceTable::bundled();
+        let files = discover(&fx.projects).unwrap();
+        let mut pauses = 0;
+        let mut hook = |store: &mut Store| {
+            pauses += 1;
+            let mut writer = store.writer().unwrap();
+            writer
+                .event(&crate::store::EventRow {
+                    session_id: "s1".into(),
+                    kind: "session.measure".into(),
+                    ts_ms: pauses,
+                    received_ms: pauses,
+                    json: "{}".into(),
+                })
+                .unwrap();
+            writer.commit().unwrap();
+        };
+        let mut ingestor = Ingestor::new(&mut store, &prices).pausing_with(&mut hook);
+        ingestor.batch_lines = 2;
+        let report = ingestor.ingest_listed(&files, &mut |_, _| {}).unwrap();
+        assert_eq!(report.requests_inserted, 6);
+        assert_eq!(pauses, 4);
+        let latest = store.latest_event("s1", "session.measure").unwrap();
+        assert_eq!(latest.unwrap().ts_ms, 4);
     }
 
     #[test]

@@ -88,6 +88,12 @@ fn print_database(store: &Store) -> Result<()> {
         )
     );
     println!("{}", labeled("Imported:", &imported));
+    if store.reindex_pending()? {
+        println!(
+            "{}",
+            labeled("Reindex:", "interrupted, the next import finishes it")
+        );
+    }
     let unpriced_requests = store.unpriced_models()?;
     for (model, requests) in &unpriced_requests {
         let value = format!("{model} ({})", plural(*requests, "request", "requests"));

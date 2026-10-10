@@ -21,8 +21,14 @@ pub fn incremental(
     prices: &PriceTable,
 ) -> Result<(Store, IngestReport, Result<Reconciliation>)> {
     let mut store = super::open_store(paths)?;
-    let bar = super::progress_bar("Importing")?;
     let mut ingestor = Ingestor::new(&mut store, prices);
+    let rebuilding = super::progress_bar("Rebuilding")?;
+    ingestor.finish_interrupted_reindex(&mut |done, total| {
+        rebuilding.set_length(total as u64);
+        rebuilding.set_position(done as u64);
+    })?;
+    rebuilding.finish_and_clear();
+    let bar = super::progress_bar("Importing")?;
     let report = ingestor.ingest_all(&paths.projects_dir(), &mut |done, total| {
         bar.set_length(total as u64);
         bar.set_position(done as u64);

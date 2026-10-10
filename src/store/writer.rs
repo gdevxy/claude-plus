@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use super::GENERATION_MARK;
+use super::{GENERATION_MARK, REINDEX_PENDING};
 use crate::transcript::TokenCounts;
 
 #[derive(Debug, Clone, Copy)]
@@ -277,6 +277,18 @@ impl Writer<'_> {
     pub fn clear_derived(&mut self) -> Result<()> {
         for table in super::schema::DERIVED_TABLES {
             self.tx.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_reindex_pending(&mut self, pending: bool) -> Result<()> {
+        if pending {
+            self.exec(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')",
+                [REINDEX_PENDING],
+            )?;
+        } else {
+            self.exec("DELETE FROM meta WHERE key = ?1", [REINDEX_PENDING])?;
         }
         Ok(())
     }

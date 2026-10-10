@@ -707,3 +707,27 @@ fn help_describes_every_command() {
         assert!(help.contains(line), "missing {line:?} in\n{help}");
     }
 }
+
+#[test]
+fn an_interrupted_reindex_is_reported_and_finished_by_the_next_import() {
+    let env = env();
+    cmd(&env, &["import"]).assert().success();
+    rusqlite::Connection::open(env.plus.join("data.db"))
+        .unwrap()
+        .execute_batch(
+            "DELETE FROM requests; INSERT INTO meta (key, value) VALUES ('reindex_pending', '1');",
+        )
+        .unwrap();
+    let doctor = stdout_of(&env, &["doctor"]);
+    assert!(
+        doctor.contains(
+            "  Imported:    0 requests in 4 files · 1 unparsable line\n  Reindex:     interrupted, the next import finishes it\n"
+        ),
+        "{doctor}"
+    );
+    assert_eq!(
+        stdout_of(&env, &["import"]),
+        "✻ Imported 0 lines from 0 changed files · 0 new requests · 0 unparsable lines\n  History: 5 requests across 2 sessions · $0.0812 priced\n"
+    );
+    assert!(!stdout_of(&env, &["doctor"]).contains("Reindex:"));
+}
