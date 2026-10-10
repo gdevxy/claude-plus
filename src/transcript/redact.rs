@@ -1,7 +1,7 @@
 use serde_json::{Map, Value, json};
 
 use super::record::ATTACHMENT_METADATA_KEYS;
-use super::text::{SHRUNK_KEY, shrink};
+use super::text::{SHRUNK_KEY, is_label, shrink};
 
 pub const RAW_STRING_LIMIT: usize = 2048;
 pub const TOOL_INPUT_LIMIT: usize = 256;
@@ -14,14 +14,30 @@ pub fn redact(raw: &Value) -> Value {
     let mut value = raw.clone();
     if let Some(record) = value.as_object_mut() {
         match record.get("type").and_then(Value::as_str) {
-            Some("assistant") => redact_message(record),
+            Some("assistant") => {
+                redact_message(record);
+                if let Some(inputs) = record.get_mut("wireToolInputs") {
+                    *inputs = shrink(inputs, TOOL_INPUT_LIMIT);
+                }
+            }
             Some("user") => {
                 redact_message(record);
-                redact_fields(record, &["toolUseResult"], STRUCTURE_KEYS);
+                redact_fields(record, &["toolUseResult", "mcpMeta"], STRUCTURE_KEYS);
+                if let Some(origin) = record.get_mut("origin").and_then(Value::as_object_mut) {
+                    redact_fields(origin, &["body"], STRUCTURE_KEYS);
+                }
             }
             Some("attachment") => {
                 redact_fields(record, &["attachment"], ATTACHMENT_METADATA_KEYS);
-                redact_fields(record, &["rendered", "renderedInHumanTurn"], STRUCTURE_KEYS);
+                redact_fields(
+                    record,
+                    &[
+                        "rendered",
+                        "renderedInHumanTurn",
+                        "renderedBesideToolResult",
+                    ],
+                    STRUCTURE_KEYS,
+                );
             }
             Some("system") => redact_fields(record, &["content", "prompt"], STRUCTURE_KEYS),
             Some("last-prompt") => redact_fields(record, &["lastPrompt"], STRUCTURE_KEYS),
@@ -75,7 +91,7 @@ fn lengths(value: &Value, kept: &[&str]) -> Value {
         Value::Object(map) => Value::Object(
             map.iter()
                 .map(|(key, item)| {
-                    let item = if kept.contains(&key.as_str()) {
+                    let item = if kept.contains(&key.as_str()) && is_label(item) {
                         item.clone()
                     } else {
                         lengths(item, kept)
@@ -106,7 +122,8 @@ mod tests {
             {"type":"text","text":secret(12)},
             {"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test","description":secret(300),"nested":["--release"]}},
             {"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"/w/src/main.rs"}}
-        ],"usage":{"input_tokens":1,"output_tokens":2}}})
+        ],"usage":{"input_tokens":1,"output_tokens":2}},
+        "wireToolInputs":{"toolu_1":{"command":"cargo test","description":secret(300)}}})
     }
 
     fn user_with_tool_results() -> Value {
@@ -117,7 +134,9 @@ mod tests {
                 {"type":"image","source":{"type":"base64","media_type":"image/png","data":secret(900)}},
                 {"type":"tool_reference","tool_name":"mcp__x__y"}
             ]}
-        ]},"toolUseResult":{"stdout":secret(50),"stderr":"","interrupted":false,"usage":{"output_tokens":7}}})
+        ]},"toolUseResult":{"stdout":secret(50),"stderr":"","interrupted":false,"usage":{"output_tokens":7}},
+        "mcpMeta":{"structuredContent":{"issues":[{"title":secret(12)}]}},
+        "origin":{"kind":"peer","from":"a1","body":secret(30)}})
     }
 
     fn prompt() -> Value {
@@ -129,8 +148,9 @@ mod tests {
             "type":"instructions",
             "files":[{"path":"/h/CLAUDE.md","type":"User","content":secret(70)}],
             "names":["alpha"],"addedNames":["beta"],"entries":[{"name":"gamma","body":secret(9)}],
-            "path":"/h/notes.md","content":secret(3000)
-        },"rendered":[{"content":secret(15)}]})
+            "path":"/h/notes.md","content":secret(3000),
+            "tools":[{"name":"Grep","schema":{"properties":{"path":{"type":"string","description":secret(400)}}}}]
+        },"rendered":[{"content":secret(15)}],"renderedBesideToolResult":[{"content":secret(8)}]})
     }
 
     fn system() -> Value {
@@ -170,6 +190,9 @@ mod tests {
         assert_eq!(content[3]["input"]["file_path"], "/w/src/main.rs");
         assert_eq!(content[2]["name"], "Bash");
         assert_eq!(content[2]["id"], "toolu_1");
+        let wire = &redacted["wireToolInputs"]["toolu_1"];
+        assert_eq!(wire["command"], "cargo test");
+        assert_eq!(wire["description"], json!({"$chars": 300}));
     }
 
     #[test]
@@ -184,6 +207,11 @@ mod tests {
         assert_eq!(body["entries"][0]["name"], "gamma");
         assert_eq!(body["path"], "/h/notes.md");
         assert_eq!(redacted["rendered"][0]["content"], json!({"$chars": 15}));
+        assert_eq!(body["tools"][0]["name"], "Grep");
+        assert_eq!(
+            body["tools"][0]["schema"]["properties"]["path"],
+            json!({"type": "string", "description": {"$chars": 400}})
+        );
     }
 
     #[test]
@@ -195,6 +223,10 @@ mod tests {
         assert_eq!(content[1]["content"][1]["type"], "image");
         assert_eq!(redacted["toolUseResult"]["usage"]["output_tokens"], 7);
         assert_eq!(redacted["sessionId"], "s1");
+        assert_eq!(
+            redacted["origin"],
+            json!({"kind": "peer", "from": "a1", "body": {"$chars": 30}})
+        );
     }
 
     #[test]
