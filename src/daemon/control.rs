@@ -8,8 +8,9 @@ use rustix::process::{Pid, Signal, kill_process};
 use super::lock::{Holder, probe};
 use crate::api::check_socket_path;
 use crate::api::client::Client;
-use crate::api::wire::Health;
+use crate::api::wire::{API_VERSION, Health};
 use crate::paths::Paths;
+use crate::store::Store;
 
 pub const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 pub const START_TIMEOUT: Duration = Duration::from_secs(3);
@@ -29,7 +30,7 @@ pub enum Ensured {
     Running(Health),
     KeptNewer(Health),
     Started(Health),
-    Restarted { previous: String, health: Health },
+    Restarted { previous: Health, health: Health },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,10 +48,43 @@ enum Next {
     Wait(Option<u32>),
 }
 
-fn next_step(status: Status, version: &str) -> Next {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Build<'a> {
+    pub version: &'a str,
+    pub schema: usize,
+    pub api: u32,
+}
+
+impl Build<'static> {
+    pub fn this() -> Self {
+        Self {
+            version: VERSION,
+            schema: Store::latest_schema_version(),
+            api: API_VERSION,
+        }
+    }
+}
+
+impl Build<'_> {
+    fn is_older_than(&self, other: &Build) -> bool {
+        is_older(self.version, other.version) || self.schema < other.schema || self.api < other.api
+    }
+
+    fn of(health: &Health) -> Build<'_> {
+        Build {
+            version: &health.version,
+            schema: health.schema,
+            api: health.v,
+        }
+    }
+}
+
+fn next_step(status: Status, ours: &Build) -> Next {
     match status {
-        Status::Running(health) if is_older(&health.version, version) => Next::Replace(health),
-        Status::Running(health) if is_older(version, &health.version) => Next::KeepNewer(health),
+        Status::Running(health) if Build::of(&health).is_older_than(ours) => Next::Replace(health),
+        Status::Running(health) if ours.is_older_than(&Build::of(&health)) => {
+            Next::KeepNewer(health)
+        }
         Status::Running(health) => Next::Keep(health),
         Status::NotRunning => Next::Start,
         Status::Unresponsive { pid } => Next::Wait(pid),
@@ -129,7 +163,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
 
 pub fn ensure(paths: &Paths) -> Result<Ensured> {
     check_socket_path(&paths.socket())?;
-    match next_step(status(paths)?, VERSION) {
+    match next_step(status(paths)?, &Build::this()) {
         Next::Keep(health) => Ok(Ensured::Running(health)),
         Next::KeepNewer(health) => Ok(Ensured::KeptNewer(health)),
         Next::Start => start(paths),
@@ -137,7 +171,7 @@ pub fn ensure(paths: &Paths) -> Result<Ensured> {
             stop(paths)?;
             Ok(match start(paths)? {
                 Ensured::Started(health) | Ensured::Running(health) => Ensured::Restarted {
-                    previous: old.version,
+                    previous: old,
                     health,
                 },
                 restarted => restarted,
@@ -287,40 +321,96 @@ mod tests {
         }
     }
 
+    fn release(version: &str) -> Build<'_> {
+        Build {
+            version,
+            schema: 9,
+            api: 1,
+        }
+    }
+
     #[test]
     fn ensure_keeps_a_matching_daemon_and_replaces_another_version() {
         assert_eq!(
-            next_step(Status::Running(health("0.1.0")), "0.1.0"),
+            next_step(Status::Running(health("0.1.0")), &release("0.1.0")),
             Next::Keep(health("0.1.0"))
         );
         assert_eq!(
-            next_step(Status::Running(health("0.0.9")), "0.1.0"),
+            next_step(Status::Running(health("0.0.9")), &release("0.1.0")),
             Next::Replace(health("0.0.9"))
         );
         assert_eq!(
-            next_step(Status::Running(health("0.10.0")), "0.9.1"),
+            next_step(Status::Running(health("0.10.0")), &release("0.9.1")),
             Next::KeepNewer(health("0.10.0"))
         );
         assert_eq!(
-            next_step(Status::Running(health("0.1.0")), "0.1.0-rc.1"),
+            next_step(Status::Running(health("0.1.0")), &release("0.1.0-rc.1")),
             Next::KeepNewer(health("0.1.0"))
         );
         assert_eq!(
-            next_step(Status::Running(health("0.1.0-rc.1")), "0.1.0"),
+            next_step(Status::Running(health("0.1.0-rc.1")), &release("0.1.0")),
             Next::Replace(health("0.1.0-rc.1"))
         );
         assert_eq!(
-            next_step(Status::Running(health("garbage")), "0.1.0"),
+            next_step(Status::Running(health("garbage")), &release("0.1.0")),
             Next::Replace(health("garbage"))
         );
         assert_eq!(
-            next_step(Status::Running(health("0.1.0+linux")), "0.1.0+macos"),
+            next_step(
+                Status::Running(health("0.1.0+linux")),
+                &release("0.1.0+macos")
+            ),
             Next::Keep(health("0.1.0+linux"))
         );
-        assert_eq!(next_step(Status::NotRunning, "0.1.0"), Next::Start);
         assert_eq!(
-            next_step(Status::Unresponsive { pid: Some(7) }, "0.1.0"),
+            next_step(Status::NotRunning, &release("0.1.0")),
+            Next::Start
+        );
+        assert_eq!(
+            next_step(Status::Unresponsive { pid: Some(7) }, &release("0.1.0")),
             Next::Wait(Some(7))
+        );
+    }
+
+    fn built(version: &str, schema: usize, v: u32) -> Health {
+        Health {
+            schema,
+            v,
+            ..health(version)
+        }
+    }
+
+    #[test]
+    fn ensure_replaces_a_daemon_older_on_its_store_or_api_and_keeps_a_newer_one() {
+        let ours = Build {
+            version: "0.1.0",
+            schema: 10,
+            api: 1,
+        };
+        let step = |health: Health| next_step(Status::Running(health), &ours);
+        assert_eq!(
+            step(built("0.1.0", 10, 1)),
+            Next::Keep(built("0.1.0", 10, 1))
+        );
+        assert_eq!(
+            step(built("0.1.0", 9, 1)),
+            Next::Replace(built("0.1.0", 9, 1))
+        );
+        assert_eq!(
+            step(built("0.1.0", 10, 0)),
+            Next::Replace(built("0.1.0", 10, 0))
+        );
+        assert_eq!(
+            step(built("0.2.0", 9, 1)),
+            Next::Replace(built("0.2.0", 9, 1))
+        );
+        assert_eq!(
+            step(built("0.1.0", 11, 1)),
+            Next::KeepNewer(built("0.1.0", 11, 1))
+        );
+        assert_eq!(
+            step(built("0.1.0", 10, 2)),
+            Next::KeepNewer(built("0.1.0", 10, 2))
         );
     }
 

@@ -32,12 +32,23 @@ pub fn ensure(paths: &Paths) -> Result<()> {
         Ensured::Started(health) => {
             println!("✻ Started the claude-plus daemon · pid {}", health.pid)
         }
-        Ensured::Restarted { previous, health } => println!(
-            "✻ Restarted the claude-plus daemon on v{} (was v{previous}) · pid {}",
-            health.version, health.pid
-        ),
+        Ensured::Restarted { previous, health } => {
+            println!("{}", restarted(&previous, &health))
+        }
     }
     Ok(())
+}
+
+fn restarted(previous: &Health, health: &Health) -> String {
+    let was = if previous.version == health.version {
+        "an older build".to_string()
+    } else {
+        format!("v{}", previous.version)
+    };
+    format!(
+        "✻ Restarted the claude-plus daemon on v{} (was {was}) · pid {}",
+        health.version, health.pid
+    )
 }
 
 fn running(health: &Health) -> String {
@@ -66,6 +77,40 @@ fn stopped(stopped: Stopped) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::wire::IngestHealth;
+
+    fn health(version: &str, schema: usize, pid: u32) -> Health {
+        Health {
+            v: 1,
+            version: version.into(),
+            schema,
+            pid,
+            uptime_s: 1,
+            claude_dir: "/c".into(),
+            ingest: IngestHealth {
+                lag_ms: 0,
+                backlog: 0,
+                last_ingest_ms: None,
+                progress: None,
+                watching: true,
+                last_error: None,
+                last_error_at_ms: None,
+                rebuilding: false,
+            },
+        }
+    }
+
+    #[test]
+    fn a_restart_names_the_version_it_replaced() {
+        assert_eq!(
+            restarted(&health("0.1.0", 10, 7), &health("0.2.0", 10, 42)),
+            "✻ Restarted the claude-plus daemon on v0.2.0 (was v0.1.0) · pid 42"
+        );
+        assert_eq!(
+            restarted(&health("0.1.0", 9, 7), &health("0.1.0", 10, 42)),
+            "✻ Restarted the claude-plus daemon on v0.1.0 (was an older build) · pid 42"
+        );
+    }
 
     #[test]
     fn a_stopped_daemon_is_named_by_its_pid_when_it_is_known() {
