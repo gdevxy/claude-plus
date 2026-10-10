@@ -110,7 +110,7 @@ export type Local = {
   step: Step | null
 }
 
-export type DaemonStatus = 'starting' | 'ok' | 'rebuilding' | 'unreachable' | 'missing' | 'failed'
+export type DaemonStatus = 'starting' | 'ok' | 'rebuilding' | 'unreachable' | 'outdated' | 'newer' | 'missing' | 'failed'
 
 export type Daemon = { status: DaemonStatus; detail: string | null }
 

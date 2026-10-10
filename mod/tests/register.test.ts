@@ -9,6 +9,7 @@ import { paintTree, trimmed } from './paint'
 type Wiring = {
   session: string
   served: Snapshot | null
+  serving: 'current' | 'older' | 'newer'
   silent: boolean
   holding: boolean
   held: (() => void)[]
@@ -121,7 +122,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), serving: 'current', silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -142,6 +143,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
   })
   on('process.run', ($, e) => {
     wiring.ran.push(e.argv)
+    if (wiring.serving === 'older') wiring.serving = 'current'
     return { value: { exitCode: wiring.exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('http.fetch', async ($, e) => {
@@ -151,7 +153,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     if (wiring.down) throw new Error('ECONNREFUSED')
     if (e.url.endsWith('/events')) wiring.delivered.push(e)
     if (wiring.rebuilding && e.url.includes('/snapshot')) return { value: { status: 503, ok: false, headers: {}, text: '{"error":"rebuilding"}' } }
-    const body = e.url.includes('/snapshot') ? JSON.stringify({ v: 1, ...wiring.served }) : '{"accepted":1,"rejected":[]}'
+    const body = e.url.includes('/snapshot') ? JSON.stringify(servedBody(wiring)) : '{"accepted":1,"rejected":[]}'
     return { value: { status: 200, ok: true, headers: {}, text: body } }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -159,6 +161,16 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   return wiring
+}
+
+function servedBody(wiring: Wiring): unknown {
+  if (wiring.served === null) return { v: 1 }
+  if (wiring.serving === 'newer') return { v: 2, ...wiring.served }
+  if (wiring.serving === 'older') {
+    const { live: _live, ...older } = wiring.served
+    return { v: 1, ...older }
+  }
+  return { v: 1, ...wiring.served }
 }
 
 async function start($: Engine): Promise<void> {
@@ -465,6 +477,48 @@ describe('plus mod', () => {
     const ui = await mount($, 40)
     expect((await ui.find({ key: 'daemon' }))?.text).toBe('claude-plus is not installed yet. Install it, or set its path in the plugin options')
     expect((await ui.find({ key: 'context' }))?.text).toBe('Context                     46k / 200k')
+  })
+
+  test('a daemon older than the pane is replaced and read again', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    wiring.serving = 'older'
+    await clock.advance(3000)
+    await clock.advance(1000)
+    expect(wiring.ran).toHaveLength(2)
+    const ui = await mount($, 40)
+    expect(await ui.find({ key: 'daemon' })).toBeUndefined()
+    expect((await ui.find({ key: 'headline' }))?.text).toContain('$4.18')
+    await ui.unmount()
+  })
+
+  test('a daemon newer than the pane asks for a plugin update and keeps running', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { serving: 'newer' })
+    await start($)
+    await clock.advance(60_000)
+    expect(wiring.ran).toHaveLength(1)
+    const ui = await mount($, 40)
+    expect((await ui.find({ key: 'daemon' }))?.text).toBe('The claude-plus daemon is newer than this pane')
+    expect((await ui.find({ key: 'daemon-fix' }))?.text).toBe('Update the plus plugin')
+    await ui.unmount()
+  })
+
+  test('a daemon that stops answering later is started again', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    wiring.down = true
+    await clock.advance(3000)
+    expect(wiring.ran).toHaveLength(1)
+    await clock.advance(30_000)
+    expect(wiring.ran).toHaveLength(2)
+    await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+    await clock.settle()
+    expect(wiring.ran).toHaveLength(3)
   })
 
   test('a silent daemon is reported once the 500 ms timeout passes', async ($, on) => {

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 'claude-code'
 
-import type { Daemon, Local, Motion, PaneState, PlusView, Snapshot } from '../types'
+import type { Daemon, DaemonStatus, Local, Motion, PaneState, PlusView, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
 import { Outbox, eventId, eventsBody, fetchSnapshot, measureOf, send, socketPath } from './client'
 import {
@@ -26,6 +26,7 @@ export const ENSURE_TIMEOUT_MS = 10_000
 export const FULLSCREEN_KEY = 'fullscreen'
 export const SERVICE_UNAVAILABLE = 503
 export const STUCK_POST_MS = 30_000
+export const ENSURE_RETRY_MS = 30_000
 
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
@@ -43,6 +44,8 @@ type Runtime = {
   timer: Timer | null
   socket: string | null | undefined
   ensuring: Promise<void> | null
+  ensuredAtMs: number
+  replacedAtMs: number
   posting: { sinceMs: number } | null
   idPrefix: string | null
   sequence: number
@@ -58,6 +61,8 @@ function fresh(options: PluginOptions): Runtime {
     timer: null,
     socket: undefined,
     ensuring: null,
+    ensuredAtMs: -Infinity,
+    replacedAtMs: -Infinity,
     posting: null,
     idPrefix: null,
     sequence: 0,
@@ -102,6 +107,7 @@ async function tick($: EngineInterface): Promise<void> {
     await update($, now, () => at)
     if (runtime.outbox.size > 0) await flush($)
     if (at - runtime.polledAtMs >= POLL_MS) await poll($)
+    if (needsEnsure((await read($, daemon)).status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) void ensureDaemon($)
     await settle($)
     await showStatus($)
   } finally {
@@ -159,6 +165,16 @@ async function poll($: EngineInterface): Promise<void> {
     await update($, daemon, (): Daemon => ({ status: 'rebuilding', detail: null }))
     return
   }
+  if (reply.kind === 'outdated') {
+    const outdated: Daemon = { status: reply.newer === 'pane' ? 'outdated' : 'newer', detail: null }
+    if (status !== outdated.status) await update($, daemon, () => outdated)
+    const at = await $.clock.now()
+    if (outdated.status === 'outdated' && at - runtime.replacedAtMs >= ENSURE_RETRY_MS) {
+      runtime.replacedAtMs = at
+      void ensureDaemon($)
+    }
+    return
+  }
   if (reply.kind === 'failed') {
     if (status === 'ok' || status === 'rebuilding') await update($, daemon, (): Daemon => ({ status: 'unreachable', detail: reply.reason }))
     return
@@ -198,17 +214,23 @@ async function forward($: EngineInterface, kind: string, data: { [key: string]: 
   await flush($)
 }
 
+function needsEnsure(status: DaemonStatus): boolean {
+  return status === 'unreachable' || status === 'outdated'
+}
+
 function ensureDaemon($: EngineInterface): Promise<void> {
   runtime.ensuring ??= (async () => {
-    const outcome = await $.process.run([runtime.binary, 'daemon', '--ensure'], { timeoutMs: ENSURE_TIMEOUT_MS }).then(
-      result => ensureOutcome(result.exitCode, result.stderr),
-      ensureError,
-    )
-    await update($, daemon, () => outcome)
-    if (outcome.status === 'ok') {
+    try {
+      runtime.ensuredAtMs = await $.clock.now()
+      const outcome = await $.process.run([runtime.binary, 'daemon', '--ensure'], { timeoutMs: ENSURE_TIMEOUT_MS }).then(
+        result => ensureOutcome(result.exitCode, result.stderr),
+        ensureError,
+      )
+      await update($, daemon, () => outcome)
+      if (outcome.status !== 'ok') return
       await flush($)
       await poll($)
-    } else {
+    } finally {
       runtime.ensuring = null
     }
   })()

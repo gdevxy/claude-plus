@@ -445,6 +445,10 @@ describe('live screen', () => {
     expect([text(line(unreachable, 'daemon')), text(line(unreachable, 'daemon-fix'))]).toEqual(['The daemon is not answering', 'Run claude-plus daemon --ensure'])
     const wide = screen(input({ width: 100, daemon: { status: 'unreachable', detail: 'no answer within 500 ms' } }))
     expect(text(line(wide, 'daemon'))).toBe('The daemon is not answering · run claude-plus daemon --ensure')
+    const outdated = screen(input({ daemon: { status: 'outdated', detail: null } }))
+    expect(text(line(outdated, 'daemon'))).toBe('Restarting the out-of-date claude-plus daemon…')
+    const newer = screen(input({ width: 100, daemon: { status: 'newer', detail: null } }))
+    expect(text(line(newer, 'daemon'))).toBe('The claude-plus daemon is newer than this pane · update the plus plugin')
     const rebuilding = screen(input({ daemon: { status: 'rebuilding', detail: null } }))
     expect(text(line(rebuilding, 'daemon'))).toBe('Rebuilding the claude-plus index… numbers return in a moment')
     const failed = screen(input({ daemon: { status: 'failed', detail: 'the database is locked' } }))
@@ -476,6 +480,8 @@ const STATES: Record<string, Partial<ScreenInput>> = {
   'an unreachable daemon': { daemon: { status: 'unreachable', detail: 'ECONNREFUSED' } },
   'a filling window': { snapshot: FILLING() },
   'a plan still learning': { snapshot: LEARNING() },
+  'an older daemon': { daemon: { status: 'outdated', detail: null } },
+  'a newer daemon': { daemon: { status: 'newer', detail: null } },
   'unpriced requests': { snapshot: { ...snapshot(), totals: { ...snapshot().totals, unpriced_requests: 2 } } },
 }
 

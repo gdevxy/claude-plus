@@ -66,6 +66,14 @@ describe('daemon client', () => {
     expect(await fetchSnapshot(garbled, '/s.sock', 's1')).toEqual({ kind: 'failed', reason: 'unreadable snapshot' })
   })
 
+  test('a snapshot from another milestone says which side is out of date', async () => {
+    const { live: _live, ...older } = { v: 1, ...snapshot() }
+    const serve = (body: unknown) => answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: JSON.stringify(body) }))
+    expect(await fetchSnapshot(serve(older), '/s.sock', 's1')).toEqual({ kind: 'outdated', newer: 'pane' })
+    expect(await fetchSnapshot(serve({ v: 2, ...snapshot() }), '/s.sock', 's1')).toEqual({ kind: 'outdated', newer: 'daemon' })
+    expect(await fetchSnapshot(serve({ v: 1 }), '/s.sock', 's1')).toEqual({ kind: 'failed', reason: 'unreadable snapshot' })
+  })
+
   test('only a version 1 snapshot with a live section is accepted', () => {
     const good = { v: 1, ...snapshot() }
     expect(parseSnapshot(JSON.stringify(good))?.live.cache.ttl).toBe('1h')

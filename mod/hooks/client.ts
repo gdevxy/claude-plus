@@ -19,6 +19,7 @@ export type Sent = { reply: Promise<Reply>; settled: Promise<Reply> }
 export type SnapshotReply =
   | { kind: 'snapshot'; snapshot: Snapshot }
   | { kind: 'rebuilding' }
+  | { kind: 'outdated'; newer: 'daemon' | 'pane' }
   | { kind: 'failed'; reason: string }
 
 export type PlusEvent = { id: string; session: string; kind: string; ts_ms: number; data: { [key: string]: JsonValue } }
@@ -62,7 +63,16 @@ export async function fetchSnapshot(io: Io, socket: string, session: string): Pr
     return reply.status === REBUILDING_STATUS ? { kind: 'rebuilding' } : { kind: 'failed', reason: reply.reason }
   }
   const snapshot = parseSnapshot(reply.text)
-  return snapshot === null ? { kind: 'failed', reason: 'unreadable snapshot' } : { kind: 'snapshot', snapshot }
+  if (snapshot !== null) return { kind: 'snapshot', snapshot }
+  const newer = outdatedSide(reply.text)
+  return newer === null ? { kind: 'failed', reason: 'unreadable snapshot' } : { kind: 'outdated', newer }
+}
+
+function outdatedSide(text: string): 'daemon' | 'pane' | null {
+  const value = safeJson(text)
+  if (!isObject(value) || typeof value.v !== 'number') return null
+  if (value.v > 1) return 'daemon'
+  return value.v === 1 && typeof value.session === 'string' && isObject(value.totals) && !isObject(value.live) ? 'pane' : null
 }
 
 export function parseSnapshot(text: string): Snapshot | null {
