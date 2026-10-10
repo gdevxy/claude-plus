@@ -84,8 +84,11 @@ impl Store {
     }
 
     pub fn open_with_progress(path: &Path, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
-        let conn =
-            Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        Self::open_writable(path, on_upgrade).map_err(|error| naming(path, error))
+    }
+
+    fn open_writable(path: &Path, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
+        let conn = Connection::open(path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -99,14 +102,16 @@ impl Store {
     }
 
     pub fn open_read_only(path: &Path) -> Result<Self> {
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .with_context(|| format!("cannot open {}", path.display()))?;
-        let store = Self { conn };
-        store.refuse_newer_schema()?;
-        Ok(store)
+        let open = || -> Result<Self> {
+            let conn = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let store = Self { conn };
+            store.refuse_newer_schema()?;
+            Ok(store)
+        };
+        open().map_err(|error| naming(path, error))
     }
 
     pub fn schema_version(&self) -> Result<usize> {
@@ -302,6 +307,15 @@ impl Store {
         Ok(self
             .conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0))? as u64)
+    }
+}
+
+fn naming(path: &Path, error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<rusqlite::Error>() {
+        Some(sqlite) if !error.is::<Busy>() => {
+            anyhow::anyhow!("cannot open {}: {sqlite}", path.display())
+        }
+        _ => error,
     }
 }
 

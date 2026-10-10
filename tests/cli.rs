@@ -611,3 +611,34 @@ fn reconcile_failure_still_prints_the_import_report() {
             "claude-plus: reconciling with Claude Code counters: adjustments are locked",
         ));
 }
+
+fn corrupt_database(env: &Env) -> PathBuf {
+    std::fs::create_dir_all(&env.plus).unwrap();
+    let database = env.plus.join("data.db");
+    std::fs::write(&database, "this is not an SQLite database, just text").unwrap();
+    database
+}
+
+#[test]
+fn import_names_a_corrupt_database() {
+    let env = env();
+    let database = corrupt_database(&env);
+    cmd(&env, &["import"]).assert().failure().stderr(format!(
+        "claude-plus: cannot open {}: file is not a database\n",
+        database.display()
+    ));
+}
+
+#[test]
+fn doctor_reports_a_corrupt_database() {
+    let env = env();
+    let database = corrupt_database(&env);
+    let doctor = stdout_of(&env, &["doctor"]);
+    assert!(
+        doctor.ends_with(&format!(
+            "  Database:    cannot open {}: file is not a database\n",
+            database.display()
+        )),
+        "{doctor}"
+    );
+}

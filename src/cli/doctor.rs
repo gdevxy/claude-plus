@@ -53,7 +53,13 @@ fn readable_store(paths: &Paths) -> Result<Option<Store>> {
         );
         return Ok(None);
     }
-    let store = Store::open_read_only(&database)?;
+    let store = match Store::open_read_only(&database) {
+        Ok(store) => store,
+        Err(error) => {
+            println!("{}", labeled("Database:", &format!("{error:#}")));
+            return Ok(None);
+        }
+    };
     let version = store.schema_version()?;
     if version < Store::latest_schema_version() {
         let value = format!("schema v{version}, run claude-plus import to upgrade");
