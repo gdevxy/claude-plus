@@ -130,15 +130,20 @@ pub fn model(timeline: &Timeline, context: &Context) -> Cache {
         last_touch_ms,
         expires_at_ms,
         hit_ratio: hit_ratio(&timeline.requests),
-        saved_usd: timeline
-            .requests
-            .iter()
-            .filter_map(|request| saved(request, context.prices))
-            .sum(),
+        saved_usd: total(
+            timeline
+                .requests
+                .iter()
+                .filter_map(|request| saved(request, context.prices)),
+        ),
         rebuilds: rebuilds.len() as u64,
-        rebuild_usd: rebuilds.iter().filter_map(|r| r.extra_usd).sum(),
+        rebuild_usd: total(rebuilds.iter().filter_map(|r| r.extra_usd)),
         last_rebuild: rebuilds.last().cloned(),
     }
+}
+
+fn total(values: impl Iterator<Item = f64>) -> f64 {
+    values.fold(0.0, |sum, value| sum + value)
 }
 
 fn hit_ratio(requests: &[Observed]) -> Option<f64> {
@@ -345,6 +350,13 @@ mod tests {
         assert_eq!(model.state, CacheState::None);
         assert_eq!(model.expires_at_ms, None);
         assert_eq!(cache(vec![], 1, true).hit_ratio, None);
+    }
+
+    #[test]
+    fn empty_sums_are_written_as_a_plain_zero() {
+        let json = serde_json::to_string(&cache(vec![], 1, true)).unwrap();
+        assert!(json.contains(r#""saved_usd":0.0,"#), "{json}");
+        assert!(json.contains(r#""rebuild_usd":0.0,"#), "{json}");
     }
 
     #[test]
