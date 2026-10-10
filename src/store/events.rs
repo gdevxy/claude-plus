@@ -5,6 +5,7 @@ use super::{Store, Writer};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventRow {
+    pub client_id: Option<String>,
     pub session_id: String,
     pub kind: String,
     pub ts_ms: i64,
@@ -20,19 +21,22 @@ pub struct StoredEvent {
 }
 
 impl Writer<'_> {
-    pub fn event(&mut self, row: &EventRow) -> Result<()> {
-        self.tx
+    pub fn event(&mut self, row: &EventRow) -> Result<bool> {
+        let inserted = self
+            .tx
             .prepare_cached(
-                "INSERT INTO events (session_id, kind, ts_ms, received_ms, json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO events (client_id, session_id, kind, ts_ms, received_ms, json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
             )?
             .execute(params![
+                row.client_id,
                 row.session_id,
                 row.kind,
                 row.ts_ms,
                 row.received_ms,
                 row.json
             ])?;
-        Ok(())
+        Ok(inserted > 0)
     }
 }
 
@@ -61,6 +65,7 @@ mod tests {
 
     fn event(session_id: &str, kind: &str, ts_ms: i64, json: &str) -> EventRow {
         EventRow {
+            client_id: None,
             session_id: session_id.into(),
             kind: kind.into(),
             ts_ms,
@@ -93,6 +98,24 @@ mod tests {
             })
         );
         assert_eq!(store.latest_event("s3", "session.measure").unwrap(), None);
+    }
+
+    #[test]
+    fn an_event_sent_again_under_its_client_id_is_stored_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let with_id = |session: &str, id: &str| EventRow {
+            client_id: Some(id.into()),
+            ..event(session, "turn.step", 1, "{}")
+        };
+        assert!(w.event(&with_id("s1", "a-1")).unwrap());
+        assert!(!w.event(&with_id("s1", "a-1")).unwrap());
+        assert!(w.event(&with_id("s1", "a-2")).unwrap());
+        assert!(w.event(&with_id("s2", "a-1")).unwrap());
+        assert!(w.event(&event("s1", "turn.step", 1, "{}")).unwrap());
+        assert!(w.event(&event("s1", "turn.step", 1, "{}")).unwrap());
+        w.commit().unwrap();
+        assert_eq!(store.dump("events").len(), 5);
     }
 
     #[test]

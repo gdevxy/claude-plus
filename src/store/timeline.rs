@@ -150,6 +150,7 @@ mod tests {
             ("turn.step", 20),
         ] {
             w.event(&EventRow {
+                client_id: None,
                 session_id: "s1".into(),
                 kind: kind.into(),
                 ts_ms,

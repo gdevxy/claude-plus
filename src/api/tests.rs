@@ -101,7 +101,7 @@ fn health_reports_version_schema_and_ingest_state() {
     let health = server.client().health().unwrap();
     assert_eq!(
         (health.v, health.version.as_str(), health.schema, health.pid),
-        (1, env!("CARGO_PKG_VERSION"), 9, std::process::id())
+        (1, env!("CARGO_PKG_VERSION"), 10, std::process::id())
     );
     assert_eq!(
         health.claude_dir,
@@ -253,6 +253,34 @@ fn the_snapshot_reports_the_cache_forecast_and_limits() {
     );
     assert_eq!(live.limits[0].calibration.family, "opus");
     assert_eq!(live.limits[0].calibration.pct_per_usd, None);
+}
+
+fn step(id: Option<&str>, ts_ms: i64, input: u64, read: u64, write: u64) -> serde_json::Value {
+    let mut event = json!({"session": SESSION, "kind": "turn.step", "ts_ms": ts_ms, "data": {
+        "turnId": "t1", "index": 0, "model": "claude-opus-5-5", "effort": "high",
+        "usage": {"model": "claude-opus-5-5", "input_tokens": input, "output_tokens": 800,
+                  "cache_read_input_tokens": read, "cache_creation_input_tokens": write}
+    }});
+    if let Some(id) = id {
+        event["id"] = json!(id);
+    }
+    event
+}
+
+#[test]
+fn a_batch_sent_again_is_stored_once_and_counted_once() {
+    let server = Server::start();
+    server.client().import().unwrap();
+    let step_ms = epoch_ms(SystemTime::now()) - 1000;
+    let batch = json!({"events": [step(Some("m1-1"), step_ms, 12, 25_000, 300)]});
+    assert_eq!(server.client().send_events(&batch).unwrap().accepted, 1);
+    let once = server.client().snapshot(SESSION).unwrap().live;
+    assert_eq!(server.client().send_events(&batch).unwrap().accepted, 1);
+    let twice = server.client().snapshot(SESSION).unwrap().live;
+    assert_eq!(twice, once);
+    assert_eq!(once.forecast.unwrap().samples, 2);
+    let store = Store::open_read_only(&server.temp.path().join("data.db")).unwrap();
+    assert_eq!(store.dump("events").len(), 1);
 }
 
 #[test]

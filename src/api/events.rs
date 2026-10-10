@@ -14,6 +14,7 @@ pub const KINDS: &[&str] = &[
     "turn.complete",
 ];
 pub const SESSION_RULE: &str = "session must be 1 to 128 letters, digits, - or _";
+pub const ID_RULE: &str = "id must be 1 to 128 letters, digits, -, _, . or :";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Validated {
@@ -48,6 +49,13 @@ pub fn is_session_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+fn is_client_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
 fn row(event: &Value, received_ms: i64) -> Result<EventRow, String> {
     if !event.is_object() {
         return Err("event must be a JSON object".into());
@@ -70,7 +78,12 @@ fn row(event: &Value, received_ms: i64) -> Result<EventRow, String> {
         .get("data")
         .filter(|data| data.is_object())
         .ok_or("data must be a JSON object")?;
+    let client_id = match event.get("id") {
+        None => None,
+        Some(id) => Some(id.as_str().filter(|id| is_client_id(id)).ok_or(ID_RULE)?),
+    };
     Ok(EventRow {
+        client_id: client_id.map(str::to_string),
         session_id: session.to_string(),
         kind: kind.to_string(),
         ts_ms,
@@ -105,6 +118,7 @@ mod tests {
             validated.rows,
             vec![
                 EventRow {
+                    client_id: None,
                     session_id: "11111111-1111-1111-1111-111111111111".into(),
                     kind: "session.measure".into(),
                     ts_ms: 1_791_021_500_000,
@@ -112,6 +126,7 @@ mod tests {
                     json: r#"{"contextPercent":41}"#.into(),
                 },
                 EventRow {
+                    client_id: None,
                     session_id: "s1".into(),
                     kind: "turn.complete".into(),
                     ts_ms: 2,
@@ -135,6 +150,35 @@ mod tests {
                 (5, "data must be a JSON object"),
                 (6, "event must be a JSON object"),
             ]
+        );
+    }
+
+    #[test]
+    fn an_event_may_carry_a_client_id_to_be_stored_once() {
+        let body = json!({"events": [
+            {"id": "k3j-x8f.9:12_a", "session": "s1", "kind": "turn.step", "ts_ms": 1, "data": {}},
+            {"session": "s1", "kind": "turn.step", "ts_ms": 2, "data": {}},
+            {"id": "", "session": "s1", "kind": "turn.step", "ts_ms": 3, "data": {}},
+            {"id": 7, "session": "s1", "kind": "turn.step", "ts_ms": 4, "data": {}},
+            {"id": "a b", "session": "s1", "kind": "turn.step", "ts_ms": 5, "data": {}},
+            {"id": "x".repeat(129), "session": "s1", "kind": "turn.step", "ts_ms": 6, "data": {}}
+        ]});
+        let validated = validate(&body, 9).unwrap();
+        assert_eq!(
+            validated
+                .rows
+                .iter()
+                .map(|row| row.client_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("k3j-x8f.9:12_a"), None]
+        );
+        assert_eq!(
+            validated
+                .rejected
+                .iter()
+                .map(|r| (r.index, r.error.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(2, ID_RULE), (3, ID_RULE), (4, ID_RULE), (5, ID_RULE)]
         );
     }
 

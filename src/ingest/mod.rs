@@ -1611,6 +1611,7 @@ mod tests {
             let mut writer = store.writer().unwrap();
             writer
                 .event(&crate::store::EventRow {
+                    client_id: None,
                     session_id: "s1".into(),
                     kind: "session.measure".into(),
                     ts_ms: pauses,

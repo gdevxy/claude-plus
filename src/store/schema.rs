@@ -134,6 +134,10 @@ CREATE TABLE limit_samples (
 );
 CREATE INDEX limit_samples_by_window ON limit_samples(window, ts_ms);
 "#,
+    r#"
+ALTER TABLE events ADD COLUMN client_id TEXT;
+CREATE UNIQUE INDEX events_by_client_id ON events(session_id, client_id);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {

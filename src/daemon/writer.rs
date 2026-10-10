@@ -411,8 +411,7 @@ impl Worker {
 fn store_events(store: &mut Store, rows: &[EventRow]) -> Result<()> {
     let mut writer = store.writer()?;
     for row in rows {
-        writer.event(row)?;
-        if row.kind != MEASURE_KIND {
+        if !writer.event(row)? || row.kind != MEASURE_KIND {
             continue;
         }
         let Ok(data) = serde_json::from_str(&row.json) else {
@@ -518,6 +517,7 @@ mod tests {
         let fx = Fixture::new();
         let rows: Vec<EventRow> = (1..=3)
             .map(|ts_ms| EventRow {
+                client_id: None,
                 session_id: "s1".into(),
                 kind: "session.measure".into(),
                 ts_ms,
@@ -534,6 +534,7 @@ mod tests {
     async fn a_measure_records_limit_samples_once_per_change() {
         let fx = Fixture::new();
         let measure = |ts_ms: i64, percent: f64| EventRow {
+            client_id: None,
             session_id: "s1".into(),
             kind: "session.measure".into(),
             ts_ms,
@@ -582,6 +583,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
         let row = EventRow {
+            client_id: None,
             session_id: "a".into(),
             kind: "session.measure".into(),
             ts_ms: 1,
@@ -663,6 +665,7 @@ mod tests {
         let error = import.await.unwrap().unwrap_err();
         assert_eq!(error.to_string(), STOPPING);
         let row = EventRow {
+            client_id: None,
             session_id: "a".into(),
             kind: "session.measure".into(),
             ts_ms: 1,
