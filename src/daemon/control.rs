@@ -33,7 +33,7 @@ pub enum Ensured {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
-    Stopped { pid: u32 },
+    Stopped { pid: Option<u32> },
     NotRunning,
 }
 
@@ -164,29 +164,23 @@ fn wait_for_daemon(paths: &Paths, pid: Option<u32>) -> Result<Ensured> {
 }
 
 pub fn stop(paths: &Paths) -> Result<Stopped> {
-    let asked = match status(paths)? {
+    let (known, asked) = match status(paths)? {
         Status::NotRunning => return Ok(Stopped::NotRunning),
         Status::Running(health) => {
             let _ = Client::new(&paths.socket())
                 .with_timeout(PROBE_TIMEOUT)
                 .shutdown();
-            Some(health.pid)
+            (Some(health.pid), true)
         }
-        Status::Unresponsive { .. } => None,
+        Status::Unresponsive { pid } => (pid, false),
     };
-    if let Some(pid) = asked
-        && wait_until_free(paths, STOP_TIMEOUT)?
-    {
-        return Ok(Stopped::Stopped { pid });
+    if asked && wait_until_free(paths, STOP_TIMEOUT)? {
+        return Ok(Stopped::Stopped { pid: known });
     }
     let pid = match probe(&paths.daemon_lock())? {
-        Holder::Free => {
-            return Ok(Stopped::Stopped {
-                pid: asked.unwrap_or(0),
-            });
-        }
+        Holder::Free => return Ok(Stopped::Stopped { pid: known }),
         Holder::Held { pid: Some(pid) } => pid,
-        Holder::Held { pid: None } => bail!(unresponsive(paths, None)),
+        Holder::Held { pid: None } => bail!(unresponsive(paths, known)),
     };
     let target = i32::try_from(pid)
         .ok()
@@ -194,7 +188,7 @@ pub fn stop(paths: &Paths) -> Result<Stopped> {
         .with_context(|| format!("invalid daemon pid {pid}"))?;
     let _ = kill_process(target, Signal::TERM);
     if wait_until_free(paths, STOP_TIMEOUT)? {
-        return Ok(Stopped::Stopped { pid });
+        return Ok(Stopped::Stopped { pid: Some(pid) });
     }
     bail!(
         "the claude-plus daemon (pid {pid}) did not stop within {} s, see {}",

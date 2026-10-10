@@ -49,9 +49,37 @@ fn running(health: &Health) -> String {
 }
 
 pub fn stop(paths: &Paths) -> Result<()> {
-    match control::stop(paths)? {
-        Stopped::Stopped { pid } => println!("✻ Stopped the claude-plus daemon · pid {pid}"),
-        Stopped::NotRunning => println!("No claude-plus daemon is running"),
-    }
+    println!("{}", stopped(control::stop(paths)?));
     Ok(())
+}
+
+fn stopped(stopped: Stopped) -> String {
+    match stopped {
+        Stopped::Stopped { pid: Some(pid) } => {
+            format!("✻ Stopped the claude-plus daemon · pid {pid}")
+        }
+        Stopped::Stopped { pid: None } => "✻ Stopped the claude-plus daemon".into(),
+        Stopped::NotRunning => "No claude-plus daemon is running".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stopped_daemon_is_named_by_its_pid_when_it_is_known() {
+        assert_eq!(
+            stopped(Stopped::Stopped { pid: Some(42) }),
+            "✻ Stopped the claude-plus daemon · pid 42"
+        );
+        assert_eq!(
+            stopped(Stopped::Stopped { pid: None }),
+            "✻ Stopped the claude-plus daemon"
+        );
+        assert_eq!(
+            stopped(Stopped::NotRunning),
+            "No claude-plus daemon is running"
+        );
+    }
 }

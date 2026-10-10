@@ -52,6 +52,7 @@ impl Foreground {
 impl Drop for Foreground {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
+            self.signal(Signal::CONT);
             self.signal(Signal::TERM);
             let _ = self.child.wait();
         }
@@ -505,4 +506,29 @@ fn a_second_interrupt_stops_the_daemon_without_waiting_for_the_drain() {
         log_of(&env)
     );
     assert!(!env.plus.join("daemon.sock").exists());
+}
+
+#[test]
+fn stop_terminates_a_daemon_that_does_not_answer() {
+    let env = env();
+    let daemon = Foreground::start(&env, &[]);
+    idle_health(&env);
+    let pid = daemon.child.id();
+    daemon.signal(Signal::STOP);
+    let stop = process(&env, &["daemon", "stop"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    daemon.signal(Signal::CONT);
+    let output = stop.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("✻ Stopped the claude-plus daemon · pid {pid}\n")
+    );
+    let log = log_of(&env);
+    assert!(log.contains(" info  SIGTERM received, stopping\n"), "{log}");
+    assert!(!log.contains("shutdown requested over the socket"), "{log}");
 }
