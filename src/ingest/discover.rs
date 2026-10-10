@@ -27,19 +27,22 @@ pub fn discover(projects_dir: &Path) -> anyhow::Result<Vec<TranscriptFile>> {
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-        .filter(|entry| is_session_file(projects_dir, entry.path()))
+        .filter(|entry| is_transcript(projects_dir, entry.path()))
         .map(|entry| TranscriptFile::from_path(entry.path()))
         .collect();
     files.sort_by(|a, b| a.path.as_os_str().cmp(b.path.as_os_str()));
     Ok(files)
 }
 
+pub fn is_transcript(projects_dir: &Path, path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "jsonl") && is_session_file(projects_dir, path)
+}
+
 fn is_session_file(root: &Path, path: &Path) -> bool {
-    let depth = path
-        .strip_prefix(root)
-        .map(|p| p.components().count())
-        .unwrap_or(0);
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let depth = relative.components().count();
     let parent = path.parent();
     let in_subagents = parent
         .and_then(Path::file_name)
@@ -55,6 +58,27 @@ fn is_session_file(root: &Path, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcripts_are_recognised_by_place_and_extension() {
+        let root = Path::new("/h/projects");
+        for path in [
+            "/h/projects/p/s.jsonl",
+            "/h/projects/p/s/subagents/agent-a.jsonl",
+            "/h/projects/p/s/subagents/workflows/wf/agent-w.jsonl",
+        ] {
+            assert!(is_transcript(root, Path::new(path)), "{path}");
+        }
+        for path in [
+            "/h/projects/p/s.json",
+            "/h/projects/s.jsonl",
+            "/h/projects/p/s/subagents/workflows/wf/journal.jsonl",
+            "/h/projects/p/s/other/agent-a.jsonl",
+            "/elsewhere/p/s.jsonl",
+        ] {
+            assert!(!is_transcript(root, Path::new(path)), "{path}");
+        }
+    }
 
     #[test]
     fn discovers_workflow_agents_but_not_journals() {

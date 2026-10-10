@@ -1,5 +1,6 @@
 mod discover;
 mod lines;
+pub mod watch;
 
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
@@ -17,7 +18,7 @@ use crate::transcript::location::Location;
 use crate::transcript::redact::redact;
 use crate::transcript::{Parsed, Record, parse_line};
 
-pub use discover::{TranscriptFile, discover};
+pub use discover::{TranscriptFile, discover, is_transcript};
 
 pub const BATCH_LINES: u64 = 5000;
 pub const SKIPPED_RAW_KINDS: &[&str] = &[
