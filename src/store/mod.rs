@@ -17,7 +17,7 @@ pub use reconcile::Reconciliation;
 pub use upgrade::Upgrade;
 pub use writer::*;
 
-pub(crate) const GENERATION_MARK: &str = "#gen-";
+const GENERATION_MARK: &str = "#gen-";
 const REDERIVE_PENDING: &str = "rederive_pending";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const STATEMENT_CACHE: usize = 64;
@@ -85,7 +85,7 @@ impl Store {
     }
 
     pub fn open_with_progress(path: &Path, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
-        Self::open_writable(path, on_upgrade).map_err(|error| naming(path, error))
+        Self::open_writable(path, on_upgrade).map_err(|error| opening_error(path, error))
     }
 
     fn open_writable(path: &Path, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
@@ -118,7 +118,7 @@ impl Store {
             store.refuse_newer_schema()?;
             Ok(store)
         };
-        open().map_err(|error| naming(path, error))
+        open().map_err(|error| opening_error(path, error))
     }
 
     pub fn schema_version(&self) -> Result<usize> {
@@ -331,7 +331,7 @@ impl Store {
     }
 }
 
-fn naming(path: &Path, error: anyhow::Error) -> anyhow::Error {
+fn opening_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
     match error.downcast_ref::<rusqlite::Error>() {
         Some(sqlite) if !error.is::<Busy>() => {
             anyhow::anyhow!("cannot open {}: {sqlite}", path.display())
