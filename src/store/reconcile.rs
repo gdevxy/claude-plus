@@ -31,23 +31,6 @@ impl Store {
         Ok(reconciliation)
     }
 
-    pub fn reconcile_sessions(
-        &mut self,
-        prices: &PriceTable,
-        sessions: &BTreeSet<String>,
-    ) -> Result<Reconciliation> {
-        if sessions.is_empty() {
-            return summary(&self.conn);
-        }
-        let tx = super::begin_write(&mut self.conn)?;
-        for session_id in sessions {
-            rebuild_session(&tx, prices, session_id)?;
-        }
-        let reconciliation = summary(&tx)?;
-        tx.commit()?;
-        Ok(reconciliation)
-    }
-
     pub fn reconciliation_summary(&self) -> Result<Reconciliation> {
         summary(&self.conn)
     }
@@ -56,6 +39,22 @@ impl Store {
 impl Writer<'_> {
     pub fn reconcile(&mut self, prices: &PriceTable) -> Result<Reconciliation> {
         rebuild(&self.tx, prices)
+    }
+
+    pub fn reconcile_sessions(
+        &mut self,
+        prices: &PriceTable,
+        sessions: &BTreeSet<String>,
+    ) -> Result<()> {
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let savepoint = self.tx.savepoint()?;
+        for session_id in sessions {
+            rebuild_session(&savepoint, prices, session_id)?;
+        }
+        savepoint.commit()?;
+        Ok(())
     }
 }
 
@@ -833,28 +832,15 @@ mod tests {
             s.counter(1.0, &[counter("claude-sonnet-5-5", 1, 201, 0)]);
         }
         let touched = BTreeSet::from(["s1".to_string()]);
-        let result = store.reconcile_sessions(&prices, &touched).unwrap();
+        let mut writer = store.writer().unwrap();
+        writer.reconcile_sessions(&prices, &touched).unwrap();
+        writer.commit().unwrap();
         let outputs: Vec<(String, u64)> = rows(&store)
             .into_iter()
             .map(|row| (row.session_id, row.tokens[1]))
             .collect();
         assert_eq!(outputs, vec![("s1".into(), 200), ("s2".into(), 100)]);
-        assert_eq!(result, store.reconciliation_summary().unwrap());
-        assert_eq!(result.sessions_adjusted, 2);
-    }
-
-    #[test]
-    fn reconciling_no_session_takes_no_write_lock() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("data.db");
-        let mut store = Store::open(&path).unwrap();
-        let mut holder = Store::open(&path).unwrap();
-        store.set_busy_timeout(std::time::Duration::from_millis(10));
-        let _held = holder.writer().unwrap();
-        let result = store
-            .reconcile_sessions(&PriceTable::bundled(), &BTreeSet::new())
-            .unwrap();
-        assert_eq!(result, Reconciliation::default());
+        assert_eq!(store.reconciliation_summary().unwrap().sessions_adjusted, 2);
     }
 
     #[test]

@@ -7,12 +7,12 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::pricing::PriceTable;
 use crate::store::{
-    AttachmentRow, Busy, CompactionRow, CostStateRow, FileCheckpoint, FileProgress, Reconciliation,
-    RequestRow, RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
+    AttachmentRow, Busy, CompactionRow, CostStateRow, FileCheckpoint, FileProgress, RequestRow,
+    RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
 };
 use crate::transcript::location::Location;
 use crate::transcript::redact::redact;
@@ -40,6 +40,8 @@ pub struct IngestReport {
     pub files_vanished: u64,
     pub failures: Vec<(String, String)>,
     pub sessions_touched: BTreeSet<String>,
+    #[serde(skip)]
+    pub reconcile_error: Option<String>,
 }
 
 impl IngestReport {
@@ -55,6 +57,9 @@ impl IngestReport {
         self.failures.extend(other.failures.iter().cloned());
         self.sessions_touched
             .extend(other.sessions_touched.iter().cloned());
+        if other.reconcile_error.is_some() {
+            self.reconcile_error.clone_from(&other.reconcile_error);
+        }
     }
 }
 
@@ -139,12 +144,6 @@ impl<'a> Ingestor<'a> {
             self.pause();
         }
         Ok(report)
-    }
-
-    pub fn reconcile(&mut self, report: &IngestReport) -> Result<Reconciliation> {
-        self.store
-            .reconcile_sessions(self.prices, &report.sessions_touched)
-            .context("reconciling with Claude Code counters")
     }
 
     pub fn reindex(&mut self, on_file: &mut dyn FnMut(usize, usize)) -> Result<Rebuilt> {
@@ -298,6 +297,7 @@ impl<'a> Ingestor<'a> {
             in_batch += 1;
             if in_batch == self.batch_lines {
                 writer.advance_file(file_id, &progress(offset, line_no), batch_errors)?;
+                reconcile_touched(&mut writer, self.prices, &mut report);
                 writer.commit()?;
                 if self.is_cancelled() {
                     report.files_changed = 1;
@@ -310,9 +310,17 @@ impl<'a> Ingestor<'a> {
             }
         }
         writer.advance_file(file_id, &progress(offset, line_no), batch_errors)?;
+        reconcile_touched(&mut writer, self.prices, &mut report);
         writer.commit()?;
         report.files_changed = u64::from(replaced || report.lines > 0);
         Ok(report)
+    }
+}
+
+fn reconcile_touched(writer: &mut Writer, prices: &PriceTable, report: &mut IngestReport) {
+    if let Err(error) = writer.reconcile_sessions(prices, &report.sessions_touched) {
+        let error = error.context("reconciling with Claude Code counters");
+        report.reconcile_error = Some(format!("{error:#}"));
     }
 }
 
@@ -476,6 +484,7 @@ pub fn derive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Reconciliation;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -524,9 +533,10 @@ mod tests {
 
         fn run_reconciled(&self, store: &mut Store) -> (IngestReport, Reconciliation) {
             let prices = PriceTable::bundled();
-            let mut ingestor = Ingestor::new(store, &prices);
-            let report = ingestor.ingest_all(&self.projects, &mut |_, _| {}).unwrap();
-            (report.clone(), ingestor.reconcile(&report).unwrap())
+            let report = Ingestor::new(store, &prices)
+                .ingest_all(&self.projects, &mut |_, _| {})
+                .unwrap();
+            (report, store.reconciliation_summary().unwrap())
         }
     }
 
@@ -573,6 +583,81 @@ mod tests {
         assert_eq!(reconciliation.sessions_adjusted, 1);
         assert!((reconciliation.adjusted_usd - 0.01).abs() < 1e-12);
         assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
+    }
+
+    const SONNET_LINE_USAGE: &str = r#"{"input_tokens":1,"output_tokens":3}"#;
+
+    fn sonnet_counter(output: u64, total: f64) -> String {
+        format!(
+            r#"{{"type":"cost-state","sessionId":"s1","totalCostUSD":{total},"modelUsage":{{"claude-sonnet-5-5":{{"inputTokens":1,"outputTokens":{output}}}}}}}"#
+        )
+    }
+
+    fn ingest_only(fx: &Fixture, store: &mut Store) -> IngestReport {
+        let prices = PriceTable::bundled();
+        Ingestor::new(store, &prices)
+            .ingest_all(&fx.projects, &mut |_, _| {})
+            .unwrap()
+    }
+
+    #[test]
+    fn an_ingest_rebuilds_the_adjustments_of_its_sessions_in_the_same_commit() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-sonnet-5-5",
+            SONNET_LINE_USAGE,
+        );
+        fx.write(
+            "-w-proj/s1.jsonl",
+            &format!("{line}\n{}\n", sonnet_counter(1003, 0.01)),
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        let report = ingest_only(&fx, &mut store);
+        assert_eq!(report.reconcile_error, None);
+        assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_reconcile_failure_keeps_the_ingest_and_the_previous_adjustments() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-sonnet-5-5",
+            SONNET_LINE_USAGE,
+        );
+        fx.write(
+            "-w-proj/s1.jsonl",
+            &format!("{line}\n{}\n", sonnet_counter(1003, 0.01)),
+        );
+        let database = fx._temp.path().join("data.db");
+        let mut store = Store::open(&database).unwrap();
+        ingest_only(&fx, &mut store);
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER no_adjustments BEFORE INSERT ON adjustments
+                 BEGIN SELECT RAISE(ABORT, 'adjustments are locked'); END;",
+            )
+            .unwrap();
+        fx.append(
+            "-w-proj/s1.jsonl",
+            &format!("{}\n", sonnet_counter(2003, 0.02)),
+        );
+        let report = ingest_only(&fx, &mut store);
+        assert_eq!(report.lines, 1);
+        assert_eq!(
+            report.reconcile_error.as_deref(),
+            Some(
+                "reconciling with Claude Code counters: adjustments are locked: Error code 1811: constraint failed"
+            )
+        );
+        assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
+        assert_eq!(ingest_only(&fx, &mut store).lines, 0);
     }
 
     fn adjusted_outputs(store: &Store) -> Vec<(String, String)> {

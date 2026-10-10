@@ -19,6 +19,15 @@ pub struct ScanOutcome {
     pub reconcile_error: Option<String>,
 }
 
+impl ScanOutcome {
+    fn of(report: IngestReport) -> Self {
+        Self {
+            reconcile_error: report.reconcile_error.clone(),
+            report,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct IngestStatus {
     backlog: VecDeque<Instant>,
@@ -231,9 +240,8 @@ impl Worker {
         files: &[TranscriptFile],
         drain: &mut dyn FnMut(&mut Store),
     ) -> Result<ScanOutcome> {
-        let mut ingestor = self.ingestor(drain);
-        let report = ingestor.ingest_listed(files, &mut |_, _| {})?;
-        Ok(reconciled(&mut ingestor, report))
+        let report = self.ingestor(drain).ingest_listed(files, &mut |_, _| {})?;
+        Ok(ScanOutcome::of(report))
     }
 
     fn scan(&mut self, drain: &mut dyn FnMut(&mut Store)) -> Result<ScanOutcome> {
@@ -248,7 +256,7 @@ impl Worker {
         let mut ingestor = self.ingestor(drain);
         ingestor.finish_interrupted_reindex(&mut progress)?;
         let report = ingestor.ingest_all(&projects_dir, &mut progress)?;
-        Ok(reconciled(&mut ingestor, report))
+        Ok(ScanOutcome::of(report))
     }
 
     fn is_cancelled(&self) -> bool {
@@ -333,17 +341,6 @@ fn store_events(store: &mut Store, rows: &[EventRow]) -> Result<()> {
 
 fn answer<T>(reply: Reply<T>, result: Result<T>) {
     let _ = reply.send(result.map_err(|error| format!("{error:#}")));
-}
-
-fn reconciled(ingestor: &mut Ingestor, report: IngestReport) -> ScanOutcome {
-    let reconcile_error = ingestor
-        .reconcile(&report)
-        .err()
-        .map(|error| format!("{error:#}"));
-    ScanOutcome {
-        report,
-        reconcile_error,
-    }
 }
 
 #[cfg(test)]

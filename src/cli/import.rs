@@ -48,7 +48,10 @@ fn locally(paths: &Paths, prices: &PriceTable) -> Result<(Store, IngestReport, R
         bar.set_position(done as u64);
     })?;
     bar.finish_and_clear();
-    let reconciled = ingestor.reconcile(&report).map(|_| ());
+    let reconciled = report
+        .reconcile_error
+        .clone()
+        .map_or(Ok(()), |error| Err(anyhow!(error)));
     Ok((store, report, reconciled))
 }
 
