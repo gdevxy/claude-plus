@@ -19,6 +19,7 @@ A history view and an insights engine help the user change habits that waste tok
 - The pane never slows down, blocks or breaks Claude Code, including when the daemon is crashed, missing or not yet installed.
 - claude-plus never edits `~/.claude/settings.json`, the status line or hooks.
 - `claude-plus uninstall` removes the mod and stops the daemon, and optionally deletes `~/.claude-plus`.
+- The pane looks and feels native to Claude Code and is delightful to keep open (section "Look and feel"), with no misalignment, truncation or flicker at any supported width or theme.
 
 ### Non-goals (v1)
 
@@ -83,6 +84,37 @@ Values that are estimates are prefixed with `~`, and a `?` button on a row shows
 4. Insights: ranked list of findings, each with evidence and estimated weekly saving in dollars and percent of limit.
 
 When the daemon is unreachable or the binary is missing, the pane still shows everything the mod receives directly (context, limits, cost, per-request usage) and a one-line notice with the fix (`brew install ...` or `claude-plus daemon --ensure`).
+
+### Look and feel
+
+claude-plus must feel like a natural part of Claude Code and be pleasant to keep open all day, not only useful.
+Delight comes from craft and calm motion, never from noise.
+
+Visual language:
+
+- Colors come from Claude Code's theme keys (`ThemeKey`), so the pane follows the user's light, dark or custom theme; Claude's terracotta accent is used for the brand mark, focused elements and the single most important number per view.
+- Semantic colors are consistent everywhere: success for savings and warm cache, warning for approaching limits, error only for real problems, dim text for secondary detail.
+- A small fixed glyph set echoing Claude Code's own: `✻` brand mark and cache heartbeat, `·` separators, `▸ ▾` disclosure, eighth-block characters (`▏▎▍▌▋▊▉█`) for smooth bars, braille cells for charts.
+- Rounded box borders, generous but consistent padding, numbers right-aligned in columns, units always present, no line ever wraps mid-value.
+
+Calm motion (all drawn with `$.ui.blit` or atom updates, never faster than the engine's limits):
+
+- Cache heartbeat: the `✻` beside the countdown breathes slowly while the cache is warm, quickens in the last minute, and settles into a dim `·` when cold.
+- The countdown bar drains continuously using eighth blocks instead of jumping.
+- Changed numbers ease to their new value over about 300 ms instead of snapping.
+- Motion pauses while Claude is working on long turns if it would distract, and `animations = false` in config turns all of it off.
+
+Warm, encouraging microcopy:
+
+- Status reads like a teammate, not a meter: "Cache is warm ✻ 52:14 left", "Cache went cold while you were away, rewarming will cost ~$0.62".
+- Wins are celebrated: "Cache hits saved you $3.20 this session", "5 days in a row above 90% cache hit ratio".
+- Insights are phrased as friendly tips with the payoff first ("Save ~$9/week: …"), never scolding.
+- Empty and loading states have charm and say what is happening: "Learning how your plan counts tokens… a few more turns ✻", "Importing 1,284 sessions from your history…".
+- A short recap toast greets the first session of the day: "Yesterday: $12.40 · 94% cache hits · biggest win: …".
+
+Sound is off by default; an opt-in soft chime can mark the 60 s cache warning via `$.audio`.
+
+Quality bar: every view is reviewed at 40, 60 and 100 columns in light and dark themes, and any misalignment, truncation, color clash or flicker is a bug.
 
 ### Alerts
 
@@ -271,7 +303,8 @@ Initial rules:
 - Daemon unit tests per unit: pricing math, deduplication, cache expiry and rebuild detection, forecast, limits estimator and reset detection, context scaling, each insight rule.
 - Daemon fixture tests: a corpus of anonymized transcripts covering subagents, compaction, model switches, 5m and 1h caches, malformed and truncated lines, with hand-computed expected costs, plus a cross-check against `cost-state` totals.
 - API tests: the daemon started on a temporary socket, exercised with HTTP requests matching what the mod sends.
-- Mod tests with `claude plugin test`: views mounted with `$.ui.mount` against mocked snapshots at narrow and wide widths, hotkeys switching views, countdown progression with `mock.clock`, degraded rendering when the daemon client fails.
+- Mod tests with `claude plugin test`: views mounted with `$.ui.mount` against mocked snapshots at 40, 60 and 100 columns, hotkeys switching views, countdown and heartbeat progression with `mock.clock`, eased number transitions, `animations = false`, degraded rendering when the daemon client fails.
+- Visual review: each view is checked by eye in a real session in light and dark themes at each milestone, and visual defects are fixed before the milestone closes.
 - End-to-end: a real `claude` session with the mod loaded via `--plugin-dir` against a running daemon, checked by hand against `/context` and `/usage`, once per milestone.
 - CI on GitHub Actions for macOS and Linux runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `claude plugin validate`, `claude plugin test`, and builds release binaries for four targets.
 
