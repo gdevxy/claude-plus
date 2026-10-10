@@ -6,6 +6,7 @@ mod stats;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
@@ -26,7 +27,7 @@ struct Cli {
 enum Command {
     Import,
     Stats {
-        #[arg(long, default_value_t = 14)]
+        #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=36500))]
         days: u32,
     },
     Doctor,
@@ -43,6 +44,14 @@ pub fn run() -> Result<()> {
         Command::Doctor => doctor::run(&paths, &prices),
         Command::Reindex => reindex::run(&paths, &prices),
     }
+}
+
+fn progress_bar(verb: &str) -> Result<ProgressBar> {
+    Ok(
+        ProgressBar::new(0).with_style(ProgressStyle::with_template(&format!(
+            "✻ {verb} {{pos}}/{{len}} transcripts {{wide_bar}}"
+        ))?),
+    )
 }
 
 const LABEL_WIDTH: usize = 13;

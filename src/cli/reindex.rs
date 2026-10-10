@@ -14,7 +14,10 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
     writer.clear_derived()?;
     let mut report = IngestReport::default();
     let mut records = 0u64;
-    for (file_id, path) in writer.raw_files()? {
+    let files = writer.raw_files()?;
+    let bar = super::progress_bar("Rebuilding")?;
+    bar.set_length(files.len() as u64);
+    for (file_id, path) in files {
         let location = TranscriptFile::from_path(&PathBuf::from(&path));
         for row in writer.raw_records(file_id, &[])? {
             let Ok(parsed) = parse_line(&row.json) else {
@@ -31,8 +34,10 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
             )?;
             records += 1;
         }
+        bar.inc(1);
     }
     writer.commit()?;
+    bar.finish_and_clear();
     println!(
         "✻ Rebuilt {} from {}",
         plural(report.requests_inserted, "request", "requests"),

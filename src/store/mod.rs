@@ -4,7 +4,7 @@ mod writer;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, FixedOffset, NaiveDate};
+use chrono::{DateTime, NaiveDate, TimeZone};
 use rusqlite::{Connection, OptionalExtension};
 
 pub use writer::*;
@@ -144,14 +144,18 @@ impl Store {
         )?)
     }
 
-    pub fn daily_costs(&self, since_ts: i64, offset_seconds: i32) -> Result<Vec<DailyCost>> {
-        let offset = FixedOffset::east_opt(offset_seconds).context("invalid UTC offset")?;
-        let mut statement = self
-            .conn
-            .prepare("SELECT ts, model, cost_usd FROM requests WHERE ts >= ?1 ORDER BY ts")?;
+    pub fn daily_costs<Tz: TimeZone>(
+        &self,
+        since_ts: i64,
+        until_ts: i64,
+        tz: &Tz,
+    ) -> Result<Vec<DailyCost>> {
+        let mut statement = self.conn.prepare(
+            "SELECT ts, model, cost_usd FROM requests WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
+        )?;
         let mut grouped: std::collections::BTreeMap<(NaiveDate, String), DailyCost> =
             Default::default();
-        let rows = statement.query_map([since_ts], |r| {
+        let rows = statement.query_map([since_ts, until_ts], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -162,7 +166,7 @@ impl Store {
             let (ts, model, cost) = row?;
             let day = DateTime::from_timestamp(ts, 0)
                 .context("timestamp out of range")?
-                .with_timezone(&offset)
+                .with_timezone(tz)
                 .date_naive();
             let entry = grouped.entry((day, model.clone())).or_insert(DailyCost {
                 day,
@@ -373,7 +377,7 @@ mod tests {
             .unwrap();
         w.commit().unwrap();
 
-        let utc = store.daily_costs(0, 0).unwrap();
+        let utc = store.daily_costs(0, i64::MAX, &chrono::Utc).unwrap();
         assert_eq!(utc.len(), 2);
         assert_eq!(utc[0].day, NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
         assert_eq!(
@@ -382,7 +386,13 @@ mod tests {
         );
         assert_eq!((utc[1].model.as_str(), utc[1].unpriced), ("mystery", 1));
 
-        let zurich_summer = store.daily_costs(0, 2 * 3600).unwrap();
+        let zurich_summer = store
+            .daily_costs(
+                0,
+                i64::MAX,
+                &chrono::FixedOffset::east_opt(2 * 3600).unwrap(),
+            )
+            .unwrap();
         assert_eq!(
             zurich_summer[0].day,
             NaiveDate::from_ymd_opt(2026, 10, 2).unwrap()
@@ -401,6 +411,17 @@ mod tests {
             store.unpriced_models().unwrap(),
             vec![("mystery".to_string(), 1)]
         );
+    }
+
+    #[test]
+    fn daily_costs_exclude_requests_at_or_after_until() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.request(&request("a", 100, "m", Some(1.0))).unwrap();
+        w.request(&request("b", 200, "m", Some(1.0))).unwrap();
+        w.commit().unwrap();
+        let rows = store.daily_costs(0, 200, &chrono::Utc).unwrap();
+        assert_eq!(rows[0].requests, 1);
     }
 
     #[test]

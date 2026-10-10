@@ -1,5 +1,4 @@
 use anyhow::Result;
-use indicatif::{ProgressBar, ProgressStyle};
 
 use super::format::{plural, usd};
 use crate::ingest::{IngestReport, Ingestor};
@@ -17,9 +16,7 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
 
 pub fn incremental(paths: &Paths, prices: &PriceTable) -> Result<(Store, IngestReport)> {
     let mut store = super::open_store(paths)?;
-    let bar = ProgressBar::new(0).with_style(ProgressStyle::with_template(
-        "✻ Importing {pos}/{len} transcripts {wide_bar}",
-    )?);
+    let bar = super::progress_bar("Importing")?;
     let report = Ingestor::new(&mut store, prices).ingest_all(
         &paths.projects_dir(),
         &mut |done, total| {

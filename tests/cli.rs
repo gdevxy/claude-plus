@@ -148,6 +148,14 @@ fn write_unpriced_transcript(env: &Env) {
     .unwrap();
 }
 
+fn stdout_of_with(env: &Env, args: &[&str], vars: &[(&str, &str)]) -> String {
+    let mut command = cmd(env, args);
+    for (key, value) in vars {
+        command.env(key, value);
+    }
+    String::from_utf8(command.assert().success().get_output().stdout.clone()).unwrap()
+}
+
 const STATS_TABLE: &str = "\
 ┌────────────┬───────────────────────────┬──────────┬─────────┐
 │ Day        ┆ Model                     ┆ Requests ┆    Cost │
@@ -254,4 +262,66 @@ fn import_without_transcripts_is_friendly() {
         .assert()
         .success()
         .stdout(predicate::str::contains("No Claude Code transcripts found"));
+}
+
+#[test]
+fn stats_groups_days_with_the_offset_in_force_at_each_request() {
+    let env = env();
+    let dir = env.claude.join("projects/-work-dst");
+    std::fs::create_dir_all(&dir).unwrap();
+    let line = |id: &str, ts: &str| {
+        format!(
+            r#"{{"type":"assistant","sessionId":"33333333-3333-3333-3333-333333333333","timestamp":"{ts}","requestId":"{id}","message":{{"id":"{id}","model":"claude-sonnet-5-5","content":[{{"type":"text","text":"x"}}],"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+        )
+    };
+    std::fs::write(
+        dir.join("33333333-3333-3333-3333-333333333333.jsonl"),
+        format!(
+            "{}\n{}\n",
+            line("req_before", "2026-10-24T22:30:00Z"),
+            line("req_after", "2026-10-25T09:00:00Z")
+        ),
+    )
+    .unwrap();
+    let output = stdout_of_with(
+        &env,
+        &["stats", "--days", "14"],
+        &[
+            ("TZ", "Europe/Zurich"),
+            ("CLAUDE_PLUS_NOW", "2026-11-07T12:00:00+01:00"),
+        ],
+    );
+    assert!(!output.contains("2026-10-24"), "{output}");
+    assert!(output.contains("2026-10-25"), "{output}");
+}
+
+#[test]
+fn stats_excludes_requests_after_today() {
+    let env = env();
+    let output = stdout_of_with(
+        &env,
+        &["stats", "--days", "3"],
+        &[("CLAUDE_PLUS_NOW", "2026-10-01T12:00:00Z")],
+    );
+    assert!(output.contains("2026-10-01"), "{output}");
+    assert!(!output.contains("2026-10-02"), "{output}");
+}
+
+#[test]
+fn invalid_now_override_is_rejected() {
+    let env = env();
+    cmd(&env, &["stats"])
+        .env("CLAUDE_PLUS_NOW", "yesterday")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "CLAUDE_PLUS_NOW must be an RFC 3339 timestamp, got \"yesterday\"",
+        ));
+}
+
+#[test]
+fn zero_days_is_rejected() {
+    let env = env();
+    cmd(&env, &["stats", "--days", "0"]).assert().failure();
+    cmd(&env, &["stats", "--days", "36501"]).assert().failure();
 }
