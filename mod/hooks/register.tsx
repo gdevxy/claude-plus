@@ -2,8 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 'claude-code'
 
 import type { Daemon, Local, Motion, PlusView, Snapshot } from '../types'
-import type { Io, PlusEvent } from './client'
-import { Outbox, eventsBody, fetchSnapshot, measureOf, request, socketPath } from './client'
+import type { Io, PlusEvent, Reply } from './client'
+import { Outbox, eventId, eventsBody, fetchSnapshot, measureOf, send, socketPath } from './client'
 import {
   EMPTY_LOCAL,
   easables,
@@ -25,6 +25,7 @@ export const POLL_MS = 3000
 export const ENSURE_TIMEOUT_MS = 10_000
 export const FULLSCREEN_KEY = 'fullscreen'
 export const SERVICE_UNAVAILABLE = 503
+export const STUCK_POST_MS = 30_000
 
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null)
@@ -41,7 +42,9 @@ type Runtime = {
   timer: Timer | null
   socket: string | null | undefined
   ensuring: Promise<void> | null
-  flushing: boolean
+  posting: { sinceMs: number } | null
+  idPrefix: string | null
+  sequence: number
   polledAtMs: number
   shownStatus: string | undefined
 }
@@ -54,7 +57,9 @@ function fresh(options: PluginOptions): Runtime {
     timer: null,
     socket: undefined,
     ensuring: null,
-    flushing: false,
+    posting: null,
+    idPrefix: null,
+    sequence: 0,
     polledAtMs: -Infinity,
     shownStatus: undefined,
   }
@@ -163,19 +168,27 @@ async function poll($: EngineInterface): Promise<void> {
 
 async function flush($: EngineInterface): Promise<void> {
   const path = await socketOf($)
-  if (runtime.flushing || path === null || runtime.outbox.size === 0) return
-  runtime.flushing = true
+  if (path === null || runtime.outbox.size === 0) return
+  const at = await $.clock.now()
+  if (runtime.posting !== null && at - runtime.posting.sinceMs < STUCK_POST_MS) return
+  const posting = { sinceMs: at }
+  runtime.posting = posting
   const events = runtime.outbox.take()
-  try {
-    const reply = await request(io($), path, '/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: eventsBody(events) })
+  const sent = send(io($), path, '/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: eventsBody(events) })
+  const done = (reply: Reply) => {
     if (!reply.ok) runtime.outbox.putBack(events)
-  } finally {
-    runtime.flushing = false
+    if (runtime.posting === posting) runtime.posting = null
   }
+  const reply = await sent.reply
+  if (!reply.ok && reply.late === true) void sent.settled.then(done)
+  else done(reply)
 }
 
 async function forward($: EngineInterface, kind: string, data: { [key: string]: JsonValue }, session?: string): Promise<void> {
-  const event: PlusEvent = { session: session ?? (await follow($)), kind, ts_ms: await $.clock.now(), data }
+  const ts_ms = await $.clock.now()
+  runtime.idPrefix ??= `${ts_ms.toString(36)}${Math.random().toString(36).slice(2, 8)}`
+  runtime.sequence += 1
+  const event: PlusEvent = { id: eventId(runtime.idPrefix, runtime.sequence), session: session ?? (await follow($)), kind, ts_ms, data }
   runtime.outbox.add(event)
   await flush($)
 }

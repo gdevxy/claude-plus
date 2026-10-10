@@ -9,6 +9,8 @@ type Wiring = {
   session: string
   served: Snapshot | null
   silent: boolean
+  holding: boolean
+  held: (() => void)[]
   down: boolean
   rebuilding: boolean
   exitCode: number
@@ -27,7 +29,7 @@ const MEASURE = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), silent: false, down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], statuses: [], ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], statuses: [], ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on)
   on('session.id', () => ({ value: wiring.session }))
@@ -49,6 +51,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}): Wiring {
   on('http.fetch', async ($, e) => {
     wiring.fetched.push(e)
     if (wiring.silent) await new Promise(() => undefined)
+    if (wiring.holding && e.url.endsWith('/events')) await new Promise<void>(resolve => wiring.held.push(resolve))
     if (wiring.down) throw new Error('ECONNREFUSED')
     if (e.url.endsWith('/events')) wiring.delivered.push(e)
     if (wiring.rebuilding && e.url.includes('/snapshot')) return { value: { status: 503, ok: false, headers: {}, text: '{"error":"rebuilding"}' } }
@@ -82,8 +85,16 @@ function glyph(cache: FoundElement | undefined): string {
   return JSON.stringify(row?.children[1])
 }
 
+type Posted = { id?: string; kind: string }
+
+function posted(calls: { url: string; init?: HttpInit }[]): Posted[] {
+  return calls
+    .filter(call => call.url.endsWith('/events'))
+    .flatMap(call => (JSON.parse(call.init?.body ?? '{}') as { events: Posted[] }).events)
+}
+
 function kinds(wiring: Wiring): string[] {
-  return wiring.delivered.flatMap(call => (JSON.parse(call.init?.body ?? '{}') as { events: { kind: string }[] }).events.map(event => event.kind))
+  return posted(wiring.delivered).map(event => event.kind)
 }
 
 describe('plus mod', () => {
@@ -125,6 +136,43 @@ describe('plus mod', () => {
     await $.session.measure(MEASURE)
     await clock.advance(1000)
     expect(kinds(wiring)).toEqual([])
+    wiring.down = false
+    await clock.advance(1000)
+    expect(kinds(wiring)).toEqual(['session.start', 'session.measure'])
+  })
+
+  test('a batch the daemon is slow to take is posted once, under its id', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    wiring.holding = true
+    await $.session.measure(MEASURE)
+    await clock.advance(500)
+    await clock.advance(4000)
+    const measures = () => posted(wiring.fetched).filter(event => event.kind === 'session.measure')
+    expect(measures().length).toBe(1)
+    wiring.holding = false
+    for (const release of wiring.held.splice(0)) release()
+    await clock.advance(2000)
+    expect(measures().length).toBe(1)
+    const ids = posted(wiring.fetched).map(event => event.id)
+    expect(ids.every(id => typeof id === 'string' && id.length > 0)).toBe(true)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  test('a batch whose request failed after the timeout is sent again', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    wiring.holding = true
+    await $.session.measure(MEASURE)
+    await clock.advance(1500)
+    wiring.holding = false
+    wiring.down = true
+    for (const release of wiring.held.splice(0)) release()
+    await clock.settle()
     wiring.down = false
     await clock.advance(1000)
     expect(kinds(wiring)).toEqual(['session.start', 'session.measure'])

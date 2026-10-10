@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { HttpInit, HttpResponse } from 'claude-code'
 
 import type { Io, PlusEvent } from '../hooks/client'
-import { OUTBOX_LIMIT, Outbox, eventsBody, fetchSnapshot, measureOf, parseSnapshot, request, snapshotPath, socketPath } from '../hooks/client'
+import { OUTBOX_LIMIT, Outbox, eventId, eventsBody, fetchSnapshot, measureOf, parseSnapshot, request, send, snapshotPath, socketPath } from '../hooks/client'
 import { snapshot } from './fixtures'
 
 function answering(response: Promise<HttpResponse>, seen: [string, HttpInit][] = []): Io {
@@ -20,7 +20,7 @@ function answering(response: Promise<HttpResponse>, seen: [string, HttpInit][] =
 }
 
 function event(n: number): PlusEvent {
-  return { session: 's1', kind: 'turn.step', ts_ms: n, data: {} }
+  return { id: `e-${n}`, session: 's1', kind: 'turn.step', ts_ms: n, data: {} }
 }
 
 describe('daemon client', () => {
@@ -41,7 +41,7 @@ describe('daemon client', () => {
     const failing = answering(Promise.resolve({ status: 400, ok: false, headers: {}, text: '{"v":1,"error":"unknown kind"}' }))
     expect(await request(failing, '/s.sock', '/events')).toEqual({ ok: false, reason: '400: unknown kind', status: 400 })
     const silent: Io = { fetch: () => new Promise(() => undefined), sleep: () => Promise.resolve() }
-    expect(await request(silent, '/s.sock', '/health')).toEqual({ ok: false, reason: 'no answer within 500 ms', status: null })
+    expect(await request(silent, '/s.sock', '/health')).toEqual({ ok: false, reason: 'no answer within 500 ms', status: null, late: true })
     const refused: Io = { fetch: () => Promise.reject(new Error('ECONNREFUSED')), sleep: () => new Promise(() => undefined) }
     expect(await request(refused, '/s.sock', '/health')).toEqual({ ok: false, reason: 'ECONNREFUSED', status: null })
   })
@@ -89,6 +89,23 @@ describe('daemon client', () => {
     })
   })
 
+  test('a request that outlives its timeout still says how it ended', async () => {
+    let answer: (response: HttpResponse) => void = () => undefined
+    const slow: Io = { fetch: () => new Promise(resolve => (answer = resolve)), sleep: () => Promise.resolve() }
+    const sent = send(slow, '/s.sock', '/events', { method: 'POST' })
+    expect(await sent.reply).toEqual({ ok: false, reason: 'no answer within 500 ms', status: null, late: true })
+    answer({ status: 200, ok: true, headers: {}, text: '{"accepted":1}' })
+    expect(await sent.settled).toEqual({ ok: true, text: '{"accepted":1}' })
+  })
+
+  test('an event put back is queued once and ids count up from a prefix', () => {
+    const outbox = new Outbox()
+    outbox.add(event(1))
+    outbox.putBack([event(1), event(2)])
+    expect(outbox.take().map(queued => queued.id)).toEqual(['e-2', 'e-1'])
+    expect([eventId('k3j', 1), eventId('k3j', 36)]).toEqual(['k3j-1', 'k3j-10'])
+  })
+
   test('the outbox keeps the newest events and retries in order', () => {
     const outbox = new Outbox()
     for (let n = 0; n < OUTBOX_LIMIT + 4; n += 1) outbox.add(event(n))
@@ -98,6 +115,6 @@ describe('daemon client', () => {
     outbox.add(event(999))
     outbox.putBack(taken.slice(0, 2))
     expect(outbox.take().map(queued => queued.ts_ms)).toEqual([4, 5, 999])
-    expect(eventsBody([event(1)])).toBe('{"events":[{"session":"s1","kind":"turn.step","ts_ms":1,"data":{}}]}')
+    expect(eventsBody([event(1)])).toBe('{"events":[{"id":"e-1","session":"s1","kind":"turn.step","ts_ms":1,"data":{}}]}')
   })
 })

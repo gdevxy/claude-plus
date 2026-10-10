@@ -12,24 +12,30 @@ export type Io = {
   sleep: (ms: number, options: { signal: AbortSignal }) => Promise<void>
 }
 
-export type Reply = { ok: true; text: string } | { ok: false; reason: string; status: number | null }
+export type Reply = { ok: true; text: string } | { ok: false; reason: string; status: number | null; late?: true }
+
+export type Sent = { reply: Promise<Reply>; settled: Promise<Reply> }
 
 export type SnapshotReply =
   | { kind: 'snapshot'; snapshot: Snapshot }
   | { kind: 'rebuilding' }
   | { kind: 'failed'; reason: string }
 
-export type PlusEvent = { session: string; kind: string; ts_ms: number; data: { [key: string]: JsonValue } }
+export type PlusEvent = { id: string; session: string; kind: string; ts_ms: number; data: { [key: string]: JsonValue } }
 
 export function socketPath(home: string | undefined, plusHome: string | undefined): string | null {
   const base = plusHome !== undefined && plusHome !== '' ? plusHome : home !== undefined && home !== '' ? `${home}/.claude-plus` : null
   return base === null ? null : `${base.replace(/\/+$/, '')}/daemon.sock`
 }
 
-export async function request(io: Io, socket: string, path: string, init: HttpInit = {}): Promise<Reply> {
+export function request(io: Io, socket: string, path: string, init: HttpInit = {}): Promise<Reply> {
+  return send(io, socket, path, init).reply
+}
+
+export function send(io: Io, socket: string, path: string, init: HttpInit = {}): Sent {
   const stop = new AbortController()
   const late = io.sleep(TIMEOUT_MS, { signal: stop.signal }).then(
-    (): Reply => ({ ok: false, reason: `no answer within ${TIMEOUT_MS} ms`, status: null }),
+    (): Reply => ({ ok: false, reason: `no answer within ${TIMEOUT_MS} ms`, status: null, late: true }),
     (): Reply => ({ ok: false, reason: 'cancelled', status: null }),
   )
   const answered = io.fetch(`${HOST}${path}`, { ...init, socketPath: socket }).then(
@@ -39,9 +45,11 @@ export async function request(io: Io, socket: string, path: string, init: HttpIn
         : { ok: false, reason: `${response.status}: ${errorOf(response.text)}`, status: response.status },
     (error: unknown): Reply => ({ ok: false, reason: error instanceof Error ? error.message : String(error), status: null }),
   )
-  const reply = await Promise.race([answered, late])
-  stop.abort()
-  return reply
+  const reply = Promise.race([answered, late]).then(first => {
+    stop.abort()
+    return first
+  })
+  return { reply, settled: answered }
 }
 
 export function snapshotPath(session: string): string {
@@ -95,12 +103,17 @@ export class Outbox {
   }
 
   putBack(events: PlusEvent[]): void {
-    this.queued = [...events, ...this.queued].slice(-OUTBOX_LIMIT)
+    const queued = new Set(this.queued.map(event => event.id))
+    this.queued = [...events.filter(event => !queued.has(event.id)), ...this.queued].slice(-OUTBOX_LIMIT)
   }
 
   get size(): number {
     return this.queued.length
   }
+}
+
+export function eventId(prefix: string, sequence: number): string {
+  return `${prefix}-${sequence.toString(36)}`
 }
 
 export function eventsBody(events: PlusEvent[]): string {
