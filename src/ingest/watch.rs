@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
@@ -13,13 +14,22 @@ pub const QUIET: Duration = Duration::from_millis(200);
 pub const MAX_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    Changed(PathBuf),
+    Rescan,
+    RootLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Batch {
     pub paths: BTreeSet<PathBuf>,
     pub noticed_at: std::time::Instant,
+    pub rescan: bool,
+    pub root_lost: bool,
 }
 
 pub struct Changes {
-    receiver: UnboundedReceiver<PathBuf>,
+    receiver: UnboundedReceiver<Notice>,
     root: PathBuf,
     _watcher: RecommendedWatcher,
 }
@@ -29,14 +39,12 @@ impl Changes {
         loop {
             let batch = debounce(&mut self.receiver, QUIET, MAX_WAIT).await?;
             let root = self.root.clone();
-            let paths = tokio::task::spawn_blocking(move || expand(&root, batch.paths))
+            let noticed = batch.paths.clone();
+            let paths = tokio::task::spawn_blocking(move || expand(&root, noticed))
                 .await
                 .ok()?;
-            if !paths.is_empty() {
-                return Some(Batch {
-                    paths,
-                    noticed_at: batch.noticed_at,
-                });
+            if !paths.is_empty() || batch.rescan || batch.root_lost {
+                return Some(Batch { paths, ..batch });
             }
         }
     }
@@ -50,9 +58,7 @@ pub fn watch(projects_dir: &Path) -> Result<Changes> {
     let watched = canonical.clone();
     let forwarded_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
-        if let Ok(event) = event {
-            forward(&event, &watched, &forwarded_root, &sender);
-        }
+        forward(event, &watched, &forwarded_root, &sender);
     })?;
     watcher
         .watch(&canonical, RecursiveMode::Recursive)
@@ -64,17 +70,37 @@ pub fn watch(projects_dir: &Path) -> Result<Changes> {
     })
 }
 
-fn forward(event: &Event, canonical: &Path, root: &Path, sender: &UnboundedSender<PathBuf>) {
+fn forward(
+    event: notify::Result<Event>,
+    canonical: &Path,
+    root: &Path,
+    sender: &UnboundedSender<Notice>,
+) {
+    let event = match event {
+        Ok(event) if !event.need_rescan() => event,
+        _ => {
+            let _ = sender.send(Notice::Rescan);
+            return;
+        }
+    };
     if matches!(event.kind, EventKind::Access(_)) {
         return;
     }
+    let moved_or_removed = matches!(
+        event.kind,
+        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+    );
     for path in &event.paths {
+        if moved_or_removed && (path == canonical || path == root) {
+            let _ = sender.send(Notice::RootLost);
+            continue;
+        }
         let Some(path) = under_root(path, canonical, root) else {
             continue;
         };
         let created_dir = matches!(event.kind, EventKind::Create(_)) && path.is_dir();
         if created_dir || is_transcript(root, &path) {
-            let _ = sender.send(path);
+            let _ = sender.send(Notice::Changed(path));
         }
     }
 }
@@ -105,30 +131,37 @@ fn under_root(path: &Path, canonical: &Path, root: &Path) -> Option<PathBuf> {
 }
 
 pub async fn debounce(
-    receiver: &mut UnboundedReceiver<PathBuf>,
+    receiver: &mut UnboundedReceiver<Notice>,
     quiet: Duration,
     max_wait: Duration,
 ) -> Option<Batch> {
-    let first = receiver.recv().await?;
+    let mut next = Some(receiver.recv().await?);
     let noticed_at = Instant::now();
     let deadline = noticed_at + max_wait;
-    let mut paths = BTreeSet::from([first]);
-    loop {
+    let mut batch = Batch {
+        paths: BTreeSet::new(),
+        noticed_at: noticed_at.into_std(),
+        rescan: false,
+        root_lost: false,
+    };
+    while let Some(notice) = next.take() {
+        match notice {
+            Notice::Changed(path) => {
+                batch.paths.insert(path);
+            }
+            Notice::Rescan => batch.rescan = true,
+            Notice::RootLost => {
+                batch.root_lost = true;
+                break;
+            }
+        }
         let flush_at = (Instant::now() + quiet).min(deadline);
         tokio::select! {
-            next = receiver.recv() => match next {
-                Some(path) => {
-                    paths.insert(path);
-                }
-                None => break,
-            },
-            () = tokio::time::sleep_until(flush_at) => break,
+            notice = receiver.recv() => next = notice,
+            () = tokio::time::sleep_until(flush_at) => {}
         }
     }
-    Some(Batch {
-        paths,
-        noticed_at: noticed_at.into_std(),
-    })
+    Some(batch)
 }
 
 #[cfg(test)]
@@ -144,7 +177,7 @@ mod tests {
     async fn a_burst_is_merged_once_it_goes_quiet() {
         let (sender, mut receiver) = unbounded_channel();
         for name in ["a", "b", "a"] {
-            sender.send(path(name)).unwrap();
+            sender.send(Notice::Changed(path(name))).unwrap();
         }
         let start = Instant::now();
         let batch = debounce(&mut receiver, QUIET, MAX_WAIT).await.unwrap();
@@ -157,7 +190,10 @@ mod tests {
         let (sender, mut receiver) = unbounded_channel();
         let writer = tokio::spawn(async move {
             for index in 0.. {
-                if sender.send(path(&format!("s{index}"))).is_err() {
+                if sender
+                    .send(Notice::Changed(path(&format!("s{index}"))))
+                    .is_err()
+                {
                     break;
                 }
                 tokio::time::sleep(QUIET * 3 / 4).await;
@@ -173,9 +209,64 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_closed_source_ends_the_stream() {
-        let (sender, mut receiver) = unbounded_channel::<PathBuf>();
+        let (sender, mut receiver) = unbounded_channel::<Notice>();
         drop(sender);
         assert_eq!(debounce(&mut receiver, QUIET, MAX_WAIT).await, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_root_flushes_at_once_and_a_rescan_request_is_kept() {
+        let (sender, mut receiver) = unbounded_channel();
+        sender.send(Notice::Changed(path("a"))).unwrap();
+        sender.send(Notice::Rescan).unwrap();
+        sender.send(Notice::RootLost).unwrap();
+        sender.send(Notice::Changed(path("b"))).unwrap();
+        let start = Instant::now();
+        let batch = debounce(&mut receiver, QUIET, MAX_WAIT).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(batch.paths, BTreeSet::from([path("a")]));
+        assert!(batch.rescan && batch.root_lost);
+        let next = debounce(&mut receiver, QUIET, MAX_WAIT).await.unwrap();
+        assert_eq!(next.paths, BTreeSet::from([path("b")]));
+        assert!(!next.rescan && !next.root_lost);
+    }
+
+    #[test]
+    fn watcher_errors_overflows_and_a_vanished_root_are_forwarded() {
+        use notify::event::{ModifyKind, RemoveKind, RenameMode};
+        let canonical = Path::new("/private/c/projects");
+        let root = Path::new("/c/projects");
+        let notices = |event: notify::Result<Event>| {
+            let (sender, mut receiver) = unbounded_channel();
+            forward(event, canonical, root, &sender);
+            drop(sender);
+            std::iter::from_fn(move || receiver.try_recv().ok()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            notices(Err(notify::Error::generic("queue overflow"))),
+            vec![Notice::Rescan]
+        );
+        assert_eq!(
+            notices(Ok(
+                Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan)
+            )),
+            vec![Notice::Rescan]
+        );
+        for kind in [
+            EventKind::Remove(RemoveKind::Folder),
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+        ] {
+            assert_eq!(
+                notices(Ok(Event::new(kind).add_path(canonical.to_path_buf()))),
+                vec![Notice::RootLost],
+                "{kind:?}"
+            );
+        }
+        assert_eq!(
+            notices(Ok(Event::new(EventKind::Remove(RemoveKind::File))
+                .add_path(canonical.join("p/s.jsonl")))),
+            vec![Notice::Changed(root.join("p/s.jsonl"))]
+        );
     }
 
     #[test]

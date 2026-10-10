@@ -448,3 +448,32 @@ fn ensure_starts_a_daemon_once_a_stopping_one_frees_the_lock() {
     );
     assert_eq!(health(&env).unwrap().pid, pid_in(&stdout));
 }
+
+#[test]
+fn a_replaced_projects_dir_is_watched_again_without_waiting_for_a_rescan() {
+    let env = env();
+    let _daemon = Foreground::start(&env, &[]);
+    idle_health(&env);
+    let replacement = env.claude.join("new-projects");
+    std::fs::create_dir_all(replacement.join("-work-moved")).unwrap();
+    std::fs::rename(env.claude.join("projects"), env.claude.join("old-projects")).unwrap();
+    eventually("the lost watch to be reported", || {
+        health(&env).filter(|h| !h.ingest.watching)
+    });
+    std::fs::rename(&replacement, env.claude.join("projects")).unwrap();
+    eventually("the replaced projects dir to be watched", || {
+        health(&env).filter(|h| h.ingest.watching && h.ingest.backlog == 0)
+    });
+    let session = "44444444-4444-4444-4444-444444444444";
+    std::fs::write(
+        env.claude.join(format!("projects/-work-moved/{session}.jsonl")),
+        format!(
+            r#"{{"type":"assistant","sessionId":"{session}","timestamp":"2026-10-03T11:00:00Z","requestId":"req_moved","message":{{"id":"req_moved","model":"claude-sonnet-5-5","content":[],"usage":{{"input_tokens":1,"output_tokens":10}}}}}}"#
+        ) + "\n",
+    )
+    .unwrap();
+    eventually(
+        "a transcript in the replaced projects dir to be tailed",
+        || Some(snapshot(&env, session)).filter(|s| s.totals.requests == 1),
+    );
+}

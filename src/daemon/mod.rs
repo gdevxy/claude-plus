@@ -21,6 +21,8 @@ use lock::{AlreadyRunning, InstanceLock};
 use log::Log;
 
 pub const RESCAN_EVERY: Duration = Duration::from_secs(60);
+const REWATCH_WINDOW: Duration = Duration::from_secs(2);
+const REWATCH_EVERY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -113,6 +115,8 @@ async fn tail(projects_dir: PathBuf, state: Arc<State>, rescan_every: Duration) 
     rescan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut changes: Option<Changes> = None;
     let mut warned = false;
+    let mut rewatch_until: Option<tokio::time::Instant> = None;
+    let mut scan_once_watched = false;
     loop {
         if changes.is_none() {
             match watch(&projects_dir) {
@@ -123,6 +127,10 @@ async fn tail(projects_dir: PathBuf, state: Arc<State>, rescan_every: Duration) 
                     state.watching.store(true, Ordering::Relaxed);
                     changes = Some(watching);
                     warned = false;
+                    rewatch_until = None;
+                    if std::mem::take(&mut scan_once_watched) {
+                        state.writer.scan();
+                    }
                 }
                 Err(error) if !warned => {
                     state.log.warn(format!(
@@ -134,11 +142,24 @@ async fn tail(projects_dir: PathBuf, state: Arc<State>, rescan_every: Duration) 
                 Err(_) => {}
             }
         }
+        let rewatching = changes.is_none()
+            && rewatch_until.is_some_and(|until| tokio::time::Instant::now() < until);
         tokio::select! {
             batch = next_batch(&mut changes) => match batch {
                 Some(batch) => {
-                    let files = batch.paths.iter().map(|path| TranscriptFile::from_path(path)).collect();
-                    state.writer.ingest(files, batch.noticed_at);
+                    if !batch.paths.is_empty() {
+                        let files = batch.paths.iter().map(|path| TranscriptFile::from_path(path)).collect();
+                        state.writer.ingest(files, batch.noticed_at);
+                    }
+                    if batch.root_lost {
+                        state.log.warn(format!("lost the watch on {}, watching it again", projects_dir.display()));
+                        state.watching.store(false, Ordering::Relaxed);
+                        changes = None;
+                        rewatch_until = Some(tokio::time::Instant::now() + REWATCH_WINDOW);
+                        scan_once_watched = true;
+                    } else if batch.rescan {
+                        state.writer.scan();
+                    }
                 }
                 None => {
                     state.watching.store(false, Ordering::Relaxed);
@@ -146,6 +167,7 @@ async fn tail(projects_dir: PathBuf, state: Arc<State>, rescan_every: Duration) 
                 }
             },
             _ = rescan.tick() => state.writer.scan(),
+            () = tokio::time::sleep(REWATCH_EVERY), if rewatching => {}
         }
     }
 }
