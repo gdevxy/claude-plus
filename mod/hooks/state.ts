@@ -29,6 +29,9 @@ export const CONTEXT_ERROR = 95
 export const LIMIT_WARNING = 80
 export const WHY_COLUMNS = 2
 export const DETAIL_INDENT = 8
+export const WINDOW_ORDER = ['five_hour', 'seven_day', 'spend_limit']
+export const RESET_TOLERANCE_MS = 60_000
+export const PAIRS_NEEDED = 20
 
 export type Segment = { text: string; color?: ThemeKey; dim?: true; bold?: true }
 export type Line = { key: string; segments: Segment[]; why?: string; wrap?: true; indent?: number }
@@ -55,6 +58,7 @@ export type CacheClock = {
 export const EMPTY_LOCAL: Local = {
   session: null,
   model: null,
+  effort: null,
   turns: 0,
   working: false,
   measure: null,
@@ -155,15 +159,31 @@ export function settled(motions: Readonly<Record<string, Motion>>, nowMs: number
   return Object.fromEntries(Object.entries(motions).filter(([, motion]) => nowMs - motion.startMs < EASE_MS))
 }
 
-export function easables(snapshot: Snapshot | null, local: Local): Record<string, number> {
+export type Sources = Pick<ScreenInput, 'snapshot' | 'local' | 'daemon' | 'nowMs'>
+
+function isStale(sources: Sources): boolean {
+  return sources.daemon.status !== 'ok'
+}
+
+export function costOf(sources: Sources): number | null {
+  const kept = sources.snapshot?.totals.cost_usd ?? null
+  const measured = sources.local.measure?.costUsd ?? null
+  return isStale(sources) ? (measured ?? kept) : (kept ?? measured)
+}
+
+function freshest(sources: Sources, kept: string | null, local: string | null): string | null {
+  return isStale(sources) ? (local ?? kept) : (kept ?? local)
+}
+
+export function easables(sources: Sources): Record<string, number> {
   const values: Record<string, number> = {}
-  const cost = snapshot?.totals.cost_usd ?? local.measure?.costUsd ?? null
+  const cost = costOf(sources)
   if (cost !== null) values.cost = cost
-  const context = local.measure?.contextPercent ?? null
+  const context = sources.local.measure?.contextPercent ?? null
   if (context !== null) values.context = context
-  const hit = snapshot?.live.cache.hit_ratio ?? null
+  const hit = sources.snapshot?.live.cache.hit_ratio ?? null
   if (hit !== null) values.hit = hit * 100
-  for (const limit of limitsOf(snapshot, local)) values[`limit:${limit.window}`] = limit.used_pct
+  for (const limit of limitsOf(sources)) values[`limit:${limit.window}`] = limit.used_pct
   return values
 }
 
@@ -195,30 +215,51 @@ export function tickPeriod(input: Pick<ScreenInput, 'animations' | 'motions' | '
   return clock.state === 'warm' && clock.remainingMs <= LAST_MINUTE_MS ? QUICK_BREATH_MS : TICK_MS
 }
 
-export function statusText(input: Pick<ScreenInput, 'snapshot' | 'local' | 'nowMs'>): string | undefined {
-  const snapshot = current(input)
+export function statusText(input: Sources): string | undefined {
+  const sources = { ...input, snapshot: current(input) }
   const parts: string[] = []
-  const cost = snapshot?.totals.cost_usd ?? input.local.measure?.costUsd ?? null
+  const cost = costOf(sources)
   if (cost !== null) parts.push(money(cost))
-  const clock = cacheClock(snapshot, input.local, input.nowMs)
+  const clock = cacheClock(sources.snapshot, input.local, input.nowMs)
   if (clock.state === 'warm') parts.push(`cache ${countdown(clock.remainingMs)}`)
   if (clock.state === 'cold') parts.push('cache cold')
-  const five = limitsOf(snapshot, input.local).find(limit => limit.window === 'five_hour')
+  const five = limitsOf(sources).find(limit => limit.window === 'five_hour')
   if (five !== undefined) parts.push(`5h ${percent(five.used_pct)}`)
   return parts.length > 0 ? parts.join(' · ') : undefined
 }
 
-export function limitsOf(snapshot: Snapshot | null, local: Local): LimitWindow[] {
-  if (snapshot !== null && snapshot.live.limits.length > 0) return snapshot.live.limits
-  return (local.measure?.rateLimits ?? []).map(limit => ({
-    window: limit.kind,
-    used_pct: limit.percentUsed,
-    resets_at_ms: limit.resetsAtMs,
-    sampled_at_ms: local.measure?.atMs ?? 0,
-    reset_since_sample: false,
-    pace: null,
-    calibration: { family: 'other', pairs: 0, needed: 20, pct_per_usd: null },
-  }))
+export function limitsOf(sources: Sources): LimitWindow[] {
+  const kept = sources.snapshot?.live.limits ?? []
+  const measure = sources.local.measure
+  const measured = (measure?.rateLimits ?? []).map((limit): LimitWindow => {
+    const known = kept.find(window => window.window === limit.kind)
+    const reset = limit.resetsAtMs !== null && limit.resetsAtMs <= sources.nowMs
+    const sameWindow =
+      known !== undefined &&
+      (known.resets_at_ms === null || limit.resetsAtMs === null
+        ? known.resets_at_ms === limit.resetsAtMs
+        : Math.abs(known.resets_at_ms - limit.resetsAtMs) <= RESET_TOLERANCE_MS)
+    return {
+      window: limit.kind,
+      used_pct: reset ? 0 : limit.percentUsed,
+      resets_at_ms: reset ? null : limit.resetsAtMs,
+      sampled_at_ms: measure?.atMs ?? 0,
+      reset_since_sample: reset,
+      pace: reset || !sameWindow ? null : known.pace,
+      calibration: known?.calibration ?? { family: 'other', pairs: 0, needed: PAIRS_NEEDED, pct_per_usd: null },
+    }
+  })
+  const newer = (fresh: LimitWindow, window: LimitWindow) => fresh.window === window.window && fresh.sampled_at_ms > window.sampled_at_ms
+  const windows = [
+    ...kept.filter(window => !measured.some(fresh => newer(fresh, window))),
+    ...measured.filter(fresh => kept.every(window => window.window !== fresh.window || newer(fresh, window))),
+  ]
+  return windows.sort((a, b) => windowRank(a.window) - windowRank(b.window) || a.window.localeCompare(b.window))
+}
+
+function windowRank(kind: string): number {
+  const rank = WINDOW_ORDER.indexOf(kind)
+  return rank < 0 ? WINDOW_ORDER.length : rank
 }
 
 export function screen(input: ScreenInput): Line[] {
@@ -298,11 +339,12 @@ function notice(input: ScreenInput): Line[] {
 }
 
 function headline(input: ScreenInput, snapshot: Snapshot | null, width: number): Line[] {
-  const id = snapshot?.live.model ?? input.local.model
-  const effort = snapshot?.live.effort ?? null
+  const sources = { ...input, snapshot }
+  const id = freshest(sources, snapshot?.live.model ?? null, input.local.model)
+  const effort = freshest(sources, snapshot?.live.effort ?? null, input.local.effort)
   const name = id === null ? 'Claude' : modelName(id)
   const left = effort === null ? name : `${name} · ${effort}`
-  const cost = snapshot?.totals.cost_usd ?? input.local.measure?.costUsd ?? null
+  const cost = costOf(sources)
   const lines: Line[] = []
   if (cost !== null) {
     const value = money(shown(input.motions, 'cost', cost, input.nowMs))
@@ -458,7 +500,7 @@ function session(input: ScreenInput, snapshot: Snapshot | null, width: number): 
 }
 
 function limits(input: ScreenInput, snapshot: Snapshot | null, width: number): Line[] {
-  const windows = limitsOf(snapshot, input.local)
+  const windows = limitsOf({ ...input, snapshot })
   if (windows.length === 0) return []
   const lines: Line[] = [heading('limits', 'Plan limits', width, 'limits')]
   for (const limit of windows) {

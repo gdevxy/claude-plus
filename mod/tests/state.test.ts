@@ -171,8 +171,31 @@ describe('live screen', () => {
     ])
   })
 
+  test('keeps cost, limits and effort fresh from Claude Code while the daemon is down', () => {
+    const measure = {
+      ...local().measure!,
+      atMs: NOW_MS,
+      costUsd: 9.8,
+      rateLimits: [{ kind: 'five_hour', percentUsed: 71, resetsAtMs: NOW_MS + 130 * MINUTE_MS }],
+    }
+    const fresh = local({ measure, effort: 'xhigh' })
+    const down = { status: 'unreachable', detail: 'ECONNREFUSED' } as const
+    const lines = screen(input({ local: fresh, daemon: down }))
+    expect(text(line(lines, 'headline'))).toBe('Opus 5.5 · xhigh                 $9.80')
+    expect(text(line(lines, 'limit-five_hour'))).toBe('  5h    █████████████████▊░░░░░░░  71%')
+    expect(statusText({ snapshot: snapshot(), local: fresh, daemon: down, nowMs: NOW_MS })).toBe('$9.80 · cache 52:14 · 5h 71%')
+    expect(statusText({ snapshot: snapshot(), local: fresh, daemon: OK, nowMs: NOW_MS })).toBe('$4.18 · cache 52:14 · 5h 71%')
+  })
+
+  test('a window Claude Code says has reset reads 0% without a pace', () => {
+    const measure = { ...local().measure!, atMs: NOW_MS, rateLimits: [{ kind: 'five_hour', percentUsed: 54, resetsAtMs: NOW_MS - MINUTE_MS }] }
+    const lines = screen(input({ local: local({ measure }) }))
+    expect(text(line(lines, 'limit-five_hour'))).toBe('  5h    ░░░░░░░░░░░░░░░░░░░░░░░░░   0%')
+    expect(lines.some(candidate => candidate.key === 'limit-five_hour-detail')).toBe(false)
+  })
+
   test('greets a fresh session before the first prompt', () => {
-    const fresh = { session: 's1', model: null, turns: 0, working: false, measure: null, step: null }
+    const fresh = { session: 's1', model: null, effort: null, turns: 0, working: false, measure: null, step: null }
     expect(frame(screen(input({ snapshot: null, local: fresh, daemon: { status: 'starting', detail: null } })))).toEqual([
       'Starting the claude-plus daemon…',
       ' ',
@@ -262,9 +285,9 @@ describe('motion', () => {
 
 describe('status and daemon', () => {
   test('the status line carries cost, cache countdown and the 5h window', () => {
-    expect(statusText({ snapshot: snapshot(), local: local(), nowMs: NOW_MS })).toBe('$4.18 · cache 52:14 · 5h 54%')
-    expect(statusText({ snapshot: snapshot(), local: local(), nowMs: NOW_MS + 53 * MINUTE_MS })).toBe('$4.18 · cache cold · 5h 54%')
-    expect(statusText({ snapshot: null, local: { ...local(), measure: null }, nowMs: NOW_MS })).toBeUndefined()
+    expect(statusText({ snapshot: snapshot(), local: local(), daemon: OK, nowMs: NOW_MS })).toBe('$4.18 · cache 52:14 · 5h 54%')
+    expect(statusText({ snapshot: snapshot(), local: local(), daemon: OK, nowMs: NOW_MS + 53 * MINUTE_MS })).toBe('$4.18 · cache cold · 5h 54%')
+    expect(statusText({ snapshot: null, local: { ...local(), measure: null }, daemon: OK, nowMs: NOW_MS })).toBeUndefined()
   })
 
   test('the ensure outcome tells a missing binary from a failed start', () => {

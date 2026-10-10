@@ -115,17 +115,21 @@ async function settle($: EngineInterface): Promise<void> {
   if (Object.keys(kept).length !== Object.keys(running).length) await update($, motions, () => kept)
 }
 
+async function sources($: EngineInterface) {
+  return { snapshot: await read($, snapshot), local: await read($, local), daemon: await read($, daemon), nowMs: await read($, now) }
+}
+
 async function showStatus($: EngineInterface): Promise<void> {
-  const text = statusText({ snapshot: await read($, snapshot), local: await read($, local), nowMs: await read($, now) })
+  const text = statusText(await sources($))
   if (text === runtime.shownStatus) return
   runtime.shownStatus = text
   $.ui.status(text)
 }
 
 async function animate($: EngineInterface, change: () => Promise<void>): Promise<void> {
-  const before = easables(await read($, snapshot), await read($, local))
+  const before = easables(await sources($))
   await change()
-  const after = easables(await read($, snapshot), await read($, local))
+  const after = easables(await sources($))
   const at = await $.clock.now()
   await update($, motions, running => retarget(running, before, after, at, runtime.animations))
   await update($, now, () => at)
@@ -270,7 +274,10 @@ export const register: Register = (on, options) => {
       ensureTimers($)
       await follow($)
       const at = await $.clock.now()
-      await update($, local, known => ({ ...known, model: e.agentId === undefined ? e.model : known.model, step: e.agentId === undefined ? stepOf(usage, sentAt) : known.step }))
+      if (e.agentId === undefined) {
+        const effort = e.effort === undefined ? null : String(e.effort)
+        await update($, local, known => ({ ...known, model: e.model, effort, step: stepOf(usage, sentAt) }))
+      }
       await update($, now, () => at)
       void forward($, 'turn.step', {
         sent_ms: sentAt,

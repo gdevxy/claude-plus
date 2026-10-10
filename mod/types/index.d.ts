@@ -103,6 +103,7 @@ export type Step = {
 export type Local = {
   session: string | null
   model: string | null
+  effort: string | null
   turns: number
   working: boolean
   measure: Measure | null

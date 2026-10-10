@@ -73,6 +73,7 @@ export function local(overrides: Partial<Local> = {}): Local {
   return {
     session: 's1',
     model: 'claude-opus-5-5',
+    effort: null,
     turns: 14,
     working: false,
     measure: {

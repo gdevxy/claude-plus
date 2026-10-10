@@ -214,6 +214,21 @@ describe('plus mod', () => {
     })
   })
 
+  test('cost and the 5h percent keep moving while the daemon is down', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await $.session.measure(MEASURE)
+    await clock.advance(1000)
+    expect(wiring.statuses.at(-1)).toBe('$4.18 · cache 52:13 · 5h 54%')
+    wiring.down = true
+    await clock.advance(3000)
+    const later = { ...MEASURE.rateLimits[0]!, percentUsed: 71 }
+    await $.session.measure({ ...MEASURE, rateLimits: [later], cost: { usd: 9.8 } })
+    await clock.advance(1000)
+    expect(wiring.statuses.at(-1)).toBe('$9.80 · cache 52:09 · 5h 71%')
+  })
+
   test('the cache countdown ticks every second without a new snapshot', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     wire(on)
