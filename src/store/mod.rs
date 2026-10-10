@@ -129,9 +129,7 @@ impl Store {
     }
 
     pub fn schema_version(&self) -> Result<usize> {
-        Ok(self
-            .conn
-            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? as usize)
+        user_version(&self.conn)
     }
 
     pub fn latest_schema_version() -> usize {
@@ -158,19 +156,27 @@ impl Store {
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         let mut store = Self { conn };
         store.refuse_newer_schema()?;
-        let current = store.schema_version()?;
-        for (index, migration) in schema::MIGRATIONS.iter().enumerate().skip(current) {
-            let version = index as i64 + 1;
+        while store.schema_version()? < Self::latest_schema_version() {
+            let tx = begin_write(&mut store.conn)?;
+            let current = user_version(&tx)?;
+            let Some(migration) = schema::MIGRATIONS.get(current) else {
+                break;
+            };
+            let version = current + 1;
             match migration {
                 schema::Migration::Sql(sql) => {
-                    let tx = begin_write(&mut store.conn)?;
                     tx.execute_batch(sql)?;
-                    tx.pragma_update(None, "user_version", version)?;
-                    tx.commit()?;
+                    set_user_version(&tx, version)?;
+                    tx.commit().map_err(friendly)?;
                 }
                 schema::Migration::Rust(step) => {
+                    drop(tx);
                     step(&mut store.conn, on_upgrade)?;
-                    store.conn.pragma_update(None, "user_version", version)?;
+                    let tx = begin_write(&mut store.conn)?;
+                    if user_version(&tx)? < version {
+                        set_user_version(&tx, version)?;
+                    }
+                    tx.commit().map_err(friendly)?;
                 }
             }
         }
@@ -357,6 +363,18 @@ fn opening_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
 
 pub(crate) fn begin_write(conn: &mut Connection) -> Result<Transaction<'_>> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(friendly)
+}
+
+fn user_version(conn: &Connection) -> Result<usize> {
+    let version = conn
+        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        .map_err(friendly)?;
+    Ok(usize::try_from(version).unwrap_or(0))
+}
+
+fn set_user_version(conn: &Connection, version: usize) -> Result<()> {
+    conn.pragma_update(None, "user_version", version as i64)
         .map_err(friendly)
 }
 
@@ -1099,6 +1117,64 @@ mod tests {
             vec![r#"Text("rederive_pending")|Text("yes")"#]
         );
         assert!(store.rederive_pending().unwrap());
+    }
+
+    #[test]
+    fn a_concurrent_upgrade_is_not_applied_twice() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        seeded(
+            &path,
+            4,
+            r#"INSERT INTO files (id, path) VALUES (1, '/p/proj/s1.jsonl');
+               INSERT INTO raw_records VALUES (1, 1, 'user', '{"type":"user","message":{"role":"user","content":"hi"}}');
+               CREATE TABLE applied (key TEXT);
+               CREATE TRIGGER count_meta AFTER INSERT ON meta BEGIN INSERT INTO applied VALUES (NEW.key); END;"#,
+        );
+        let mut other_opened = false;
+        let store = Store::open_with_progress(&path, &mut |_| {
+            if !other_opened {
+                other_opened = true;
+                Store::open(&path).unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Store::latest_schema_version()
+        );
+        let rederives: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM applied WHERE key = ?1",
+                [REDERIVE_PENDING],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rederives, 1);
+    }
+
+    #[test]
+    fn a_busy_compaction_is_asked_to_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        Store::open(&path)
+            .unwrap()
+            .conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('vacuum_pending', 'yes')",
+                [],
+            )
+            .unwrap();
+        let mut holder = Connection::open(&path).unwrap();
+        let _held = holder
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        let error = upgrade::compact_if_pending(&conn, &mut |_| {}).unwrap_err();
+        assert!(error.is::<Busy>(), "{error:#}");
     }
 
     #[test]

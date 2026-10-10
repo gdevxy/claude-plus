@@ -76,7 +76,8 @@ pub(super) fn compact_if_pending(
         .is_some();
     if pending {
         on_upgrade(Upgrade::Compacting);
-        conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(super::friendly)?;
         conn.execute("DELETE FROM meta WHERE key = ?1", [VACUUM_PENDING])?;
     }
     Ok(())
