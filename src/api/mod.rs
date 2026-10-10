@@ -34,7 +34,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_SOCKET_PATH: usize = if cfg!(target_os = "linux") { 107 } else { 103 };
 const WRITER_EXITED: &str = "the claude-plus writer stopped unexpectedly";
-pub const REBUILDING: &str = "the store is being rebuilt";
+const REBUILDING: &str = "the store is being rebuilt";
 const DRAIN: Duration = Duration::from_secs(2);
 const ROUTES: &[(&str, Method)] = &[
     ("/health", Method::GET),

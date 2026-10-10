@@ -49,9 +49,9 @@ enum Next {
 
 fn next_step(status: Status, version: &str) -> Next {
     match status {
-        Status::Running(health) if health.version == version => Next::Keep(health),
+        Status::Running(health) if is_older(&health.version, version) => Next::Replace(health),
         Status::Running(health) if is_older(version, &health.version) => Next::KeepNewer(health),
-        Status::Running(health) => Next::Replace(health),
+        Status::Running(health) => Next::Keep(health),
         Status::NotRunning => Next::Start,
         Status::Unresponsive { pid } => Next::Wait(pid),
     }
@@ -312,6 +312,10 @@ mod tests {
         assert_eq!(
             next_step(Status::Running(health("garbage")), "0.1.0"),
             Next::Replace(health("garbage"))
+        );
+        assert_eq!(
+            next_step(Status::Running(health("0.1.0+linux")), "0.1.0+macos"),
+            Next::Keep(health("0.1.0+linux"))
         );
         assert_eq!(next_step(Status::NotRunning, "0.1.0"), Next::Start);
         assert_eq!(
