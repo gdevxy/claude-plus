@@ -4,6 +4,8 @@ use rusqlite::{OptionalExtension, params};
 use super::{Store, Writer};
 
 pub const RESETS_AT_TOLERANCE_MS: i64 = 60_000;
+const SPEND_SINCE: &str = "SELECT ts, model, cost_usd FROM requests
+     WHERE ts >= (?1 + 999) / 1000 AND cost_usd IS NOT NULL ORDER BY ts";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LimitSample {
@@ -82,10 +84,7 @@ impl Store {
     }
 
     pub fn spend_since(&self, since_ms: i64) -> Result<Vec<SpendPoint>> {
-        let mut statement = self.conn.prepare_cached(
-            "SELECT ts, model, cost_usd FROM requests
-             WHERE ts * 1000 >= ?1 AND cost_usd IS NOT NULL ORDER BY ts",
-        )?;
+        let mut statement = self.conn.prepare_cached(SPEND_SINCE)?;
         let rows = statement.query_map([since_ms], |r| {
             Ok(SpendPoint {
                 ts_ms: r.get::<_, i64>(0)? * 1000,
@@ -183,6 +182,24 @@ mod tests {
     }
 
     #[test]
+    fn spend_is_read_through_the_time_index() {
+        let store = Store::open_in_memory().unwrap();
+        let plan: Vec<String> = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SPEND_SINCE}"))
+            .unwrap()
+            .query_map([0], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.starts_with("SEARCH requests USING INDEX requests_by_ts (ts>?)")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
     fn spend_lists_priced_requests_of_every_session_from_a_time_on() {
         let mut store = Store::open_in_memory().unwrap();
         let mut w = store.writer().unwrap();
@@ -216,6 +233,7 @@ mod tests {
             .map(|p| (p.ts_ms, p.cost_usd))
             .collect();
         assert_eq!(spend, vec![(10_000, 0.5), (20_000, 0.25)]);
+        assert_eq!(store.spend_since(10_001).unwrap().len(), 1);
         assert_eq!(store.meta("limits_fit").unwrap().as_deref(), Some("{}"));
         assert_eq!(store.meta("nothing").unwrap(), None);
     }
