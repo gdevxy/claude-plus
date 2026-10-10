@@ -79,8 +79,10 @@ Four views, switched with single-key buttons `1` to `4` (the mod API allows one 
 Values that are estimates are prefixed with `~`, and a `?` button on a row shows its derivation.
 
 1. Live: model and effort, context bar (used / window, percent), cache state (warm or cold, TTL type, countdown, hit ratio), next-turn estimates (warm, cold, alternative model), session totals (cost, tokens in and out, turns, subagents), subscription bars for 5h, 7d and spend windows with reset time and pace forecast.
-2. Context: drill-down of context composition from Claude Code's own breakdown (categories, memory files, MCP tools, auto-compact threshold), annotated with warnings from history (unused MCP server, never-invoked skills, large tool results). Rows expand with Enter.
-3. History: time range 24h, 7d, 30d, 90d (`r` cycles), metric toggle `g` between dollars, tokens and percent of limit. Charts drawn as Raster cells (braille and block characters): daily cost stacked by model, cache hit ratio over time, 5h limit usage over time, top sessions and projects by cost, context growth curve of the current session with compaction markers.
+2. Context: drill-down of context composition from Claude Code's own breakdown (categories, memory files, MCP tools, auto-compact threshold), annotated with warnings from history (unused MCP server, never-invoked skills, large tool results).
+   Rows expand with Enter.
+3. History: time range 24h, 7d, 30d, 90d (`r` cycles), metric toggle `g` between dollars, tokens and percent of limit.
+   Charts drawn as Raster cells (braille and block characters): daily cost stacked by model, cache hit ratio over time, 5h limit usage over time, top sessions and projects by cost, context growth curve of the current session with compaction markers.
 4. Insights: ranked list of findings, each with evidence and estimated weekly saving in dollars and percent of limit.
 
 When the daemon is unreachable or the binary is missing, the pane still shows everything the mod receives directly (context, limits, cost, per-request usage) and a one-line notice with the fix (`brew install ...` or `claude-plus daemon --ensure`).
@@ -176,11 +178,13 @@ Mod (TypeScript, files under `mod/`):
 ### Data sources
 
 1. Mod events, pushed to the daemon:
-   - `session.measure`: context usage (tokens, window, percent), rate limits (`five_hour`, `seven_day`, `spend_limit` with `percentUsed` and `resetsAt`), session cost. Fires after each main-thread turn and whenever a rate-limit window moves a whole point.
+   - `session.measure`: context usage (tokens, window, percent), rate limits (`five_hour`, `seven_day`, `spend_limit` with `percentUsed` and `resetsAt`), session cost.
+     Fires after each main-thread turn and whenever a rate-limit window moves a whole point.
    - `$.session.usage({ breakdown: 'full' })`: Claude Code's own context breakdown (categories, memory files, MCP tools, auto-compact threshold, last API usage), requested after each turn.
    - `turn.step` result: per-request usage (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, model) and effort, as soon as the request completes.
    - `turn.complete`, `session.compact`, `session.start`, `session.end`: lifecycle markers.
-2. Transcripts, tailed by the daemon: `~/.claude/projects/<project>/<session>.jsonl` and `<project>/<session>/subagents/agent-<id>.jsonl`. They supply what the mod cannot see (the 5m and 1h split of cache writes, subagent usage, tool results, injected context attachments) and all history.
+2. Transcripts, tailed by the daemon: `~/.claude/projects/<project>/<session>.jsonl` and `<project>/<session>/subagents/agent-<id>.jsonl`.
+   They supply what the mod cannot see (the 5m and 1h split of cache writes, subagent usage, tool results, injected context attachments) and all history.
 3. Config on disk, scanned by the daemon, for configured but never-loaded items.
 
 The session id from `$.session.id()` is the transcript file name, which joins mod events to transcript records.
@@ -190,8 +194,11 @@ Mod events are the low-latency source for the Live view, and transcript records 
 
 Claude Code documents the transcript format as internal and subject to change, so the parser treats every field as optional and every unknown record type as opaque.
 
-- One API response is written as several `assistant` records, one per content block, each repeating `message.usage`. Input and cache fields are identical across them, but about 20% of responses show `output_tokens` growing from record to record as the response streams. Requests must be deduplicated on `requestId` (fallback `message.id`, then `uuid`) before any cost aggregation, keeping the record with the highest `output_tokens`.
-- `message.usage.iterations` lists the API calls behind one response; it has more than one entry only for refusal fallbacks, where the top-level counts describe the final call. v1 uses the top-level counts.
+- One API response is written as several `assistant` records, one per content block, each repeating `message.usage`.
+  Input and cache fields are identical across them, but about 20% of responses show `output_tokens` growing from record to record as the response streams.
+  Requests must be deduplicated on `requestId` (fallback `message.id`, then `uuid`) before any cost aggregation, keeping the record with the highest `output_tokens`.
+- `message.usage.iterations` lists the API calls behind one response; it has more than one entry only for refusal fallbacks, where the top-level counts describe the final call.
+  v1 uses the top-level counts.
 - `user` records that are not human prompts carry `isMeta`, `isCompactSummary` or `isVisibleInTranscriptOnly`, or start with tooling markers such as `<task-notification`, `<command-`, `<local-command`, `<system-reminder`, `[Request interrupted`.
 - `tool_result` content can contain base64 `image` blocks, which must be counted as images, never as text characters.
 - `message.usage.cache_creation` splits cache writes into `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, and `output_tokens_details.thinking_tokens` gives thinking tokens.
