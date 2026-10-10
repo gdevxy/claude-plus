@@ -17,8 +17,15 @@ pub fn usd_with(value: f64, decimals: usize) -> String {
     let (whole, fraction) = rounded.split_once('.').unwrap_or((&rounded, ""));
     let body = format!("{}.{fraction}", count(whole.parse().unwrap_or_default()));
     let is_zero = fraction.bytes().all(|b| b == b'0') && whole == "0";
+    if is_zero && value > 0.0 {
+        return format!("<${}", smallest_step(decimals));
+    }
     let sign = if value < 0.0 && !is_zero { "-" } else { "" };
     format!("{sign}${body}")
+}
+
+fn smallest_step(decimals: usize) -> String {
+    format!("0.{}1", "0".repeat(decimals.saturating_sub(1)))
 }
 
 pub fn count(value: u64) -> String {
@@ -78,7 +85,9 @@ mod tests {
         assert_eq!(column_decimals(&[0.99996]), 2);
         assert_eq!(column_decimals(&[0.99994]), 4);
         assert_eq!(column_decimals(&[]), 4);
-        assert_eq!(usd_with(0.0011, 2), "$0.00");
+        assert_eq!(usd_with(0.0011, 2), "<$0.01");
+        assert_eq!(usd_with(0.00004, 4), "<$0.0001");
+        assert_eq!(usd_with(0.0, 2), "$0.00");
         assert_eq!(usd_with(1234.5, 2), "$1,234.50");
         assert_eq!(usd_with(2.0, 4), "$2.0000");
         assert_eq!(usd_with(-0.001, 2), "$0.00");

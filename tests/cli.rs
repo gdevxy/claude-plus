@@ -651,16 +651,16 @@ fn stats_columns_share_one_precision_with_aligned_decimals() {
     assert_eq!(
         stdout_of(&env, &["stats", "--days", "1"]),
         "\
-┌────────────┬───────────────────────────┬──────────┬─────────────────────┐
-│ Day        ┆ Model                     ┆ Requests ┆                Cost │
-╞════════════╪═══════════════════════════╪══════════╪═════════════════════╡
-│ 2026-10-03 ┆ claude-haiku-4-5-20251001 ┆        - ┆ $0.00               │
-│ 2026-10-03 ┆ claude-mystery-9          ┆        1 ┆ $0.00 (+1 unpriced) │
-│ 2026-10-03 ┆ claude-opus-5-5           ┆        1 ┆ $2.00               │
-│ 2026-10-03 ┆ claude-sonnet-5-5         ┆        2 ┆ $0.01               │
-├────────────┼───────────────────────────┼──────────┼─────────────────────┤
-│ Total      ┆                           ┆        4 ┆ $2.01 (+1 unpriced) │
-└────────────┴───────────────────────────┴──────────┴─────────────────────┘
+┌────────────┬───────────────────────────┬──────────┬──────────────────────┐
+│ Day        ┆ Model                     ┆ Requests ┆                 Cost │
+╞════════════╪═══════════════════════════╪══════════╪══════════════════════╡
+│ 2026-10-03 ┆ claude-haiku-4-5-20251001 ┆        - ┆ <$0.01               │
+│ 2026-10-03 ┆ claude-mystery-9          ┆        1 ┆  $0.00 (+1 unpriced) │
+│ 2026-10-03 ┆ claude-opus-5-5           ┆        1 ┆  $2.00               │
+│ 2026-10-03 ┆ claude-sonnet-5-5         ┆        2 ┆  $0.01               │
+├────────────┼───────────────────────────┼──────────┼──────────────────────┤
+│ Total      ┆                           ┆        4 ┆  $2.01 (+1 unpriced) │
+└────────────┴───────────────────────────┴──────────┴──────────────────────┘
   includes $0.0111 reconciled from Claude Code session counters
 "
     );
@@ -687,4 +687,18 @@ fn doctor_counts_retired_generations_apart() {
         stdout_of(&env, &["doctor"])
             .contains("  Imported:    8 requests in 5 files (1 retired) · 1 unparsable line\n")
     );
+}
+
+#[test]
+fn help_describes_every_command() {
+    let env = env();
+    let help = stdout_of(&env, &["--help"]);
+    for line in [
+        "  import   Read new Claude Code transcripts into the local store\n",
+        "  stats    Show daily cost per model, importing first\n",
+        "  doctor   Check the setup and compare totals with Claude Code, read-only\n",
+        "  reindex  Rebuild every derived table from the stored records\n",
+    ] {
+        assert!(help.contains(line), "missing {line:?} in\n{help}");
+    }
 }

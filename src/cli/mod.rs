@@ -25,12 +25,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Read new Claude Code transcripts into the local store")]
     Import,
+    #[command(about = "Show daily cost per model, importing first")]
     Stats {
-        #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=36500))]
+        #[arg(
+            long,
+            default_value_t = 14,
+            value_parser = clap::value_parser!(u32).range(1..=36500),
+            help = "Number of calendar days to show, today included"
+        )]
         days: u32,
     },
+    #[command(about = "Check the setup and compare totals with Claude Code, read-only")]
     Doctor,
+    #[command(about = "Rebuild every derived table from the stored records")]
     Reindex,
 }
 
