@@ -23,7 +23,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - run: cargo check --locked --all-targets
   mod:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
