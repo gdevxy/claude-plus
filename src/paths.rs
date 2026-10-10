@@ -52,16 +52,24 @@ impl Paths {
     }
 
     pub fn ensure_data_dir(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.data_dir)
-            .with_context(|| format!("cannot create {}", self.data_dir.display()))?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            builder.mode(0o700);
+            builder
+                .create(&self.data_dir)
+                .with_context(|| format!("cannot create {}", self.data_dir.display()))?;
             std::fs::set_permissions(&self.data_dir, std::fs::Permissions::from_mode(0o700))
                 .with_context(|| {
                     format!("cannot restrict {} to its owner", self.data_dir.display())
                 })?;
         }
+        #[cfg(not(unix))]
+        builder
+            .create(&self.data_dir)
+            .with_context(|| format!("cannot create {}", self.data_dir.display()))?;
         Ok(())
     }
 }
@@ -146,6 +154,19 @@ mod tests {
     fn from_env_uses_the_process_environment() {
         let expected = Paths::from_vars(|name| std::env::var_os(name)).unwrap();
         assert_eq!(Paths::from_env().unwrap(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_parents_of_the_data_dir_are_private_too() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(temp.path(), None, Some(temp.path().join("a/b")));
+        paths.ensure_data_dir().unwrap();
+        for dir in [temp.path().join("a"), temp.path().join("a/b")] {
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
+        }
     }
 
     #[cfg(unix)]

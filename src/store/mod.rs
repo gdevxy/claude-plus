@@ -87,13 +87,19 @@ impl Store {
     }
 
     fn open_writable(path: &Path, on_upgrade: &mut dyn FnMut(Upgrade)) -> Result<Self> {
-        let conn = Connection::open(path)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)
+                .with_context(|| format!("cannot create {}", path.display()))?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("cannot restrict {} to its owner", path.display()))?;
         }
+        let conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
