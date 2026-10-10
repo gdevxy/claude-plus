@@ -229,7 +229,8 @@ fn health(state: &State) -> Health {
                 .progress
                 .map(|(done, total)| Progress { done, total }),
             watching: state.watching.load(Ordering::Relaxed),
-            last_error: status.last_error,
+            last_error: status.last_error.as_ref().map(|f| f.message.clone()),
+            last_error_at_ms: status.last_error.as_ref().map(|f| epoch_ms(f.at)),
             rebuilding: rebuilding(state),
         },
     }

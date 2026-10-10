@@ -29,6 +29,8 @@ pub struct IngestHealth {
     pub watching: bool,
     pub last_error: Option<String>,
     #[serde(default)]
+    pub last_error_at_ms: Option<i64>,
+    #[serde(default)]
     pub rebuilding: bool,
 }
 

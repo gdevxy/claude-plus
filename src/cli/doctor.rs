@@ -226,6 +226,7 @@ mod tests {
                 progress: None,
                 watching: true,
                 last_error: None,
+                last_error_at_ms: None,
                 rebuilding,
             },
         })

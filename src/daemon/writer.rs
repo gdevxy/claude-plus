@@ -33,7 +33,13 @@ pub struct IngestStatus {
     backlog: VecDeque<Instant>,
     pub last_ingest: Option<SystemTime>,
     pub progress: Option<(usize, usize)>,
-    pub last_error: Option<String>,
+    pub last_error: Option<Failure>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    pub message: String,
+    pub at: SystemTime,
 }
 
 impl IngestStatus {
@@ -209,11 +215,11 @@ impl Worker {
             match job {
                 Job::Files(files) => {
                     let outcome = self.ingest_files(&files, &mut drain);
-                    self.finish_ingest(outcome, None);
+                    self.finish_ingest(outcome, None, false);
                 }
                 Job::Scan(reply) => {
                     let outcome = self.scan(&mut drain);
-                    self.finish_ingest(outcome, reply);
+                    self.finish_ingest(outcome, reply, true);
                 }
                 Job::Events(rows, reply) => answer(reply, store_events(&mut self.store, &rows)),
                 Job::Reindex(reply) => {
@@ -275,6 +281,7 @@ impl Worker {
         &mut self,
         outcome: Result<ScanOutcome>,
         reply: Option<(u64, Reply<ScanOutcome>)>,
+        full: bool,
     ) {
         if self.is_cancelled() {
             let mut status = lock(&self.shared.status);
@@ -294,14 +301,11 @@ impl Worker {
                 .map(|error| format!("reconcile failed: {error}")),
             Err(error) => Some(format!("ingest failed: {error}")),
         };
-        if let Some(problem) = &problem {
-            self.log.warn(problem);
-        }
+        self.record(problem, full);
         {
             let mut status = lock(&self.shared.status);
             status.backlog.pop_front();
             status.progress = None;
-            status.last_error = problem;
             if let Ok(done) = &outcome {
                 status.last_ingest = Some(SystemTime::now());
                 for collected in lock(&self.shared.collectors).values_mut() {
@@ -327,7 +331,29 @@ impl Worker {
             lock(&shared.status).progress = Some((done, total));
         });
         lock(&self.shared.status).progress = None;
+        if !self.is_cancelled() {
+            let problem = rebuilt
+                .as_ref()
+                .err()
+                .map(|error| format!("reindex failed: {error:#}"));
+            self.record(problem, true);
+        }
         rebuilt
+    }
+
+    fn record(&self, problem: Option<String>, clears: bool) {
+        let mut status = lock(&self.shared.status);
+        match problem {
+            Some(message) => {
+                self.log.warn(&message);
+                status.last_error = Some(Failure {
+                    message,
+                    at: SystemTime::now(),
+                });
+            }
+            None if clears => status.last_error = None,
+            None => {}
+        }
     }
 }
 
@@ -553,6 +579,39 @@ mod tests {
                 .is_some()
         );
         assert_eq!(fx.handle.reindex().await.unwrap_err().to_string(), STOPPING);
+        fx.stop();
+    }
+
+    #[tokio::test]
+    async fn the_last_failure_stays_until_a_clean_full_scan() {
+        let mut fx = Fixture::new();
+        let a = fx.write("a.jsonl", &line("a", "ra"));
+        fx.handle.import().await.unwrap();
+        let database = fx.temp.path().join("data.db");
+        let lock_requests = "CREATE TRIGGER no_requests BEFORE INSERT ON requests
+             BEGIN SELECT RAISE(ABORT, 'requests are locked'); END;";
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(lock_requests)
+            .unwrap();
+        let before = SystemTime::now();
+        let error = fx.handle.reindex().await.unwrap_err().to_string();
+        let failure = fx.handle.status().last_error.unwrap();
+        assert_eq!(failure.message, format!("reindex failed: {error}"));
+        assert!(failure.at >= before);
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch("DROP TRIGGER no_requests")
+            .unwrap();
+        std::fs::write(&a.path, line("a", "ra") + &line("a", "rb")).unwrap();
+        fx.handle.ingest(vec![a], Instant::now());
+        while fx.handle.status().backlog() > 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fx.handle.status().last_error, Some(failure));
+        fx.handle.import().await.unwrap();
+        assert_eq!(fx.handle.status().last_error, None);
+        assert_eq!(fx.reader().totals().unwrap().requests, 2);
         fx.stop();
     }
 }
