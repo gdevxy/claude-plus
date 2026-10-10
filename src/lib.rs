@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod ingest;
 pub mod paths;
 pub mod pricing;
