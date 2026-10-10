@@ -300,6 +300,23 @@ fn a_step_already_in_the_transcript_and_its_repeat_are_not_counted_again() {
 }
 
 #[test]
+fn the_cache_countdown_starts_when_the_request_was_sent() {
+    let server = Server::start();
+    server.client().import().unwrap();
+    let answered_ms = epoch_ms(SystemTime::now()) - 1000;
+    let sent_ms = answered_ms - 90_000;
+    let mut slow = step(Some("m1-2"), answered_ms, 12, 25_000, 300);
+    slow["data"]["sent_ms"] = json!(sent_ms);
+    server
+        .client()
+        .send_events(&json!({"events": [slow]}))
+        .unwrap();
+    let cache = server.client().snapshot(SESSION).unwrap().live.cache;
+    assert_eq!(cache.last_touch_ms, Some(sent_ms));
+    assert_eq!(cache.expires_at_ms, Some(sent_ms + 3_600_000));
+}
+
+#[test]
 fn bad_requests_are_answered_with_a_reason() {
     let server = Server::start();
     let cases = [

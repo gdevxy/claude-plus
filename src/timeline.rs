@@ -67,17 +67,20 @@ impl Timeline {
         let mut matched = vec![false; observed.len()];
         let mut live = Vec::new();
         let mut seen = HashSet::new();
-        for step in steps.iter().filter_map(from_step) {
+        for (step, answered_ms) in steps.iter().filter_map(from_step) {
             if !seen.insert(step.identity()) {
                 continue;
             }
             let twin = observed.iter().enumerate().position(|(index, request)| {
                 !matched[index]
                     && request.fingerprint() == step.fingerprint()
-                    && (request.ts_ms - step.ts_ms).abs() <= MATCH_WINDOW_MS
+                    && (request.ts_ms - answered_ms).abs() <= MATCH_WINDOW_MS
             });
             match twin {
-                Some(index) => matched[index] = true,
+                Some(index) => {
+                    matched[index] = true;
+                    observed[index].ts_ms = observed[index].ts_ms.min(step.ts_ms);
+                }
                 None => live.push(step),
             }
         }
@@ -128,7 +131,7 @@ fn from_transcript(point: &RequestPoint) -> Observed {
     }
 }
 
-fn from_step(event: &StoredEvent) -> Option<Observed> {
+fn from_step(event: &StoredEvent) -> Option<(Observed, i64)> {
     let data: Value = serde_json::from_str(&event.json).ok()?;
     let usage = data.get("usage")?;
     let count = |field: &str| usage.get(field).and_then(Value::as_u64).unwrap_or(0);
@@ -147,8 +150,13 @@ fn from_step(event: &StoredEvent) -> Option<Observed> {
         .or_else(|| data.get("model"))
         .and_then(Value::as_str)?
         .to_string();
-    Some(Observed {
-        ts_ms: event.ts_ms,
+    let sent_ms = data
+        .get("sent_ms")
+        .and_then(Value::as_i64)
+        .filter(|sent| (0..=event.ts_ms).contains(sent))
+        .unwrap_or(event.ts_ms);
+    let observed = Observed {
+        ts_ms: sent_ms,
         model,
         thread: match data.get("agentId").and_then(Value::as_str) {
             Some(agent) => Thread::Agent(agent.to_string()),
@@ -161,7 +169,8 @@ fn from_step(event: &StoredEvent) -> Option<Observed> {
             _ => None,
         }),
         source: Source::Live,
-    })
+    };
+    Some((observed, event.ts_ms))
 }
 
 #[cfg(test)]
@@ -245,6 +254,37 @@ mod tests {
                 (1_000_000, Source::Transcript, Thread::Main),
                 (1_030_000, Source::Live, Thread::Main),
                 (1_030_000, Source::Live, Thread::Agent("a1".into())),
+            ]
+        );
+    }
+
+    fn sent(mut event: StoredEvent, sent_ms: i64) -> StoredEvent {
+        event.json = event
+            .json
+            .replacen('{', &format!(r#"{{"sent_ms":{sent_ms},"#), 1);
+        event
+    }
+
+    #[test]
+    fn a_step_counts_from_when_its_request_was_sent() {
+        let timeline = Timeline::build(
+            &[point(1_000, 5, 9000, 300, None)],
+            &[
+                sent(step(1_000_400, 5, 9000, 300, None), 999_200),
+                sent(step(1_090_000, 8, 9300, 50, None), 1_030_000),
+                step(1_100_000, 9, 9350, 10, None),
+            ],
+        );
+        assert_eq!(
+            timeline
+                .requests
+                .iter()
+                .map(|r| (r.ts_ms, r.source))
+                .collect::<Vec<_>>(),
+            vec![
+                (999_200, Source::Transcript),
+                (1_030_000, Source::Live),
+                (1_100_000, Source::Live),
             ]
         );
     }
