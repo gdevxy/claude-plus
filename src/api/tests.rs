@@ -244,7 +244,7 @@ fn the_snapshot_reports_the_cache_forecast_and_limits() {
             forecast.new_tokens,
             forecast.output_tokens
         ),
-        (2, 25_300, 2_661, 900)
+        (2, 25_300, 312, 900)
     );
     assert_eq!(live.limits.len(), 1);
     assert_eq!(

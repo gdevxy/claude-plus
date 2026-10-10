@@ -6,6 +6,7 @@ use crate::timeline::Observed;
 use crate::transcript::TokenCounts;
 
 pub const RECENT: usize = 10;
+pub const WARM_READ_SHARE: f64 = 0.9;
 const ALTERNATIVES: &[(&str, &str)] = &[
     ("opus", "claude-sonnet-5-5"),
     ("fable", "claude-opus-5-5"),
@@ -60,10 +61,16 @@ pub fn next_turn(
     pct_per_usd_5h: Option<f64>,
 ) -> Option<Forecast> {
     let latest = main.last()?;
-    let recent = &main[main.len().saturating_sub(RECENT)..];
+    let start = main.len().saturating_sub(RECENT);
+    let recent = &main[start..];
     let prefix_tokens = latest.prefix();
+    let warm: Vec<&Observed> = (start.max(1)..main.len())
+        .filter(|&index| is_warm(main[index - 1], main[index]))
+        .map(|index| main[index])
+        .collect();
+    let sampled = if warm.is_empty() { recent } else { &warm };
     let new_tokens = median(
-        recent
+        sampled
             .iter()
             .map(|r| r.tokens.input + r.tokens.cache_write()),
     );
@@ -99,6 +106,11 @@ pub fn next_turn(
         cold_pct_5h: percent(cold_usd),
         alternative,
     })
+}
+
+fn is_warm(previous: &Observed, request: &Observed) -> bool {
+    let prefix = previous.prefix();
+    prefix > 0 && request.tokens.cache_read as f64 >= prefix as f64 * WARM_READ_SHARE
 }
 
 fn median(values: impl Iterator<Item = u64>) -> u64 {
@@ -141,7 +153,7 @@ mod tests {
     fn warm_and_cold_follow_the_spec_formulas() {
         let requests = [
             request("claude-opus-5-5", 10, 40_000, 1_000, 300),
-            request("claude-opus-5-5", 20, 41_000, 3_000, 900),
+            request("claude-opus-5-5", 20, 41_000, 2_010, 900),
             request("claude-opus-5-5", 30, 44_000, 2_000, 600),
         ];
         let main: Vec<&Observed> = requests.iter().collect();
@@ -171,6 +183,20 @@ mod tests {
             alternative.next_usd,
             (46_000.0 * 0.1 + 2_030.0 * 4.0 + 600.0 * 10.0) / 1e6
         ));
+    }
+
+    #[test]
+    fn new_tokens_come_from_warm_requests_once_there_are_any() {
+        let opening = request("claude-opus-5-5", 10, 0, 40_000, 300);
+        let warm = request("claude-opus-5-5", 20, 40_000, 1_000, 900);
+        let early = [opening.clone(), warm];
+        let main: Vec<&Observed> = early.iter().collect();
+        let forecast = next_turn(&main, &PriceTable::bundled(), Ttl::OneHour, None).unwrap();
+        assert_eq!((forecast.new_tokens, forecast.output_tokens), (1_020, 600));
+        let alone = [opening];
+        let main: Vec<&Observed> = alone.iter().collect();
+        let forecast = next_turn(&main, &PriceTable::bundled(), Ttl::OneHour, None).unwrap();
+        assert_eq!(forecast.new_tokens, 40_010);
     }
 
     #[test]
