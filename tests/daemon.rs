@@ -425,3 +425,26 @@ fn doctor_explains_a_data_dir_too_deep_for_a_socket() {
         "{doctor}"
     );
 }
+
+#[test]
+fn ensure_starts_a_daemon_once_a_stopping_one_frees_the_lock() {
+    let env = env();
+    let _cleanup = Detached { env: &env };
+    std::fs::create_dir_all(&env.plus).unwrap();
+    let held = InstanceLock::acquire(&env.plus.join("daemon.lock")).unwrap();
+    let ensure = process(&env, &["daemon", "--ensure"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    drop(held);
+    let output = ensure.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("✻ Started the claude-plus daemon · pid "),
+        "{stdout}"
+    );
+    assert_eq!(health(&env).unwrap().pid, pid_in(&stdout));
+}

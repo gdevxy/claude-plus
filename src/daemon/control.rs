@@ -142,10 +142,24 @@ pub fn ensure(paths: &Paths) -> Result<Ensured> {
                 restarted => restarted,
             })
         }
-        Next::Wait(pid) => match wait_for_health(paths, START_TIMEOUT) {
-            Some(health) => Ok(Ensured::Running(health)),
-            None => bail!(unresponsive(paths, pid)),
-        },
+        Next::Wait(pid) => wait_for_daemon(paths, pid),
+    }
+}
+
+fn wait_for_daemon(paths: &Paths, pid: Option<u32>) -> Result<Ensured> {
+    let client = Client::new(&paths.socket()).with_timeout(PROBE_TIMEOUT);
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        if let Ok(health) = client.health() {
+            return Ok(Ensured::Running(health));
+        }
+        if probe(&paths.daemon_lock())? == Holder::Free {
+            return start(paths);
+        }
+        if Instant::now() >= deadline {
+            bail!(unresponsive(paths, pid));
+        }
+        std::thread::sleep(POLL);
     }
 }
 
@@ -217,20 +231,6 @@ fn start(paths: &Paths) -> Result<Ensured> {
                 START_TIMEOUT.as_secs(),
                 paths.daemon_log().display()
             );
-        }
-        std::thread::sleep(POLL);
-    }
-}
-
-fn wait_for_health(paths: &Paths, timeout: Duration) -> Option<Health> {
-    let client = Client::new(&paths.socket()).with_timeout(PROBE_TIMEOUT);
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Ok(health) = client.health() {
-            return Some(health);
-        }
-        if Instant::now() >= deadline {
-            return None;
         }
         std::thread::sleep(POLL);
     }
