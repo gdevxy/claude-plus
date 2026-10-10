@@ -1,6 +1,7 @@
 mod events;
 mod reconcile;
 mod schema;
+mod session;
 mod writer;
 
 use std::collections::BTreeMap;
@@ -15,6 +16,7 @@ use rusqlite::{
 use crate::transcript::location::Location;
 pub use events::{EventRow, StoredEvent};
 pub use reconcile::Reconciliation;
+pub use session::{ModelTotal, SessionTotals};
 pub use writer::*;
 
 const GENERATION_MARK: &str = "#gen-";

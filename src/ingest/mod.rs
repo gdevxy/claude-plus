@@ -27,7 +27,7 @@ pub const SKIPPED_RAW_KINDS: &[&str] = &[
     "atis-latch",
 ];
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IngestReport {
     pub files_seen: u64,
     pub files_changed: u64,
