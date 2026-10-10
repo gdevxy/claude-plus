@@ -142,6 +142,18 @@ Each unit is a Rust module with a narrow public interface and is testable in iso
 
 Exact field names are verified against real payloads during implementation, and the parser treats every field as optional.
 
+### Transcript facts verified on real data (Claude Code 2.1.296)
+
+- One API response is written as several `assistant` records, one per content block, each repeating the identical `message.usage`. Requests must be deduplicated on `requestId` (fallback `message.id`) before any cost aggregation.
+- `assistant` records carry `attributionSkill`, `attributionMcpServer`, `attributionMcpTool`, `attributionPlugin`, `effort`, `perTurnEffort` and, when limited, `quotaLimits` (`status`, `rateLimitType`, `resetsAt`).
+- `attachment` records carry the actual injected context: `skill_listing` (content, names, skillCount), `instructions` (CLAUDE.md files with path, type and content), `nested_memory`, `mcp_instructions_delta`, `deferred_tools_record` and `deferred_tools_delta` (tool schemas), `agent_listing_delta`, `environment`, `invoked_skills`.
+- `system` records with `subtype: compact_boundary` carry `compactMetadata` (`trigger`, `preTokens`, `postTokens`).
+- `cost-state` records carry Claude Code's own per-model cost totals, used as a cross-check of the pricing module.
+- `<synthetic>` model records carry no billable usage and are skipped.
+- Subagent transcripts live in `<project>/<session-id>/subagents/agent-<id>.jsonl` and are attributed to the parent session.
+
+Consequently `context_model` prefers the transcript attachments as the source of truth for what was injected, and `config_scan` is only a fallback for sessions whose transcripts predate those attachments, and for the dead-weight analysis of configured but never-loaded items.
+
 ### Pane to session binding
 
 The hook process reads `$TMUX_PANE` and sends it with the session id.
@@ -169,7 +181,8 @@ A panel launched without `--pane` follows the most recently active session and o
 
 Prices come from the bundled table, keyed by model id, overridable in `config.toml`.
 An unknown model shows "price unknown" and is excluded from dollar totals with a visible count, never guessed.
-Session, project and day aggregates are sums of request costs, with subagent requests attributed to the parent session.
+Session, project and day aggregates are sums of deduplicated request costs, with subagent requests attributed to the parent session.
+The pricing module is cross-checked against `cost-state` records in tests.
 
 ### Cache state
 
@@ -199,7 +212,7 @@ Session, project and day aggregates are sums of request costs, with subagent req
 
 ### Context composition (estimate scaled to measured total)
 
-- For each source, estimate tokens from text length with a per-kind chars-per-token ratio (prose, code, JSON schema).
+- For each source, take its injected text from the transcript attachments (fallback: files on disk) and estimate tokens from text length with a per-kind chars-per-token ratio (prose, code, JSON schema).
 - Measured fixed total is the first request of the session's `input + cache_read + cache_write`, minus the estimated first user message.
 - Scale all fixed-component estimates by `measured / estimated_sum`.
 - The conversation component is tracked from per-turn real deltas and split by tool result sizes and message sizes.
