@@ -957,6 +957,45 @@ mod tests {
     }
 
     #[test]
+    fn v1_and_v2_databases_open_at_the_latest_version() {
+        for version in [1, 2] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("data.db");
+            seeded(
+                &path,
+                version,
+                r#"INSERT INTO files (id, path, offset, lines, size, mtime) VALUES (1, '/p/proj/s1.jsonl', 10, 2, 10, 5);
+                   INSERT INTO raw_records VALUES
+                     (1, 1, 'user', '{"type":"user","message":{"role":"user","content":"secret prompt"}}'),
+                     (1, 2, 'cost-state', '{"type":"cost-state","sessionId":"s1","totalCostUSD":0.5,"modelUsage":{"m":{"outputTokens":1}}}');
+                   INSERT INTO cost_states VALUES
+                     (1, 2, 's1', 0.5, '{"type":"cost-state","sessionId":"s1","totalCostUSD":0.5,"modelUsage":{"m":{"outputTokens":1}}}');
+                   INSERT INTO requests (key, session_id, ts, model, input, output, thinking, cache_read, cache_write_5m, cache_write_1h, cost_usd, is_sidechain)
+                     VALUES ('r1', 's1', 1, 'm', 1, 2, 0, 0, 0, 0, 0.25, 0);"#,
+            );
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                store.schema_version().unwrap(),
+                Store::latest_schema_version(),
+                "v{version}"
+            );
+            let checkpoint = store.checkpoint("/p/proj/s1.jsonl").unwrap().unwrap();
+            assert_eq!(
+                (checkpoint.offset, checkpoint.lines, checkpoint.head_len),
+                (10, 2, 0)
+            );
+            assert_eq!(
+                store.raw_records(1, &["user"]).unwrap()[0].json,
+                r#"{"message":{"content":{"$chars":13},"role":"user"},"type":"user"}"#
+            );
+            assert_eq!(store.cost_state_deltas().unwrap()[0].claude_usd, Some(0.5));
+            assert_eq!(store.totals().unwrap().requests, 1);
+            assert_eq!(store.dump("adjustments"), Vec::<String>::new());
+            assert!(store.rederive_pending().unwrap());
+        }
+    }
+
+    #[test]
     fn upgrading_from_v3_classifies_stored_cost_states() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("data.db");

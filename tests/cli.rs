@@ -629,7 +629,7 @@ fn reconcile_failure_still_prints_the_import_report() {
         .assert()
         .failure()
         .stdout(
-            "✻ Imported 1 line from 2 changed files · 1 new request · 0 unparsable lines\n  History: 6 requests across 3 sessions · $0.0812 priced\n  1 request without a known price (see `claude-plus doctor`)\n",
+            "✻ Imported 1 line from 1 changed file · 1 new request · 0 unparsable lines\n  History: 6 requests across 3 sessions · $0.0812 priced\n  1 request without a known price (see `claude-plus doctor`)\n",
         )
         .stderr(predicate::str::starts_with(
             "claude-plus: reconciling with Claude Code counters: adjustments are locked",

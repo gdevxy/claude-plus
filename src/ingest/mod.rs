@@ -61,11 +61,16 @@ pub struct Rebuilt {
 pub struct Ingestor<'a> {
     store: &'a mut Store,
     prices: &'a PriceTable,
+    batch_lines: u64,
 }
 
 impl<'a> Ingestor<'a> {
     pub fn new(store: &'a mut Store, prices: &'a PriceTable) -> Self {
-        Self { store, prices }
+        Self {
+            store,
+            prices,
+            batch_lines: BATCH_LINES,
+        }
     }
 
     pub fn ingest_all(
@@ -155,7 +160,7 @@ impl<'a> Ingestor<'a> {
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
             .unwrap_or(0);
         let path = file.path.to_string_lossy().into_owned();
         let mut writer = self.store.writer()?;
@@ -186,7 +191,6 @@ impl<'a> Ingestor<'a> {
             Some(cp) if !replaced => (cp.offset, cp.lines),
             _ => (0, 0),
         };
-        report.files_changed = 1;
 
         let progress = |offset, lines| FileProgress {
             offset,
@@ -206,29 +210,28 @@ impl<'a> Ingestor<'a> {
             line_no += 1;
             report.lines += 1;
             offset = line.end_offset;
-            if line.text.trim().is_empty() {
-                continue;
-            }
-            match parse_line(&line.text) {
-                Ok(parsed) => {
-                    record_raw(&mut writer, file_id, line_no, &parsed)?;
-                    derive(
-                        &mut writer,
-                        self.prices,
-                        &file.location,
-                        file_id,
-                        line_no,
-                        &parsed,
-                        &mut report,
-                    )?;
-                }
-                Err(_) => {
-                    report.parse_errors += 1;
-                    batch_errors += 1;
+            if !line.text.trim().is_empty() {
+                match parse_line(&line.text) {
+                    Ok(parsed) => {
+                        record_raw(&mut writer, file_id, line_no, &parsed)?;
+                        derive(
+                            &mut writer,
+                            self.prices,
+                            &file.location,
+                            file_id,
+                            line_no,
+                            &parsed,
+                            &mut report,
+                        )?;
+                    }
+                    Err(_) => {
+                        report.parse_errors += 1;
+                        batch_errors += 1;
+                    }
                 }
             }
             in_batch += 1;
-            if in_batch == BATCH_LINES {
+            if in_batch == self.batch_lines {
                 writer.advance_file(file_id, &progress(offset, line_no), batch_errors)?;
                 writer.commit()?;
                 writer = self.store.writer()?;
@@ -238,6 +241,7 @@ impl<'a> Ingestor<'a> {
         }
         writer.advance_file(file_id, &progress(offset, line_no), batch_errors)?;
         writer.commit()?;
+        report.files_changed = u64::from(replaced || report.lines > 0);
         Ok(report)
     }
 }
@@ -601,10 +605,24 @@ mod tests {
         fx.write("-w-proj/s1.jsonl", head);
         let mut store = Store::open_in_memory().unwrap();
         let first = fx.run(&mut store);
-        assert_eq!((first.parse_errors, first.requests_inserted), (0, 0));
+        assert_eq!(
+            (
+                first.parse_errors,
+                first.requests_inserted,
+                first.files_changed
+            ),
+            (0, 0, 0)
+        );
         fx.append("-w-proj/s1.jsonl", &format!("{tail}\n"));
         let second = fx.run(&mut store);
-        assert_eq!((second.parse_errors, second.requests_inserted), (0, 1));
+        assert_eq!(
+            (
+                second.parse_errors,
+                second.requests_inserted,
+                second.files_changed
+            ),
+            (0, 1, 1)
+        );
     }
 
     #[test]
@@ -659,6 +677,103 @@ mod tests {
         let report = fx.run(&mut store);
         assert_eq!(report.requests_inserted, 10);
         assert_eq!(store.totals().unwrap().requests, BATCH_LINES + 10);
+        let line_numbers: Vec<u64> = store
+            .raw_records(checkpoint_after_first_batch.id, &[])
+            .unwrap()
+            .iter()
+            .map(|row| row.line_no)
+            .collect();
+        assert_eq!(line_numbers, (1..=BATCH_LINES + 10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn blank_lines_count_towards_a_batch() {
+        let fx = Fixture::new();
+        let line = |id: &str| {
+            assistant(
+                "s1",
+                id,
+                "2026-10-01T10:00:00Z",
+                "claude-opus-5-5",
+                OPUS_USAGE,
+            )
+        };
+        let path = fx.write(
+            "-w-proj/s1.jsonl",
+            &format!("{}\n\n{}\n", line("r1"), line("boom")),
+        );
+        let database = fx._temp.path().join("data.db");
+        let mut store = Store::open(&database).unwrap();
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_on_boom BEFORE INSERT ON raw_records WHEN NEW.json LIKE '%boom%'
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        let prices = PriceTable::bundled();
+        let mut ingestor = Ingestor::new(&mut store, &prices);
+        ingestor.batch_lines = 2;
+        assert!(
+            ingestor
+                .ingest_file(&TranscriptFile::from_path(&path))
+                .is_err()
+        );
+        let checkpoint = store.checkpoint(&path.to_string_lossy()).unwrap().unwrap();
+        assert_eq!(checkpoint.lines, 2);
+        assert_eq!(store.totals().unwrap().requests, 1);
+    }
+
+    #[test]
+    fn sub_second_rewrites_of_the_same_size_are_noticed() {
+        let fx = Fixture::new();
+        let a = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let path = fx.write("-w-proj/s1.jsonl", &format!("{a}\n"));
+        let second = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_791_018_000);
+        let set_mtime = |time| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap()
+        };
+        set_mtime(second);
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        fx.write("-w-proj/s1.jsonl", &format!("{}\n", a.replace("r1", "r2")));
+        set_mtime(second + std::time::Duration::from_millis(300));
+        assert_eq!(fx.run(&mut store).requests_inserted, 1);
+    }
+
+    #[test]
+    fn subagent_records_without_session_id_use_the_parent_session() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "ignored",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-haiku-4-5-20251001",
+            r#"{"input_tokens":100,"output_tokens":50}"#,
+        )
+        .replace(r#""sessionId":"ignored","#, "");
+        fx.write("-w-proj/s9/subagents/agent-a1.jsonl", &format!("{line}\n"));
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let requests = store.dump("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].starts_with(r#"Text("r1")|Text("s9")|"#),
+            "{}",
+            requests[0]
+        );
+        assert!(requests[0].ends_with(r#"|Integer(1)|Text("a1")|Null|Null|Null"#));
     }
 
     #[test]
