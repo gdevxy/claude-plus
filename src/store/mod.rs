@@ -207,51 +207,11 @@ impl Store {
     }
 
     pub fn raw_files(&self) -> Result<Vec<(i64, String)>> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, path FROM files WHERE id IN (SELECT DISTINCT file_id FROM raw_records) ORDER BY id",
-        )?;
-        let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        raw_files(&self.conn)
     }
 
     pub fn raw_records(&self, file_id: i64, kinds: &[&str]) -> Result<Vec<RawRow>> {
-        let path: String =
-            self.conn
-                .query_row("SELECT path FROM files WHERE id = ?1", [file_id], |r| {
-                    r.get(0)
-                })?;
-        let location = crate::ingest::TranscriptFile::from_path(Path::new(&path));
-        let mut sql =
-            String::from("SELECT line_no, kind, json FROM raw_records WHERE file_id = ?1");
-        if !kinds.is_empty() {
-            let placeholders = vec!["?"; kinds.len()].join(",");
-            sql.push_str(&format!(" AND kind IN ({placeholders})"));
-        }
-        sql.push_str(" ORDER BY line_no");
-        let mut statement = self.conn.prepare(&sql)?;
-        let params = std::iter::once(&file_id as &dyn rusqlite::ToSql)
-            .chain(kinds.iter().map(|kind| kind as &dyn rusqlite::ToSql));
-        let rows = statement.query_map(rusqlite::params_from_iter(params), |r| {
-            Ok(RawRow {
-                file_id,
-                line_no: r.get::<_, i64>(0)? as u64,
-                kind: r.get(1)?,
-                json: r.get(2)?,
-                project: location.project.clone(),
-                session_hint: location.session_hint.clone(),
-                agent_id: location.agent_id.clone(),
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn clear_derived(&mut self) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        for table in schema::DERIVED_TABLES {
-            tx.execute(&format!("DELETE FROM {table}"), [])?;
-        }
-        tx.commit()?;
-        Ok(())
+        raw_records(&self.conn, file_id, kinds)
     }
 
     pub fn parse_error_total(&self) -> Result<u64> {
@@ -267,6 +227,42 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0))? as u64)
     }
+}
+
+pub(crate) fn raw_files(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT id, path FROM files WHERE id IN (SELECT DISTINCT file_id FROM raw_records) ORDER BY id",
+    )?;
+    let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn raw_records(conn: &Connection, file_id: i64, kinds: &[&str]) -> Result<Vec<RawRow>> {
+    let path: String = conn.query_row("SELECT path FROM files WHERE id = ?1", [file_id], |r| {
+        r.get(0)
+    })?;
+    let location = crate::ingest::TranscriptFile::from_path(Path::new(&path));
+    let mut sql = String::from("SELECT line_no, kind, json FROM raw_records WHERE file_id = ?1");
+    if !kinds.is_empty() {
+        let placeholders = vec!["?"; kinds.len()].join(",");
+        sql.push_str(&format!(" AND kind IN ({placeholders})"));
+    }
+    sql.push_str(" ORDER BY line_no");
+    let mut statement = conn.prepare(&sql)?;
+    let params = std::iter::once(&file_id as &dyn rusqlite::ToSql)
+        .chain(kinds.iter().map(|kind| kind as &dyn rusqlite::ToSql));
+    let rows = statement.query_map(rusqlite::params_from_iter(params), |r| {
+        Ok(RawRow {
+            file_id,
+            line_no: r.get::<_, i64>(0)? as u64,
+            kind: r.get(1)?,
+            json: r.get(2)?,
+            project: location.project.clone(),
+            session_hint: location.session_hint.clone(),
+            agent_id: location.agent_id.clone(),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 #[cfg(test)]
@@ -479,15 +475,30 @@ mod tests {
         w.raw(file, 1, "assistant", "{}").unwrap();
         w.request(&request("a", 1, "m", Some(1.0))).unwrap();
         w.commit().unwrap();
-        store.clear_derived().unwrap();
-        assert_eq!(store.totals().unwrap().requests, 0);
+        let mut w = store.writer().unwrap();
+        w.clear_derived().unwrap();
         assert_eq!(
-            store.raw_files().unwrap(),
+            w.raw_files().unwrap(),
             vec![(file, "/p/proj/s1.jsonl".to_string())]
         );
-        let raw = store.raw_records(file, &["assistant"]).unwrap();
+        let raw = w.raw_records(file, &["assistant"]).unwrap();
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].project, "proj");
+        w.commit().unwrap();
+        assert_eq!(store.totals().unwrap().requests, 0);
+    }
+
+    #[test]
+    fn abandoned_clear_derived_leaves_previous_data_intact() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
+        w.request(&request("a", 1, "m", Some(1.0))).unwrap();
+        w.commit().unwrap();
+        let mut w = store.writer().unwrap();
+        w.clear_derived().unwrap();
+        drop(w);
+        assert_eq!(store.totals().unwrap().requests, 1);
     }
 
     #[test]

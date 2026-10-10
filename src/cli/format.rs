@@ -1,14 +1,18 @@
 pub fn usd(value: f64) -> String {
-    if value.abs() < 1.0 {
-        return format!("${value:.4}");
-    }
-    let rounded = format!("{:.2}", value.abs());
-    let (whole, cents) = rounded.split_once('.').unwrap_or((&rounded, "00"));
-    let sign = if value < 0.0 { "-" } else { "" };
-    format!(
-        "{sign}${}.{cents}",
-        count(whole.parse().unwrap_or_default())
-    )
+    let magnitude = value.abs();
+    let body = if (magnitude * 10_000.0).round() < 10_000.0 {
+        format!("{magnitude:.4}")
+    } else {
+        let rounded = format!("{magnitude:.2}");
+        let (whole, cents) = rounded.split_once('.').unwrap_or((&rounded, "00"));
+        format!("{}.{cents}", count(whole.parse().unwrap_or_default()))
+    };
+    let sign = if value < 0.0 && body != "0.0000" {
+        "-"
+    } else {
+        ""
+    };
+    format!("{sign}${body}")
 }
 
 pub fn count(value: u64) -> String {
@@ -46,6 +50,18 @@ mod tests {
         assert_eq!(usd(6461.78), "$6,461.78");
         assert_eq!(usd(1_234_567.0), "$1,234,567.00");
         assert_eq!(usd(-2452.26), "-$2,452.26");
+    }
+
+    #[test]
+    fn precision_is_chosen_after_rounding() {
+        assert_eq!(usd(0.99996), "$1.00");
+        assert_eq!(usd(0.99994), "$0.9999");
+    }
+
+    #[test]
+    fn negative_money_always_has_the_sign_first() {
+        assert_eq!(usd(-0.5), "-$0.5000");
+        assert_eq!(usd(-0.00001), "$0.0000");
     }
 
     #[test]

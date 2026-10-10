@@ -45,6 +45,23 @@ pub fn run() -> Result<()> {
     }
 }
 
+const LABEL_WIDTH: usize = 13;
+
+fn labeled(label: &str, value: &str) -> String {
+    format!("  {label:<LABEL_WIDTH$}{value}")
+}
+
+fn transcripts_missing(paths: &Paths) -> bool {
+    let missing = !paths.projects_dir().exists();
+    if missing {
+        println!(
+            "No Claude Code transcripts found in {}. Run Claude Code once, then try again ✻",
+            paths.projects_dir().display()
+        );
+    }
+    missing
+}
+
 fn open_store(paths: &Paths) -> Result<Store> {
     paths.ensure_data_dir()?;
     Store::open(&paths.database())

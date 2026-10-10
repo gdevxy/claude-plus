@@ -259,6 +259,21 @@ impl Writer<'_> {
         Ok(())
     }
 
+    pub fn clear_derived(&mut self) -> Result<()> {
+        for table in super::schema::DERIVED_TABLES {
+            self.tx.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        Ok(())
+    }
+
+    pub fn raw_files(&self) -> Result<Vec<(i64, String)>> {
+        super::raw_files(&self.tx)
+    }
+
+    pub fn raw_records(&self, file_id: i64, kinds: &[&str]) -> Result<Vec<super::RawRow>> {
+        super::raw_records(&self.tx, file_id, kinds)
+    }
+
     pub fn commit(self) -> Result<()> {
         self.tx.commit()?;
         Ok(())
