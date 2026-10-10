@@ -1,95 +1,92 @@
 # claude-plus - Design Spec
 
 Date: 2026-10-10
+Revision: 2 (panel moved from a tmux split to a native Claude Code mod pane)
 Status: Approved in brainstorming, pending written-spec review
 
 ## 1. Purpose
 
 Claude Code users lack visibility into what their sessions cost and why.
-claude-plus is a local terminal companion that runs Claude Code in a tmux split with a live side panel.
-The panel shows token usage, granular context composition, cache state and expiry, what-if costs, and subscription limit consumption, in dollars and in percent of the subscription windows.
+claude-plus is a local companion made of a Rust daemon and a native Claude Code mod that draws a live side pane inside Claude Code.
+The pane shows token usage, granular context composition, cache state and expiry, what-if costs, and subscription limit consumption, in dollars and in percent of the subscription windows.
 A history view and an insights engine help the user change habits that waste tokens (idle cache expiry, unused MCP servers and skills, oversized memory, large tool results, late compaction).
 
 ### Success criteria
 
-- One install command and one launch command (`claude-plus`) give a working Claude pane plus panel, with no manual config editing.
+- One install command (`claude-plus install`, after installing the binary) gives a working pane in every new Claude Code session, with no manual config editing.
 - Per-request cost matches a hand computation from the transcript usage fields to the cent.
 - Cache expiry countdown is correct within a few seconds of the true TTL.
-- The panel never slows down, blocks or breaks Claude Code, including when claude-plus itself is crashed or not running.
-- The user's existing status line keeps rendering exactly as before.
-- `claude-plus uninstall` restores `~/.claude/settings.json` byte-for-byte to its pre-install state when it was not modified in between, and otherwise removes only claude-plus entries.
+- The pane never slows down, blocks or breaks Claude Code, including when the daemon is crashed, missing or not yet installed.
+- claude-plus never edits `~/.claude/settings.json`, the status line or hooks.
+- `claude-plus uninstall` removes the mod and stops the daemon, and optionally deletes `~/.claude-plus`.
 
 ### Non-goals (v1)
 
-- Desktop GUI app or embedded terminal emulator.
+- Desktop GUI app, tmux panel or embedded terminal emulator.
 - Browser dashboard (the daemon API makes this possible later).
 - Windows support.
 - Multi-user or team aggregation.
-- Any network access, telemetry or remote token counting.
+- Any network access beyond the local Unix socket, telemetry or remote token counting.
 
 ### Audience and distribution
 
 Personal use first, shareable later.
 Targets macOS first and Linux second, on x86_64 and aarch64.
-Distributed as a single static-ish binary via a Homebrew tap and a `curl | sh` installer.
+The binary ships via a Homebrew tap and a `curl | sh` installer, the mod ships via a plugin marketplace in the same repository.
 
 ## 2. Technology
 
-- Language: Rust (stable), single binary, multiple subcommands.
-- TUI: Ratatui with the crossterm backend.
+- Daemon and CLI: Rust (stable), single binary, multiple subcommands.
 - Async runtime: Tokio.
+- HTTP over Unix socket: hyper (server side), JSON bodies with serde.
 - Storage: SQLite via rusqlite (bundled feature), WAL mode, single writer.
 - File watching: notify.
-- IPC: Unix domain socket at `~/.claude-plus/daemon.sock`, newline-delimited JSON messages.
 - Config: TOML at `~/.claude-plus/config.toml`.
-- Tests: built-in test harness, insta for snapshot tests, a tmux-driven end-to-end suite.
+- Mod: TypeScript/TSX hooks module against the Claude Code mod API (`claude-code` types, early access, verified against Claude Code 2.1.296).
+- Tests: Rust built-in harness and insta snapshots for the daemon, `claude plugin test` for the mod, `claude plugin validate` in CI.
 
 ## 3. User experience
 
-### Install and launch
+### Install and use
 
 ```
 brew install <owner>/tap/claude-plus      # or: curl -fsSL <url>/install.sh | sh
-claude-plus                               # launch
+claude-plus install                       # adds the marketplace, installs the mod, imports history
+claude                                    # the pane appears beside the conversation
 ```
 
 Subcommands:
 
 | Command | Behavior |
 |---|---|
-| `claude-plus [-- <claude args>]` | Ensure setup, ensure daemon, open Claude plus panel in tmux. Arguments after `--` (and unknown arguments) pass through to `claude`. |
-| `claude-plus setup` | Idempotent install of status line wrapper and hooks into `~/.claude/settings.json`, with backup. |
-| `claude-plus uninstall` | Remove all claude-plus entries, restore the original status line command. |
-| `claude-plus panel [--pane <id>]` | Run the panel TUI only (used inside the tmux split, or standalone). |
-| `claude-plus daemon` | Run the background daemon in the foreground (normally auto-spawned). |
-| `claude-plus statusline` | Status line wrapper invoked by Claude Code. |
-| `claude-plus hook <event>` | Hook entrypoint invoked by Claude Code. |
+| `claude-plus install` | Register the plugin marketplace and install the mod via the `claude plugin` CLI, start the daemon, kick off the history import. Idempotent. |
+| `claude-plus uninstall [--purge]` | Uninstall the mod, stop the daemon, with `--purge` delete `~/.claude-plus`. |
+| `claude-plus daemon [--ensure]` | Run the daemon in the foreground, or with `--ensure` start it detached if no live daemon answers on the socket, then return. |
+| `claude-plus import` | Backfill all transcripts with progress output (also run by the daemon in the background). |
+| `claude-plus stats [--days N]` | Print daily cost per model as a table, useful without the pane. |
 | `claude-plus reindex` | Rebuild derived tables from stored raw records. |
 | `claude-plus export --format json\|csv` | Export history. |
-| `claude-plus doctor` | Diagnose setup, daemon, tmux, parse error counts. |
+| `claude-plus doctor` | Diagnose binary, daemon, mod install, Claude Code version, transcript retention setting, parse error counts. |
 
-Launch behavior:
+### The pane
 
-- Outside tmux: create a new tmux session `claude-plus-<n>` with the Claude pane on the left and the panel on the right, then attach.
-- Inside tmux: split the current window horizontally, Claude stays in the current pane, panel opens to the right.
-- Default panel width is 60 columns, configurable, resizable with normal tmux bindings.
-- If tmux is missing, print the install command for the platform (`brew install tmux`, `apt install tmux`, ...) and offer to run it.
-- `setup` optionally adds a tmux binding (default `prefix + C`) to toggle a panel next to any pane running Claude.
+The mod opens a pane titled `claude-plus` at session start.
+Claude Code docks it as a sidebar beside the transcript when the terminal is at least 144 columns wide (110 once the user has opened it before), otherwise it waits until the user opens it with the `/plus` command, which places it at any width.
+The mod also sets a one-line status entry (`$.ui.status`) such as `$4.18 · cache 52:14 · 5h 54%`, visible even when the pane is not placed.
 
-### Panel tabs
+Four views, switched with single-key buttons `1` to `4` (the mod API allows one digit or lowercase letter per button hotkey), arrows scroll, Tab walks the elements, Esc returns to the prompt.
+Values that are estimates are prefixed with `~`, and a `?` button on a row shows its derivation.
 
-Switch with `1`-`4` or `Tab`.
-Layout adapts to 40, 60 and 100+ column widths.
-Values that are estimates are prefixed with `~`, and `?` on a row shows its derivation.
-
-1. Live: model and effort, context bar (used / window, percent), cache state (warm or cold, TTL type, countdown, hit ratio), next-turn estimates (warm, cold, alternative model), session totals (cost, tokens in and out, turns, subagents), subscription bars for 5h and 7d windows with reset time and pace forecast.
-2. Context: drill-down tree of context composition: system prompt and built-in tools, MCP tools per server, skills listing, memory and CLAUDE.md files, conversation split into tool results, user messages and assistant replies. Rows carry warnings (unused server, never-invoked skills, large tool results).
-3. History: time range 24h, 7d, 30d, 90d (left and right arrows), metric toggle `g` between dollars, tokens and percent of limit. Charts: daily cost stacked by model, cache hit ratio over time, 5h limit usage over time, top sessions and projects by cost, context growth curve of a selected session with compaction markers.
+1. Live: model and effort, context bar (used / window, percent), cache state (warm or cold, TTL type, countdown, hit ratio), next-turn estimates (warm, cold, alternative model), session totals (cost, tokens in and out, turns, subagents), subscription bars for 5h, 7d and spend windows with reset time and pace forecast.
+2. Context: drill-down of context composition from Claude Code's own breakdown (categories, memory files, MCP tools, auto-compact threshold), annotated with warnings from history (unused MCP server, never-invoked skills, large tool results). Rows expand with Enter.
+3. History: time range 24h, 7d, 30d, 90d (`r` cycles), metric toggle `g` between dollars, tokens and percent of limit. Charts drawn as Raster cells (braille and block characters): daily cost stacked by model, cache hit ratio over time, 5h limit usage over time, top sessions and projects by cost, context growth curve of the current session with compaction markers.
 4. Insights: ranked list of findings, each with evidence and estimated weekly saving in dollars and percent of limit.
+
+When the daemon is unreachable or the binary is missing, the pane still shows everything the mod receives directly (context, limits, cost, per-request usage) and a one-line notice with the fix (`brew install ...` or `claude-plus daemon --ensure`).
 
 ### Alerts
 
-Shown as a transient banner in the panel, and optionally as an OS notification (`osascript` on macOS, `notify-send` on Linux):
+Shown as a toast (`$.ui.toast`):
 
 - Cache expires in 60 seconds.
 - Pace forecast reaches 100% of the 5h window before reset.
@@ -98,80 +95,100 @@ Shown as a transient banner in the panel, and optionally as an OS notification (
 ## 4. Architecture
 
 ```
- Claude Code ──statusline JSON──▶ claude-plus statusline ──▶ (prints user's original status line)
-     │                                   │ fire-and-forget
-     ├──hook JSON──▶ claude-plus hook ───┤
-     │                                   ▼
-     └──writes──▶ ~/.claude/projects/**/*.jsonl ──watch──▶ daemon ──▶ SQLite (~/.claude-plus/data.db)
-                                                            ▲  │
-                         ~/.claude config files ──scan──────┘  │ socket: subscribe / query
-                                                               ▼
-                                                     claude-plus panel (one per Claude pane)
+ Claude Code process
+ ┌──────────────────────────────────────────────┐
+ │  claude-plus mod (TS)                        │
+ │   session.measure ─┐   turn.step / complete ─┤── POST /events ─────┐
+ │   session.usage ───┤                         │                     │
+ │   $.clock (1s) ────┴─▶ atoms ─▶ ui.render    │◀── GET /snapshot ───┤  HTTP over
+ │                         (Pane, status, toast)│                     │  Unix socket
+ └──────────────────────────────────────────────┘                     ▼
+ ~/.claude/projects/**/*.jsonl ──watch/tail──▶ claude-plus daemon (Rust) ──▶ SQLite
+ ~/.claude config files ───────────scan──────▶   (~/.claude-plus/data.db)
 ```
+
+The mod is a thin display and forwarding layer, because the mod API is early access and may change between releases.
+All computation (pricing, cache model, forecasts, limit calibration, insights, history) lives in the daemon, where it is tested in Rust.
 
 ### Units
 
-Each unit is a Rust module with a narrow public interface and is testable in isolation.
+Daemon (Rust modules, each with a narrow public interface, testable in isolation):
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
+| `paths` | Resolve `~/.claude` (honoring `CLAUDE_CONFIG_DIR`) and `~/.claude-plus` (honoring `CLAUDE_PLUS_HOME`). | none |
 | `transcript` | Parse transcript JSONL lines into typed records, tolerant of unknown fields, keeping raw JSON. | none |
 | `pricing` | Model price table (bundled plus config overrides), cost of a usage record. | none |
 | `store` | SQLite schema, migrations, writes and queries, ingestion checkpoints. | transcript |
 | `ingest` | Backfill and live tail of transcript files, resumable per file offset. | transcript, store |
-| `config_scan` | Locate and measure context sources: CLAUDE.md chain, MEMORY.md and memory files, skills listings, MCP server configs and plugins. | none |
-| `context_model` | Estimate context composition and scale it to the measured real total. | config_scan, store |
+| `config_scan` | Locate configured context sources on disk (CLAUDE.md chain, memory, skills, MCP servers, plugins) for dead-weight analysis. | paths |
+| `context_model` | Context composition for history sessions from transcript attachments, and merge of the live breakdown pushed by the mod. | store |
 | `cache_model` | Cache state, TTL, expiry, rebuild detection and cause attribution. | store |
 | `forecast` | Next-turn warm, cold and alternative-model cost estimates. | pricing, cache_model, store |
 | `limits` | Record rate-limit samples, detect resets, fit percent-per-dollar per window and model, pace forecast. | store |
 | `insights` | Rule trait plus rule set, each rule returns findings with evidence and savings. | store, pricing, limits, context_model |
-| `daemon` | Socket server, event intake, orchestration of ingest and scans, push of live snapshots. | all core units |
-| `ipc` | Message types and client used by statusline, hook and panel. | none |
-| `statusline` | Wrapper: forward input to daemon, run the user's original command with identical stdin, print its output. | ipc |
-| `hooks` | Hook entrypoint: forward event plus `$TMUX_PANE` to daemon, always exit 0 quickly. | ipc |
-| `setup` | Edit `settings.json` safely, back up, install and uninstall, tmux binding. | none |
-| `launcher` | tmux session and split orchestration, daemon spawn. | setup, ipc |
-| `tui` | Ratatui app with the four tabs, rendering from snapshots. | ipc |
+| `api` | HTTP routes over the Unix socket: `POST /events`, `GET /snapshot?session=`, `GET /history`, `GET /insights`, `GET /health`. | all core units |
+| `daemon` | Lifecycle: single instance via socket probe and lock file, detach for `--ensure`, orchestration of ingest and scans. | api, ingest |
+| `cli` | Subcommands from section 3, including `install` and `uninstall` driving the `claude plugin` CLI. | all |
+
+Mod (TypeScript, files under `mod/`):
+
+| File | Responsibility |
+|---|---|
+| `register.tsx` | Wire events: `session.start` opens the pane, registers `/plus`, starts the 1 s clock and ensures the daemon; `session.measure`, `turn.step`, `turn.complete`, `session.compact` forward to the daemon and update atoms. |
+| `client.ts` | Daemon client over `$.http.fetch` with `socketPath`, short timeouts, never throws to callers. |
+| `state.ts` | Atoms: latest snapshot, live measure, active view, daemon health. |
+| `views/*.tsx` | One file per view (live, context, history, insights) plus shared widgets (bar, sparkline raster). |
+| `format.ts` | Pure formatting of money, tokens, durations, percent. |
 
 ### Data sources
 
-1. Status line input JSON (per turn): model id and display name, context window usage and size, session cost, effort level, rate limits (`five_hour` and `seven_day` used percentage and reset time), session id, transcript path, workspace.
-2. Hook events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, Stop, SubagentStop, SessionEnd. Each carries session id and transcript path. The hook process adds `$TMUX_PANE`, which binds a session to a tmux pane.
-3. Transcripts: `~/.claude/projects/<project>/<session>.jsonl` and subagent sidechain files. Assistant records carry `message.model`, `message.usage` (input, output, cache read, cache creation split into `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, thinking tokens), timestamp, request id. User records carry tool results.
-4. Config on disk: `~/.claude/CLAUDE.md`, project CLAUDE.md chain, memory directories, `~/.claude/settings.json`, plugin and skill directories, MCP server definitions.
+1. Mod events, pushed to the daemon:
+   - `session.measure`: context usage (tokens, window, percent), rate limits (`five_hour`, `seven_day`, `spend_limit` with `percentUsed` and `resetsAt`), session cost. Fires after each main-thread turn and whenever a rate-limit window moves a whole point.
+   - `$.session.usage({ breakdown: 'full' })`: Claude Code's own context breakdown (categories, memory files, MCP tools, auto-compact threshold, last API usage), requested after each turn.
+   - `turn.step` result: per-request usage (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, model) and effort, as soon as the request completes.
+   - `turn.complete`, `session.compact`, `session.start`, `session.end`: lifecycle markers.
+2. Transcripts, tailed by the daemon: `~/.claude/projects/<project>/<session>.jsonl` and `<project>/<session>/subagents/agent-<id>.jsonl`. They supply what the mod cannot see (the 5m and 1h split of cache writes, subagent usage, tool results, injected context attachments) and all history.
+3. Config on disk, scanned by the daemon, for configured but never-loaded items.
 
-Exact field names are verified against real payloads during implementation, and the parser treats every field as optional.
+The session id from `$.session.id()` is the transcript file name, which joins mod events to transcript records.
+Mod events are the low-latency source for the Live view, and transcript records are the source of truth for money and history: when both describe the same request, the transcript record wins.
 
 ### Transcript facts verified on real data (Claude Code 2.1.296)
 
+Claude Code documents the transcript format as internal and subject to change, so the parser treats every field as optional and every unknown record type as opaque.
+
 - One API response is written as several `assistant` records, one per content block, each repeating the identical `message.usage`. Requests must be deduplicated on `requestId` (fallback `message.id`) before any cost aggregation.
+- `message.usage.cache_creation` splits cache writes into `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, and `output_tokens_details.thinking_tokens` gives thinking tokens.
 - `assistant` records carry `attributionSkill`, `attributionMcpServer`, `attributionMcpTool`, `attributionPlugin`, `effort`, `perTurnEffort` and, when limited, `quotaLimits` (`status`, `rateLimitType`, `resetsAt`).
 - `attachment` records carry the actual injected context: `skill_listing` (content, names, skillCount), `instructions` (CLAUDE.md files with path, type and content), `nested_memory`, `mcp_instructions_delta`, `deferred_tools_record` and `deferred_tools_delta` (tool schemas), `agent_listing_delta`, `environment`, `invoked_skills`.
+- `user` records carry `tool_result` blocks (`tool_use_id`, `content`, `is_error`), matched to `tool_use` blocks of assistant records for the tool name.
 - `system` records with `subtype: compact_boundary` carry `compactMetadata` (`trigger`, `preTokens`, `postTokens`).
 - `cost-state` records carry Claude Code's own per-model cost totals, used as a cross-check of the pricing module.
 - `<synthetic>` model records carry no billable usage and are skipped.
-- Subagent transcripts live in `<project>/<session-id>/subagents/agent-<id>.jsonl` and are attributed to the parent session.
+- Subagent records keep the parent `sessionId` and set `isSidechain: true`.
+- Claude Code deletes transcripts after `cleanupPeriodDays` (default 30), so the daemon's own store is the long-term history, and `doctor` reports the setting.
 
-Consequently `context_model` prefers the transcript attachments as the source of truth for what was injected, and `config_scan` is only a fallback for sessions whose transcripts predate those attachments, and for the dead-weight analysis of configured but never-loaded items.
+### Daemon lifecycle
 
-### Pane to session binding
-
-The hook process reads `$TMUX_PANE` and sends it with the session id.
-The panel is launched with `--pane <claude pane id>` and subscribes to snapshots of whichever session is currently bound to that pane.
-A new session started in the same pane (for example `/clear`) rebinds automatically.
-A panel launched without `--pane` follows the most recently active session and offers a picker (`s`).
+- The mod runs `claude-plus daemon --ensure` with `$.process.run` at session start (binary resolved from `userConfig.binaryPath`, default `claude-plus` on `PATH`), which returns at once after starting a detached daemon if none answers on the socket.
+- A daemon started by the mod's `$.process.spawn` would die with the module on reload, which is why the daemon detaches itself instead.
+- Single instance is enforced by an exclusive lock on `~/.claude-plus/daemon.lock` and a socket probe, so many concurrent sessions share one daemon.
+- The daemon stays resident and idles cheaply; `claude-plus uninstall` stops it.
 
 ### Storage schema (initial)
 
-- `raw_records(id, file_id, line_no, json)` keeps every parsed line for reindexing.
-- `files(id, path, offset, mtime, parse_errors)` holds ingestion checkpoints.
-- `sessions(id, project, cwd, started_at, ended_at, parent_session_id, pane_id)`.
-- `requests(id, session_id, ts, model, input, output, thinking, cache_read, cache_write_5m, cache_write_1h, cost_usd, is_sidechain)`, deduplicated on request id.
-- `tool_results(id, session_id, ts, tool_name, input_summary, chars, est_tokens)`.
+- `raw_records(id, file_id, line_no, kind, json)` keeps every relevant parsed line for reindexing, with `tool_result` content replaced by its length to bound size.
+- `files(id, path, offset, size, mtime, parse_errors)` holds ingestion checkpoints.
+- `sessions(id, project, cwd, started_at, last_seen_at, title)`.
+- `requests(key, session_id, ts, model, input, output, thinking, cache_read, cache_write_5m, cache_write_1h, cost_usd, is_sidechain, agent_id, skill, mcp_server, effort)`, `key` being the deduplication key.
+- `tool_uses(id, session_id, ts, name, input_chars)` and `tool_results(tool_use_id, session_id, ts, chars, is_error)`.
+- `attachments(session_id, ts, kind, chars, names)`.
+- `compactions(session_id, ts, trigger, pre_tokens, post_tokens)`.
+- `cost_states(session_id, ts, total_cost_usd, json)`.
 - `limit_samples(ts, session_id, model, window, used_pct, resets_at)`.
-- `events(ts, session_id, kind, payload)` for hook events.
-- `context_snapshots(session_id, ts, component, est_tokens)`.
-- `meta(key, value)` holds schema version and calibration parameters.
+- `live_breakdowns(session_id, ts, json)` holds the latest context breakdown pushed by the mod.
+- `meta(key, value)` holds schema version, price table version and calibration parameters.
 
 ## 5. Computation
 
@@ -179,18 +196,21 @@ A panel launched without `--pane` follows the most recently active session and o
 
 `cost = input * p_in + cache_write_5m * p_cw5 + cache_write_1h * p_cw1h + cache_read * p_cr + output * p_out`
 
-Prices come from the bundled table, keyed by model id, overridable in `config.toml`.
-An unknown model shows "price unknown" and is excluded from dollar totals with a visible count, never guessed.
-Session, project and day aggregates are sums of deduplicated request costs, with subagent requests attributed to the parent session.
-The pricing module is cross-checked against `cost-state` records in tests.
+- Prices come from the bundled table, keyed by model id (date suffixes such as `-20251001` stripped), overridable in `config.toml`.
+- Cache writes are 1.25x base input for 5m and 2x for 1h; cache reads are a per-model rate (for example $0.20/MTok on Claude Opus 5.5 and Claude Sonnet 5.5, $0.25/MTok on Claude Fable 5.1, 0.1x base input on most older models), all taken from the published pricing page when the table is built and recorded with its source date.
+- Tiered models (Claude Haiku 5.5 above 100K prompt tokens) use the tier selected by the request's total input.
+- Thinking tokens are billed as output and already included in `output_tokens`.
+- An unknown model shows "price unknown" and is excluded from dollar totals with a visible count, never guessed.
+- Session, project and day aggregates are sums of deduplicated request costs, with subagent requests attributed to the parent session.
+- The pricing module is cross-checked against `cost-state` records in tests.
 
 ### Cache state
 
 - TTL type for a session is taken from the most recent cache write (`1h` when `ephemeral_1h_input_tokens > 0`, else `5m`).
-- Expiry is `last_request_ts + ttl`, since every cache hit refreshes the TTL.
+- Expiry is `last_request_ts + ttl`, since every cache hit refreshes the TTL; the mod counts down locally from the snapshot's `expires_at` with a 1 s clock.
 - Hit ratio is `cache_read / (cache_read + cache_write + input)` over the session.
 - A rebuild is detected when a request has a large cache write and near-zero cache read relative to the previous request's prefix.
-- Cause attribution: idle gap above TTL gives "idle", a model change gives "model switch", a change of a context source file between the two requests gives "prefix changed", otherwise "unknown".
+- Cause attribution: idle gap above TTL gives "idle", a model change gives "model switch", a change of an injected context attachment between the two requests gives "prefix changed", otherwise "unknown".
 
 ### Next-turn forecast (estimate)
 
@@ -203,20 +223,18 @@ The pricing module is cross-checked against `cost-state` records in tests.
 
 ### Subscription percent (learned estimate)
 
-- Each status line update stores a `limit_samples` row per window.
-- A drop in used percent marks a reset.
-- Between consecutive samples within a window, pair the percent delta with the API-equivalent dollars spent in that interval.
-- Fit `pct_per_usd` per window and model family with a robust regression (median of ratios, outliers trimmed), stored in `meta`.
+- Each `session.measure` stores a `limit_samples` row per window.
+- A drop in used percent, or a passed `resetsAt`, marks a reset.
+- Between consecutive samples within a window, pair the percent delta with the API-equivalent dollars spent in that interval across all sessions.
+- Fit `pct_per_usd` per window and model family with a robust estimator (median of ratios, outliers trimmed), stored in `meta`.
 - Until at least 20 valid pairs exist the UI shows "calibrating".
 - Pace forecast extrapolates the current window's burn rate over the last 30 minutes to the reset time.
 
-### Context composition (estimate scaled to measured total)
+### Context composition
 
-- For each source, take its injected text from the transcript attachments (fallback: files on disk) and estimate tokens from text length with a per-kind chars-per-token ratio (prose, code, JSON schema).
-- Measured fixed total is the first request of the session's `input + cache_read + cache_write`, minus the estimated first user message.
-- Scale all fixed-component estimates by `measured / estimated_sum`.
-- The conversation component is tracked from per-turn real deltas and split by tool result sizes and message sizes.
-- Drift between estimate and measurement is shown in the Context tab.
+- Live session: Claude Code's own breakdown pushed by the mod is shown as is (exact).
+- History sessions: injected text comes from transcript attachments, tokens are estimated from text length with a per-kind chars-per-token ratio (prose, code, JSON schema), then all fixed components are scaled so they sum to the first request's measured `input + cache_read + cache_write` minus the estimated first user message.
+- The per-kind ratios are calibrated against live breakdowns whenever both exist for the same session.
 
 ## 6. Insights
 
@@ -227,40 +245,44 @@ Findings are ranked by saving.
 Initial rules:
 
 1. Idle cache rebuilds: cost of rebuilds caused by idle gaps, with the typical gap length.
-2. Unused MCP servers and tools: tokens per request versus invocation count over 14 and 30 days.
-3. Unused skills: listing tokens versus invocation count.
+2. Unused MCP servers and tools: tokens per request versus invocation count (`attributionMcpServer`, tool names) over 14 and 30 days.
+3. Unused skills: listing tokens versus invocation count (`attributionSkill`, `invoked_skills`).
 4. Oversized memory and CLAUDE.md: token size, duplicated lines across files.
 5. Large tool results: files and commands that most often inject the most tokens.
 6. Late compaction: sessions that stayed above a context threshold for many turns.
 7. Model and effort fit: short low-output tasks run on a top-tier model, repriced on a cheaper model.
-8. Mid-session cache busts: model switches, context source edits, MCP reconnects.
+8. Mid-session cache busts: model switches, context attachment changes, MCP reconnects.
 9. Cost-per-task outliers: prompt-to-stop units far above the user's median.
+10. Transcript retention: `cleanupPeriodDays` shorter than the history the user wants, suggesting a higher value.
 
 ## 7. Error handling and safety
 
-- Statusline and hook processes connect to the daemon with a 50 ms budget and never fail: on any error they continue silently, and the statusline still prints the original command's output.
-- The statusline wrapper passes the original stdin bytes unchanged to the user's original status line command and propagates its stdout.
-- If the daemon is not running, hooks do nothing and the launcher spawns it on next `claude-plus` run.
-- The panel process is isolated in its own pane, its crash does not affect Claude.
-- The transcript parser never panics on input, unknown record types are stored raw, unparsable lines are counted per file and reported by `doctor`.
-- Ingestion is resumable from per-file byte offsets, handles truncated last lines and file rotation.
-- `setup` writes `settings.json` atomically (write temp, fsync, rename), keeps a timestamped backup, preserves unrelated keys and formatting as much as practical, and records the original status line command in `~/.claude-plus/state.json`.
-- All data lives under `~/.claude-plus`, with no network access anywhere in the binary.
+- The mod never throws out of a hook: every daemon call has a 500 ms timeout and failures only set a "daemon unavailable" state.
+- Mod hooks stay far below the 10 s hook budget; long-lived work runs on `$.clock` timers started in `session.start`.
+- Forwarding to the daemon is fire-and-forget from the mod's point of view, and the pane renders from the last good snapshot.
+- The daemon parser never panics on input, unknown record types are stored raw, unparsable lines are counted per file and reported by `doctor`.
+- Ingestion is resumable from per-file byte offsets, handles a truncated last line still being written (not counted as an error, re-read later), file truncation or replacement (re-read from 0, deduplication prevents double counting) and non-UTF-8 bytes.
+- Backfill streams files and commits in batches, so memory stays bounded on gigabytes of transcripts.
+- The socket and data directory are created with user-only permissions (0700 directory, 0600 files).
+- No network access anywhere in the daemon; the mod only calls the local socket.
 
 ## 8. Testing
 
-- Unit tests per unit: pricing math, cache expiry and rebuild detection, forecast, limits regression and reset detection, context scaling, each insight rule.
-- Fixture tests: a corpus of anonymized transcripts covering subagents, compaction, model switches, 5m and 1h caches, malformed lines, with hand-computed expected costs.
-- Snapshot tests: each tab rendered with Ratatui's test backend at 40, 60 and 100 columns, compared with insta snapshots.
-- End-to-end: a scripted tmux session runs `claude-plus` against a fake `claude` binary that writes fixture transcript lines and invokes the statusline and hooks like Claude Code does, then asserts panel content via `tmux capture-pane`, countdown progression, and that setup followed by uninstall leaves `settings.json` identical.
-- CI on GitHub Actions for macOS and Linux runs fmt, clippy with warnings denied, tests, and builds release binaries for four targets.
+- Daemon unit tests per unit: pricing math, deduplication, cache expiry and rebuild detection, forecast, limits estimator and reset detection, context scaling, each insight rule.
+- Daemon fixture tests: a corpus of anonymized transcripts covering subagents, compaction, model switches, 5m and 1h caches, malformed and truncated lines, with hand-computed expected costs, plus a cross-check against `cost-state` totals.
+- API tests: the daemon started on a temporary socket, exercised with HTTP requests matching what the mod sends.
+- Mod tests with `claude plugin test`: views mounted with `$.ui.mount` against mocked snapshots at narrow and wide widths, hotkeys switching views, countdown progression with `mock.clock`, degraded rendering when the daemon client fails.
+- End-to-end: a real `claude` session with the mod loaded via `--plugin-dir` against a running daemon, checked by hand against `/context` and `/usage`, once per milestone.
+- CI on GitHub Actions for macOS and Linux runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `claude plugin validate`, `claude plugin test`, and builds release binaries for four targets.
 
 ## 9. Delivery milestones
 
-1. Core: transcript parser, pricing, store, ingest with backfill, `doctor`.
-2. Live path: daemon, IPC, statusline wrapper, hooks, setup and uninstall, launcher with tmux.
-3. Live tab: cache model, forecast, limits sampling.
-4. Context tab: config scan and context model.
-5. History tab with charts.
-6. Insights tab and alerts.
-7. Packaging: release CI, Homebrew tap, install script.
+Each milestone gets its own implementation plan and produces working, tested software.
+
+1. Core: paths, transcript parser, pricing, store, ingest with backfill, `import`, `stats`, `doctor`.
+2. Daemon and API: lifecycle with `--ensure`, live tail, HTTP over Unix socket, event intake from the mod.
+3. Mod skeleton and Live view: pane, status entry, `/plus`, forwarding, cache model, forecast, limits sampling.
+4. Context view: live breakdown, history composition, config scan.
+5. History view with raster charts.
+6. Insights view and alerts.
+7. Packaging: `install` and `uninstall`, release CI, Homebrew tap, install script, plugin marketplace.
