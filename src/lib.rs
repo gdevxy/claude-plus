@@ -1,4 +1,5 @@
 pub mod api;
+pub mod cache_model;
 pub mod cli;
 pub mod daemon;
 pub mod ingest;
