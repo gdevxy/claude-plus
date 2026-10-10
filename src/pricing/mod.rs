@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::transcript::TokenCounts;
@@ -11,10 +11,8 @@ const PER_MILLION: f64 = 1_000_000.0;
 #[derive(Debug, Clone, Deserialize)]
 pub struct PriceTable {
     version: String,
-    #[serde(default = "default_write_5m")]
-    cache_write_5m_multiplier: f64,
-    #[serde(default = "default_write_1h")]
-    cache_write_1h_multiplier: f64,
+    cache_write_5m_multiplier: Option<f64>,
+    cache_write_1h_multiplier: Option<f64>,
     #[serde(default)]
     models: BTreeMap<String, ModelPrice>,
 }
@@ -42,12 +40,14 @@ struct Rates {
     cache_read: f64,
 }
 
-fn default_write_5m() -> f64 {
-    1.25
-}
+const DEFAULT_WRITE_5M: f64 = 1.25;
+const DEFAULT_WRITE_1H: f64 = 2.0;
 
-fn default_write_1h() -> f64 {
-    2.0
+fn check_rate(name: &str, value: f64) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        bail!("{name} must be a finite non-negative rate, got {value}");
+    }
+    Ok(())
 }
 
 impl PriceTable {
@@ -56,11 +56,38 @@ impl PriceTable {
     }
 
     pub fn from_toml(source: &str) -> Result<Self> {
-        toml::from_str(source).context("invalid price table")
+        let table: Self = toml::from_str(source).context("invalid price table")?;
+        table.validate().context("invalid price table")?;
+        Ok(table)
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, multiplier) in [
+            ("cache_write_5m_multiplier", self.cache_write_5m_multiplier),
+            ("cache_write_1h_multiplier", self.cache_write_1h_multiplier),
+        ] {
+            if let Some(value) = multiplier {
+                check_rate(name, value)?;
+            }
+        }
+        for (model, price) in &self.models {
+            price.base_rates().check(model)?;
+            for tier in &price.tiers {
+                let label = format!("{model} tier above {}", tier.above_prompt_tokens);
+                tier.rates().check(&label)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn merged_with(mut self, overrides: PriceTable) -> Self {
         self.version = format!("{}+{}", self.version, overrides.version);
+        self.cache_write_5m_multiplier = overrides
+            .cache_write_5m_multiplier
+            .or(self.cache_write_5m_multiplier);
+        self.cache_write_1h_multiplier = overrides
+            .cache_write_1h_multiplier
+            .or(self.cache_write_1h_multiplier);
         self.models.extend(overrides.models);
         self
     }
@@ -84,9 +111,11 @@ impl PriceTable {
     }
 
     fn priced(&self, rates: &Rates, tokens: &TokenCounts) -> f64 {
+        let write_5m = self.cache_write_5m_multiplier.unwrap_or(DEFAULT_WRITE_5M);
+        let write_1h = self.cache_write_1h_multiplier.unwrap_or(DEFAULT_WRITE_1H);
         let usd = tokens.input as f64 * rates.input
-            + tokens.cache_write_5m as f64 * rates.input * self.cache_write_5m_multiplier
-            + tokens.cache_write_1h as f64 * rates.input * self.cache_write_1h_multiplier
+            + tokens.cache_write_5m as f64 * rates.input * write_5m
+            + tokens.cache_write_1h as f64 * rates.input * write_1h
             + tokens.cache_read as f64 * rates.cache_read
             + tokens.output as f64 * rates.output;
         usd / PER_MILLION
@@ -99,11 +128,7 @@ impl ModelPrice {
             .iter()
             .filter(|tier| prompt_tokens > tier.above_prompt_tokens)
             .max_by_key(|tier| tier.above_prompt_tokens)
-            .map(|tier| Rates {
-                input: tier.input,
-                output: tier.output,
-                cache_read: tier.cache_read,
-            })
+            .map(Tier::rates)
             .unwrap_or_else(|| self.base_rates())
     }
 
@@ -113,6 +138,29 @@ impl ModelPrice {
             output: self.output,
             cache_read: self.cache_read,
         }
+    }
+}
+
+impl Tier {
+    fn rates(&self) -> Rates {
+        Rates {
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+        }
+    }
+}
+
+impl Rates {
+    fn check(&self, label: &str) -> Result<()> {
+        for (field, value) in [
+            ("input", self.input),
+            ("output", self.output),
+            ("cache_read", self.cache_read),
+        ] {
+            check_rate(&format!("{label} {field}"), value)?;
+        }
+        Ok(())
     }
 }
 
@@ -185,6 +233,86 @@ mod tests {
             .cost("claude-haiku-5-5", &tokens(100_001, 0, 0, 0, 0))
             .unwrap();
         assert!(close(large, 100_001.0 * 0.50 / 1e6), "{large}");
+    }
+
+    #[test]
+    fn cache_read_exceptions_are_pinned() {
+        let table = PriceTable::bundled();
+        let reads = tokens(0, 0, 1_000_000, 0, 0);
+        let sonnet = table.cost("claude-sonnet-5-5", &reads).unwrap();
+        assert!(close(sonnet, 0.10), "{sonnet}");
+        let fable = table.cost("claude-fable-5-1", &reads).unwrap();
+        assert!(close(fable, 0.25), "{fable}");
+    }
+
+    #[test]
+    fn haiku_5_5_tier_counts_cache_reads_and_writes() {
+        let table = PriceTable::bundled();
+        let below = tokens(50_000, 0, 40_000, 10_000, 0);
+        let cost = table.cost("claude-haiku-5-5", &below).unwrap();
+        let base = (50_000.0 * 0.1 + 40_000.0 * 0.01 + 10_000.0 * 0.1 * 1.25) / 1e6;
+        assert!(close(cost, base), "{cost}");
+        let above = tokens(50_000, 0, 40_000, 10_001, 0);
+        let cost = table.cost("claude-haiku-5-5", &above).unwrap();
+        let tiered = (50_000.0 * 0.5 + 40_000.0 * 0.05 + 10_001.0 * 0.5 * 1.25) / 1e6;
+        assert!(close(cost, tiered), "{cost}");
+    }
+
+    #[test]
+    fn overrides_can_change_cache_write_multipliers() {
+        let overrides =
+            PriceTable::from_toml("version = \"local\"\ncache_write_1h_multiplier = 3.0\n")
+                .unwrap();
+        let table = PriceTable::bundled().merged_with(overrides);
+        let cost = table
+            .cost("claude-opus-5-5", &tokens(0, 0, 0, 1_000_000, 1_000_000))
+            .unwrap();
+        assert!(close(cost, 4.0 * 1.25 + 4.0 * 3.0), "{cost}");
+    }
+
+    #[test]
+    fn overrides_without_multipliers_keep_the_bundled_ones() {
+        let custom = PriceTable::from_toml(
+            "version = \"custom\"\ncache_write_1h_multiplier = 4.0\n[models.m]\ninput = 1\noutput = 1\ncache_read = 1\n",
+        )
+        .unwrap()
+        .merged_with(PriceTable::from_toml("version = \"local\"\n").unwrap());
+        let cost = custom.cost("m", &tokens(0, 0, 0, 0, 1_000_000)).unwrap();
+        assert!(close(cost, 4.0), "{cost}");
+    }
+
+    #[test]
+    fn invalid_rates_are_rejected() {
+        for (field, value, shown) in [
+            ("input", "-1.0", "-1"),
+            ("output", "nan", "NaN"),
+            ("cache_read", "inf", "inf"),
+        ] {
+            let source = "version = \"bad\"\n[models.m]\ninput = 1\noutput = 1\ncache_read = 1\n"
+                .replace(&format!("{field} = 1"), &format!("{field} = {value}"));
+            let error = PriceTable::from_toml(&source).unwrap_err();
+            assert_eq!(
+                format!("{error:#}"),
+                format!(
+                    "invalid price table: m {field} must be a finite non-negative rate, got {shown}"
+                )
+            );
+        }
+        let tier = "version = \"bad\"\n[models.m]\ninput = 1\noutput = 1\ncache_read = 1\n[[models.m.tiers]]\nabove_prompt_tokens = 10\ninput = 1\noutput = -2.0\ncache_read = 1\n";
+        assert_eq!(
+            format!("{:#}", PriceTable::from_toml(tier).unwrap_err()),
+            "invalid price table: m tier above 10 output must be a finite non-negative rate, got -2"
+        );
+        let multiplier = "version = \"bad\"\ncache_write_5m_multiplier = -1.0\n";
+        assert_eq!(
+            format!("{:#}", PriceTable::from_toml(multiplier).unwrap_err()),
+            "invalid price table: cache_write_5m_multiplier must be a finite non-negative rate, got -1"
+        );
+    }
+
+    #[test]
+    fn bundled_table_passes_validation() {
+        assert!(PriceTable::from_toml(BUNDLED).is_ok());
     }
 
     #[test]
