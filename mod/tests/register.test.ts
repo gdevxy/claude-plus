@@ -263,6 +263,38 @@ describe('plus mod', () => {
     expect((await ui.find({ key: 'session-step' }))?.text).toBe('  Last request      25.3k in · 800 out')
   })
 
+  test('the countdown counts from when the request was sent, not from when it ended', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { served: null })
+    on('turn.step', async function* () {
+      await clock.sleep(60_000)
+      return {
+        turnId: 't1',
+        index: 0,
+        answer: '',
+        toolUses: [],
+        stopReason: 'end_turn',
+        usage: { model: 'claude-opus-5-5', input_tokens: 12, output_tokens: 800, cache_read_input_tokens: 25_000, cache_creation_input_tokens: 300 },
+      }
+    })
+    await start($)
+    await $.session.measure(MEASURE)
+    const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', effort: 'high', messageCount: 3 })
+    const drained = (async () => {
+      let step = await stream.next()
+      while (step.done !== true) step = await stream.next()
+    })()
+    await clock.advance(60_000)
+    await drained
+    await clock.advance(1000)
+    const ui = await mount($, 40)
+    expect((await ui.find({ key: 'cache' }))?.text).toContain('58:59 left')
+    const forwarded = wiring.delivered
+      .flatMap(call => (JSON.parse(call.init?.body ?? '{}') as { events: { kind: string; ts_ms: number; data: { sent_ms?: number } }[] }).events)
+      .find(event => event.kind === 'turn.step')
+    expect([forwarded?.data.sent_ms, forwarded?.ts_ms]).toEqual([NOW_MS, NOW_MS + 60_000])
+  })
+
   test('a missing binary shows how to install it and the pane still works', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     wire(on, { exitCode: 127, down: true })

@@ -263,15 +263,17 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    const sentAt = await $.clock.now()
     const result = yield* next(e)
     const usage = result.usage
     if (usage !== null) {
       ensureTimers($)
       await follow($)
       const at = await $.clock.now()
-      await update($, local, known => ({ ...known, model: e.agentId === undefined ? e.model : known.model, step: e.agentId === undefined ? stepOf(usage, at) : known.step }))
+      await update($, local, known => ({ ...known, model: e.agentId === undefined ? e.model : known.model, step: e.agentId === undefined ? stepOf(usage, sentAt) : known.step }))
       await update($, now, () => at)
       void forward($, 'turn.step', {
+        sent_ms: sentAt,
         turnId: e.turnId,
         index: e.index,
         agentId: e.agentId ?? null,
