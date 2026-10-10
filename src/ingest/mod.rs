@@ -120,6 +120,9 @@ impl<'a> Ingestor<'a> {
                 let Ok(parsed) = parse_line(&row.json) else {
                     continue;
                 };
+                if row.retired && is_live_only(&parsed.record) {
+                    continue;
+                }
                 derive(
                     &mut writer,
                     self.prices,
@@ -244,6 +247,10 @@ impl<'a> Ingestor<'a> {
         report.files_changed = u64::from(replaced || report.lines > 0);
         Ok(report)
     }
+}
+
+fn is_live_only(record: &Record) -> bool {
+    matches!(record, Record::Attachment(_) | Record::CompactBoundary(_))
 }
 
 fn is_not_found(error: &anyhow::Error) -> bool {
@@ -1103,6 +1110,45 @@ mod tests {
         let rebuilt = reindex(&mut store);
         assert_eq!((rebuilt.requests, rebuilt.records), (3, 3));
         assert_eq!(snapshot(&store), imported);
+    }
+
+    #[test]
+    fn replaced_files_keep_one_attachment_and_one_compaction() {
+        let fx = Fixture::new();
+        let attachment = r#"{"type":"attachment","sessionId":"s1","timestamp":"2026-10-01T09:59:00Z","attachment":{"type":"skill_listing","content":"- a: b","names":["a"]}}"#;
+        let compaction = r#"{"type":"system","subtype":"compact_boundary","sessionId":"s1","timestamp":"2026-10-01T10:00:02Z","compactMetadata":{"trigger":"auto","preTokens":9,"postTokens":3}}"#;
+        let request = assistant(
+            "s1",
+            "r1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let path = fx.write(
+            "-w-proj/s1.jsonl",
+            &format!("{attachment}\n{compaction}\n{request}\n"),
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        fx.write(
+            "-w-proj/s1.jsonl",
+            &format!(
+                "{attachment}\n{compaction}\n{}\n",
+                request.replace("r1", "r2")
+            ),
+        );
+        set_mtime_offset(&path, 10);
+        fx.run(&mut store);
+        let counts = |store: &Store| {
+            (
+                store.dump("attachments").len(),
+                store.dump("compactions").len(),
+                store.totals().unwrap().requests,
+            )
+        };
+        assert_eq!(counts(&store), (1, 1, 2));
+        reindex(&mut store);
+        assert_eq!(counts(&store), (1, 1, 2));
     }
 
     #[test]

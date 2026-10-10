@@ -316,6 +316,7 @@ Initial rules:
 - Forwarding to the daemon is fire-and-forget from the mod's point of view, and the pane renders from the last good snapshot.
 - The daemon parser never panics on input, unknown record types are stored raw, unparsable lines are counted per file and reported by `doctor`.
 - Ingestion is resumable from per-file byte offsets, handles a truncated last line still being written (not counted as an error, re-read later), file truncation or replacement (the old generation is retired as `<path>#gen-<n>` with its raw records, the new content is read from 0, deduplication prevents double counting) and non-UTF-8 bytes.
+  Retired generations keep feeding requests, tool uses and tool results, while attachments and compactions come from the live generation only.
 - Backfill streams files and commits in batches, so memory stays bounded on gigabytes of transcripts.
 - The socket and data directory are created with user-only permissions (0700 directory, 0600 files).
 - No network access anywhere in the daemon; the mod only calls the local socket.

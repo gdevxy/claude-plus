@@ -77,6 +77,7 @@ pub struct RawRow {
     pub kind: String,
     pub json: String,
     pub location: Location,
+    pub retired: bool,
 }
 
 impl Store {
@@ -418,7 +419,9 @@ pub(crate) fn raw_records(conn: &Connection, file_id: i64, kinds: &[&str]) -> Re
         })
         .optional()?
         .with_context(|| format!("no transcript file with id {file_id}"))?;
-    let location = Location::from_path(Path::new(live_path(&path)));
+    let live = live_path(&path);
+    let retired = live != path;
+    let location = Location::from_path(Path::new(live));
     let mut sql = String::from("SELECT line_no, kind, json FROM raw_records WHERE file_id = ?1");
     if !kinds.is_empty() {
         let placeholders = vec!["?"; kinds.len()].join(",");
@@ -435,6 +438,7 @@ pub(crate) fn raw_records(conn: &Connection, file_id: i64, kinds: &[&str]) -> Re
             kind: r.get(1)?,
             json: r.get(2)?,
             location: location.clone(),
+            retired,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

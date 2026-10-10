@@ -164,6 +164,8 @@ impl Writer<'_> {
             "UPDATE files SET path = ?2 WHERE id = ?1",
             params![file_id, retired],
         )?;
+        self.exec("DELETE FROM attachments WHERE file_id = ?1", [file_id])?;
+        self.exec("DELETE FROM compactions WHERE file_id = ?1", [file_id])?;
         Ok(retired)
     }
 
