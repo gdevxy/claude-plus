@@ -232,7 +232,7 @@ Claude Code documents the transcript format as internal and subject to change, s
 `cost = input * p_in + cache_write_5m * p_cw5 + cache_write_1h * p_cw1h + cache_read * p_cr + output * p_out`
 
 - Prices come from the bundled table, keyed by model id (date suffixes such as `-20251001` stripped), overridable in `config.toml`.
-- Cache writes are 1.25x base input for 5m and 2x for 1h; cache reads are a per-model rate (for example $0.20/MTok on Claude Opus 5.5 and Claude Sonnet 5.5, $0.25/MTok on Claude Fable 5.1, 0.1x base input on most older models), all taken from the published pricing page when the table is built and recorded with its source date.
+- Cache writes are 1.25x base input for 5m and 2x for 1h; cache reads are a per-model rate (for example $0.20/MTok on Claude Opus 5.5, $0.10/MTok on Claude Sonnet 5.5, $0.25/MTok on Claude Fable 5.1, 0.1x base input on most older models), all taken from the published pricing page when the table is built and recorded with its source date.
 - Tiered models (Claude Haiku 5.5 above 100K prompt tokens) use the tier selected by the request's total input.
 - Thinking tokens are billed as output and already included in `output_tokens`.
 - An unknown model shows "price unknown" and is excluded from dollar totals with a visible count, never guessed.
