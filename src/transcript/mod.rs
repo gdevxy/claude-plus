@@ -179,12 +179,23 @@ mod tests {
             (Some("auto"), Some(367175), Some(19259))
         );
 
-        let cost = r#"{"type":"cost-state","sessionId":"s1","totalCostUSD":0.77,"modelUsage":{"claude-sonnet-5":{"costUSD":0.77}}}"#;
+        let cost = r#"{"type":"cost-state","sessionId":"s1","totalCostUSD":0.77,"modelUsage":{"claude-sonnet-5":{"inputTokens":3,"outputTokens":40,"thinkingTokens":9,"cacheReadInputTokens":500,"cacheCreationInputTokens":60,"costUSD":0.77},"claude-haiku-4-5":{"costUSD":0.01},"broken":7}}"#;
         let Record::CostState(c) = parse_line(cost).unwrap().record else {
             panic!()
         };
         assert_eq!(c.total_cost_usd, 0.77);
-        assert_eq!(c.per_model_usd.get("claude-sonnet-5"), Some(&0.77));
+        assert_eq!(
+            c.model_usage.get("claude-sonnet-5"),
+            Some(&ModelUsage {
+                input: 3,
+                output: 40,
+                cache_read: 500,
+                cache_write: 60,
+                cost_usd: 0.77
+            })
+        );
+        assert_eq!(c.model_usage["claude-haiku-4-5"].output, 0);
+        assert!(!c.model_usage.contains_key("broken"));
 
         let title = r#"{"type":"custom-title","sessionId":"s1","customTitle":"Refactor"}"#;
         let Record::Title(t) = parse_line(title).unwrap().record else {

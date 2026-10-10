@@ -97,6 +97,20 @@ CREATE TABLE meta (
 ALTER TABLE files ADD COLUMN head_len INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE files ADD COLUMN head_hash INTEGER NOT NULL DEFAULT 0;
 "#,
+    r#"
+CREATE TABLE adjustments (
+    session_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    cost_usd REAL,
+    PRIMARY KEY (session_id, model, ts)
+);
+CREATE INDEX adjustments_by_ts ON adjustments(ts);
+"#,
 ];
 
 pub const DERIVED_TABLES: &[&str] = &[
@@ -107,4 +121,5 @@ pub const DERIVED_TABLES: &[&str] = &[
     "compactions",
     "cost_states",
     "sessions",
+    "adjustments",
 ];

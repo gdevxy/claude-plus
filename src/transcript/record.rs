@@ -95,7 +95,16 @@ pub struct CompactRecord {
 pub struct CostStateRecord {
     pub session_id: Option<String>,
     pub total_cost_usd: f64,
-    pub per_model_usd: BTreeMap<String, f64>,
+    pub model_usage: BTreeMap<String, ModelUsage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ModelUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,13 +302,24 @@ fn compaction(raw: &Value) -> CompactRecord {
 }
 
 fn cost_state(raw: &Value) -> CostStateRecord {
-    let per_model_usd = raw
+    let count = |usage: &Value, field: &str| usage.get(field).and_then(Value::as_u64).unwrap_or(0);
+    let model_usage = raw
         .pointer("/modelUsage")
         .and_then(Value::as_object)
         .map(|models| {
             models
                 .iter()
-                .filter_map(|(model, usage)| Some((model.clone(), usage.get("costUSD")?.as_f64()?)))
+                .filter(|(_, usage)| usage.is_object())
+                .map(|(model, usage)| {
+                    let counters = ModelUsage {
+                        input: count(usage, "inputTokens"),
+                        output: count(usage, "outputTokens"),
+                        cache_read: count(usage, "cacheReadInputTokens"),
+                        cache_write: count(usage, "cacheCreationInputTokens"),
+                        cost_usd: usage.get("costUSD").and_then(Value::as_f64).unwrap_or(0.0),
+                    };
+                    (model.clone(), counters)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -309,7 +329,7 @@ fn cost_state(raw: &Value) -> CostStateRecord {
             .pointer("/totalCostUSD")
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
-        per_model_usd,
+        model_usage,
     }
 }
 

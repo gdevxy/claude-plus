@@ -1,12 +1,15 @@
+mod reconcile;
 mod schema;
 mod writer;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, TimeZone};
 use rusqlite::{Connection, OptionalExtension};
 
+pub use reconcile::Reconciliation;
 pub use writer::*;
 
 pub struct Store {
@@ -29,6 +32,7 @@ pub struct Totals {
     pub sessions: u64,
     pub requests: u64,
     pub priced_cost_usd: f64,
+    pub reconciled_usd: f64,
     pub unpriced_requests: u64,
     pub first_ts: Option<i64>,
     pub last_ts: Option<i64>,
@@ -40,6 +44,7 @@ pub struct DailyCost {
     pub model: String,
     pub requests: u64,
     pub cost_usd: f64,
+    pub reconciled_usd: f64,
     pub unpriced: u64,
 }
 
@@ -47,6 +52,7 @@ pub struct DailyCost {
 pub struct CostStateDelta {
     pub session_id: String,
     pub ours_usd: f64,
+    pub reconciled_usd: f64,
     pub claude_usd: f64,
 }
 
@@ -129,13 +135,16 @@ impl Store {
     pub fn totals(&self) -> Result<Totals> {
         Ok(self.conn.query_row(
             "SELECT (SELECT COUNT(DISTINCT session_id) FROM requests), COUNT(*), COALESCE(SUM(cost_usd), 0),
-                    SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), MIN(ts), MAX(ts) FROM requests",
+                    SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), MIN(ts), MAX(ts),
+                    (SELECT COALESCE(SUM(cost_usd), 0) FROM adjustments) FROM requests",
             [],
             |r| {
+                let reconciled_usd: f64 = r.get(6)?;
                 Ok(Totals {
                     sessions: r.get::<_, i64>(0)? as u64,
                     requests: r.get::<_, i64>(1)? as u64,
-                    priced_cost_usd: r.get(2)?,
+                    priced_cost_usd: r.get::<_, f64>(2)? + reconciled_usd,
+                    reconciled_usd,
                     unpriced_requests: r.get::<_, Option<i64>>(3)?.unwrap_or(0) as u64,
                     first_ts: r.get(4)?,
                     last_ts: r.get(5)?,
@@ -150,38 +159,38 @@ impl Store {
         until_ts: i64,
         tz: &Tz,
     ) -> Result<Vec<DailyCost>> {
-        let mut statement = self.conn.prepare(
-            "SELECT ts, model, cost_usd FROM requests WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
-        )?;
-        let mut grouped: std::collections::BTreeMap<(NaiveDate, String), DailyCost> =
-            Default::default();
-        let rows = statement.query_map([since_ts, until_ts], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<f64>>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (ts, model, cost) = row?;
-            let day = DateTime::from_timestamp(ts, 0)
-                .context("timestamp out of range")?
-                .with_timezone(tz)
-                .date_naive();
-            let entry = grouped.entry((day, model.clone())).or_insert(DailyCost {
-                day,
-                model,
-                requests: 0,
-                cost_usd: 0.0,
-                unpriced: 0,
-            });
-            entry.requests += 1;
+        let mut grouped = BTreeMap::new();
+        for (ts, model, cost) in self.costs_between("requests", since_ts, until_ts)? {
+            let day = daily_entry(&mut grouped, ts, model, tz)?;
+            day.requests += 1;
             match cost {
-                Some(usd) => entry.cost_usd += usd,
-                None => entry.unpriced += 1,
+                Some(usd) => day.cost_usd += usd,
+                None => day.unpriced += 1,
+            }
+        }
+        for (ts, model, cost) in self.costs_between("adjustments", since_ts, until_ts)? {
+            if let Some(usd) = cost {
+                let day = daily_entry(&mut grouped, ts, model, tz)?;
+                day.cost_usd += usd;
+                day.reconciled_usd += usd;
             }
         }
         Ok(grouped.into_values().collect())
+    }
+
+    fn costs_between(
+        &self,
+        table: &str,
+        since_ts: i64,
+        until_ts: i64,
+    ) -> Result<Vec<(i64, String, Option<f64>)>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT ts, model, cost_usd FROM {table} WHERE ts >= ?1 AND ts < ?2 ORDER BY ts"
+        ))?;
+        let rows = statement.query_map([since_ts, until_ts], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn unpriced_models(&self) -> Result<Vec<(String, u64)>> {
@@ -194,7 +203,8 @@ impl Store {
 
     pub fn cost_state_deltas(&self) -> Result<Vec<CostStateDelta>> {
         let mut statement = self.conn.prepare(
-            "SELECT c.session_id, (SELECT COALESCE(SUM(cost_usd), 0) FROM requests r WHERE r.session_id = c.session_id), c.total_cost_usd
+            "SELECT c.session_id, (SELECT COALESCE(SUM(cost_usd), 0) FROM requests r WHERE r.session_id = c.session_id),
+                    (SELECT COALESCE(SUM(cost_usd), 0) FROM adjustments a WHERE a.session_id = c.session_id), c.total_cost_usd
              FROM cost_states c
              WHERE NOT EXISTS (SELECT 1 FROM cost_states later WHERE later.session_id = c.session_id
                                AND (later.file_id, later.line_no) > (c.file_id, c.line_no))
@@ -204,7 +214,8 @@ impl Store {
             Ok(CostStateDelta {
                 session_id: r.get(0)?,
                 ours_usd: r.get(1)?,
-                claude_usd: r.get(2)?,
+                reconciled_usd: r.get(2)?,
+                claude_usd: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -231,6 +242,26 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0))? as u64)
     }
+}
+
+fn daily_entry<'a, Tz: TimeZone>(
+    grouped: &'a mut BTreeMap<(NaiveDate, String), DailyCost>,
+    ts: i64,
+    model: String,
+    tz: &Tz,
+) -> Result<&'a mut DailyCost> {
+    let day = DateTime::from_timestamp(ts, 0)
+        .context("timestamp out of range")?
+        .with_timezone(tz)
+        .date_naive();
+    Ok(grouped.entry((day, model.clone())).or_insert(DailyCost {
+        day,
+        model,
+        requests: 0,
+        cost_usd: 0.0,
+        reconciled_usd: 0.0,
+        unpriced: 0,
+    }))
 }
 
 pub(crate) fn raw_files(conn: &Connection) -> Result<Vec<(i64, String)>> {
@@ -483,6 +514,7 @@ mod tests {
             vec![CostStateDelta {
                 session_id: "s1".into(),
                 ours_usd: 0.75,
+                reconciled_usd: 0.0,
                 claude_usd: 0.75
             }]
         );

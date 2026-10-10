@@ -8,8 +8,8 @@ use anyhow::Result;
 
 use crate::pricing::PriceTable;
 use crate::store::{
-    AttachmentRow, CompactionRow, CostStateRow, FileProgress, RequestRow, RequestWrite, SessionRow,
-    Store, ToolResultRow, ToolUseRow, Writer,
+    AttachmentRow, CompactionRow, CostStateRow, FileProgress, Reconciliation, RequestRow,
+    RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
 };
 use crate::transcript::{Parsed, Record, parse_line, text::shrink};
 
@@ -24,7 +24,7 @@ pub const SKIPPED_RAW_KINDS: &[&str] = &[
     "atis-latch",
 ];
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct IngestReport {
     pub files_seen: u64,
     pub files_changed: u64,
@@ -35,6 +35,7 @@ pub struct IngestReport {
     pub parse_errors: u64,
     pub files_vanished: u64,
     pub failures: Vec<(String, String)>,
+    pub reconciliation: Option<Reconciliation>,
 }
 
 impl IngestReport {
@@ -87,6 +88,7 @@ impl<'a> Ingestor<'a> {
             }
             on_file(index + 1, files.len());
         }
+        report.reconciliation = Some(self.store.reconcile(self.prices)?);
         Ok(report)
     }
 
@@ -409,6 +411,26 @@ mod tests {
             (files[1].session_hint.as_str(), files[1].agent_id.as_deref()),
             ("s1", Some("a1"))
         );
+    }
+
+    #[test]
+    fn import_reconciles_with_claude_counters() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-sonnet-5-5",
+            r#"{"input_tokens":1,"output_tokens":3}"#,
+        );
+        let counter = r#"{"type":"cost-state","sessionId":"s1","totalCostUSD":0.01,"modelUsage":{"claude-sonnet-5-5":{"inputTokens":1,"outputTokens":1003}}}"#;
+        fx.write("-w-proj/s1.jsonl", &format!("{line}\n{counter}\n"));
+        let mut store = Store::open_in_memory().unwrap();
+        let report = fx.run(&mut store);
+        let reconciliation = report.reconciliation.unwrap();
+        assert_eq!(reconciliation.sessions_adjusted, 1);
+        assert!((reconciliation.adjusted_usd - 0.01).abs() < 1e-12);
+        assert!((store.totals().unwrap().reconciled_usd - 0.01).abs() < 1e-12);
     }
 
     #[test]

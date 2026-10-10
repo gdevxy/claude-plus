@@ -37,7 +37,8 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
         )
     );
 
-    let store = super::open_store(paths)?;
+    let mut store = super::open_store(paths)?;
+    let reconciliation = store.reconcile(prices)?;
     let totals = store.totals()?;
     let imported = format!(
         "{} in {} · {}",
@@ -57,15 +58,41 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
 
     let deltas = store.cost_state_deltas()?;
     let comparable: Vec<_> = deltas.iter().filter(|d| d.claude_usd > 0.0).collect();
-    let ours: f64 = comparable.iter().map(|d| d.ours_usd).sum();
+    let transcripts: f64 = comparable.iter().map(|d| d.ours_usd).sum();
     let claude: f64 = comparable.iter().map(|d| d.claude_usd).sum();
+    let reconciled: f64 = comparable
+        .iter()
+        .map(|d| d.ours_usd + d.reconciled_usd)
+        .sum();
     let cross_check = format!(
-        "{} · ours {} · Claude Code {}",
+        "{} · transcripts {} · Claude Code {} · reconciled {}",
         plural(comparable.len() as u64, "session", "sessions"),
-        usd(ours),
-        usd(claude)
+        usd(transcripts),
+        usd(claude),
+        usd(reconciled)
     );
     println!("{}", labeled("Cross-check:", &cross_check));
+    let uncounted = reconciliation.sessions_without_counter;
+    if uncounted > 0 {
+        let value = format!(
+            "{}, {} subagent output may be understated",
+            plural(
+                uncounted,
+                "session with subagents has no Claude Code counter",
+                "sessions with subagents have no Claude Code counter"
+            ),
+            if uncounted == 1 { "its" } else { "their" }
+        );
+        println!("{}", labeled("Uncounted:", &value));
+    }
+    if reconciliation.sessions_over > 0 {
+        let value = plural(
+            reconciliation.sessions_over,
+            "session where transcripts exceed Claude Code's counter",
+            "sessions where transcripts exceed Claude Code's counter",
+        );
+        println!("{}", labeled("Over:", &value));
+    }
     Ok(())
 }
 

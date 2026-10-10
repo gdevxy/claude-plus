@@ -30,10 +30,12 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
         Cell::new("Requests").set_alignment(CellAlignment::Right),
         Cell::new("Cost").set_alignment(CellAlignment::Right),
     ]);
-    let (mut total_requests, mut total_cost, mut total_unpriced) = (0, 0.0, 0);
+    let (mut total_requests, mut total_cost, mut total_reconciled, mut total_unpriced) =
+        (0, 0.0, 0.0, 0);
     for row in &rows {
         total_requests += row.requests;
         total_cost += row.cost_usd;
+        total_reconciled += row.reconciled_usd;
         total_unpriced += row.unpriced;
         table.add_row(vec![
             Cell::new(row.day.to_string()),
@@ -49,6 +51,12 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
         Cell::new(cost_text(total_cost, total_unpriced)).set_alignment(CellAlignment::Right),
     ]);
     println!("{table}");
+    if total_reconciled > 0.0 {
+        println!(
+            "  includes {} reconciled from Claude Code session counters",
+            usd(total_reconciled)
+        );
+    }
     Ok(())
 }
 

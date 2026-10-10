@@ -36,6 +36,7 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
         }
         bar.inc(1);
     }
+    writer.reconcile(prices)?;
     writer.commit()?;
     bar.finish_and_clear();
     println!(
