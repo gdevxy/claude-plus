@@ -87,7 +87,10 @@ pub fn instances(samples: &[LimitSample]) -> Vec<&[LimitSample]> {
             (a, b) => a.is_some() != b.is_some(),
         };
         let dropped = sample.used_pct + RESET_DROP_PCT < previous.used_pct;
-        if sample.window != previous.window || moved_reset || dropped {
+        let passed_reset = previous
+            .resets_at_ms
+            .is_some_and(|resets| sample.ts_ms > resets);
+        if sample.window != previous.window || moved_reset || dropped || passed_reset {
             instances.push(&samples[start..index]);
             start = index;
         }
@@ -189,6 +192,7 @@ pub fn windows(
     fits: &[Fit],
     model: Option<&str>,
     now_ms: i64,
+    reported: &[&str],
 ) -> Vec<LimitWindow> {
     let family = model.map_or("other", family);
     let mut latest: BTreeMap<&str, &[LimitSample]> = BTreeMap::new();
@@ -197,6 +201,10 @@ pub fn windows(
     }
     let mut windows: Vec<LimitWindow> = latest
         .into_values()
+        .filter(|instance| {
+            let sample = instance.last().expect("instances are never empty");
+            sample.resets_at_ms.is_some() || reported.contains(&sample.window.as_str())
+        })
         .map(|instance| {
             let sample = instance.last().expect("instances are never empty");
             let reset = sample.resets_at_ms.is_some_and(|resets| resets <= now_ms);
@@ -337,6 +345,32 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_after_the_previous_reset_time_starts_a_new_window() {
+        let samples = vec![
+            sample(0, "five_hour", 50.0, 100),
+            sample(90, "five_hour", 55.0, 100),
+            sample(120, "five_hour", 56.0, 100),
+        ];
+        let lengths: Vec<usize> = instances(&samples).iter().map(|i| i.len()).collect();
+        assert_eq!(lengths, vec![2, 1]);
+    }
+
+    #[test]
+    fn a_window_without_a_reset_time_is_shown_only_while_this_session_reports_it() {
+        let mut spend = sample(0, "spend_limit", 3.0, 0);
+        spend.resets_at_ms = None;
+        let samples = vec![sample(0, "five_hour", 50.0, 400), spend];
+        let shown = |reported: &[&str]| -> Vec<String> {
+            windows(&samples, &[], None, T0 + MINUTE, reported)
+                .into_iter()
+                .map(|w| w.window)
+                .collect()
+        };
+        assert_eq!(shown(&[]), vec!["five_hour"]);
+        assert_eq!(shown(&["spend_limit"]), vec!["five_hour", "spend_limit"]);
+    }
+
+    #[test]
     fn the_fit_pairs_point_gains_with_dollars_of_the_dominant_family() {
         let mut samples = Vec::new();
         let mut spent = Vec::new();
@@ -438,7 +472,13 @@ mod tests {
                 pct_per_usd: 0.1,
             },
         ];
-        let windows = windows(&samples, &fits, Some("claude-opus-5-5"), T0 + 200 * MINUTE);
+        let windows = windows(
+            &samples,
+            &fits,
+            Some("claude-opus-5-5"),
+            T0 + 200 * MINUTE,
+            &[],
+        );
         assert_eq!(
             windows
                 .iter()

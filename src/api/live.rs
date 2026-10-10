@@ -39,21 +39,19 @@ impl Live {
                 .as_ref()
                 .and_then(|data| data.get("model")?.as_str().map(String::from))
         });
-        let samples = limits::recent_samples(store, now_ms)?;
-        let subscription = !samples.is_empty()
-            || measured
-                .as_ref()
-                .and_then(|data| {
-                    data.get("rateLimits")?
-                        .as_array()
-                        .map(|limits| !limits.is_empty())
-                })
-                .unwrap_or(false);
+        let reported: Vec<&str> = measured
+            .as_ref()
+            .and_then(|data| data.get("rateLimits")?.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|limit| limit.get("kind")?.as_str())
+            .collect();
         let limits = limits::windows(
-            &samples,
+            &limits::recent_samples(store, now_ms)?,
             &limits::stored_fit(store)?,
             model.as_deref(),
             now_ms,
+            &reported,
         );
         let cache = cache_model::model(
             &timeline,
@@ -61,7 +59,7 @@ impl Live {
                 prices,
                 prefix_changes: &store.prefix_changes(session)?,
                 compactions: &store.compaction_times(session)?,
-                subscription,
+                subscription: !reported.is_empty(),
                 now_ms,
             },
         );

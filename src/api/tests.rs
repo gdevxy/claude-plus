@@ -317,6 +317,32 @@ fn the_cache_countdown_starts_when_the_request_was_sent() {
 }
 
 #[test]
+fn only_this_session_s_own_limits_say_it_runs_on_a_subscription() {
+    let server = Server::start();
+    let now_ms = epoch_ms(SystemTime::now());
+    let other = "22222222-2222-2222-2222-222222222222";
+    let mut metered = step(None, now_ms - 1000, 12, 0, 3000);
+    metered["session"] = json!(other);
+    server
+        .client()
+        .send_events(&json!({"events": [
+            {"session": SESSION, "kind": "session.measure", "ts_ms": now_ms - 2000, "data": {
+                "rateLimits": [{"kind": "five_hour", "percentUsed": 10, "resetsAt": "2099-01-01T00:00:00Z"}]
+            }},
+            metered
+        ]}))
+        .unwrap();
+    let cache = server.client().snapshot(other).unwrap().live.cache;
+    assert_eq!(
+        (cache.ttl, cache.ttl_source),
+        (
+            crate::cache_model::Ttl::FiveMinutes,
+            crate::cache_model::TtlSource::Assumed
+        )
+    );
+}
+
+#[test]
 fn bad_requests_are_answered_with_a_reason() {
     let server = Server::start();
     let cases = [
