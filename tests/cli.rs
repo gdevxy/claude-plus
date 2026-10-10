@@ -572,3 +572,19 @@ fn import_upgrades_an_older_database_quietly() {
         .unwrap();
     assert_eq!((version, leaked), (5, 0));
 }
+
+#[test]
+fn empty_plus_home_falls_back_to_home() {
+    let env = env();
+    let home = env._temp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    cmd(&env, &["import"])
+        .env("CLAUDE_PLUS_HOME", "")
+        .env("HOME", &home)
+        .current_dir(env._temp.path())
+        .assert()
+        .success();
+    assert!(!env._temp.path().join("data.db").exists());
+    assert!(home.join(".claude-plus/data.db").exists());
+    assert!(!env.plus.exists());
+}

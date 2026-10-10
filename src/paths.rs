@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -10,13 +11,20 @@ pub struct Paths {
 
 impl Paths {
     pub fn from_env() -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME is not set")?;
+        Self::from_vars(|name| std::env::var_os(name))
+    }
+
+    pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
+        let path = |name| {
+            var(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        let home = path("HOME").context("HOME is not set")?;
         Ok(Self::resolve(
             &home,
-            std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
-            std::env::var_os("CLAUDE_PLUS_HOME").map(PathBuf::from),
+            path("CLAUDE_CONFIG_DIR"),
+            path("CLAUDE_PLUS_HOME"),
         ))
     }
 
@@ -49,7 +57,10 @@ impl Paths {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.data_dir, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(&self.data_dir, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| {
+                    format!("cannot restrict {} to its owner", self.data_dir.display())
+                })?;
         }
         Ok(())
     }
@@ -87,6 +98,54 @@ mod tests {
         );
         assert_eq!(paths.claude_dir, PathBuf::from("/tmp/claude"));
         assert_eq!(paths.data_dir, PathBuf::from("/tmp/plus"));
+    }
+
+    fn vars<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    }
+
+    #[test]
+    fn from_vars_reads_home_and_overrides() {
+        let paths = Paths::from_vars(vars(&[
+            ("HOME", "/home/ada"),
+            ("CLAUDE_CONFIG_DIR", "/cfg"),
+            ("CLAUDE_PLUS_HOME", "/plus"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            (paths.claude_dir, paths.data_dir),
+            (PathBuf::from("/cfg"), PathBuf::from("/plus"))
+        );
+    }
+
+    #[test]
+    fn empty_overrides_count_as_unset() {
+        let paths = Paths::from_vars(vars(&[
+            ("HOME", "/home/ada"),
+            ("CLAUDE_CONFIG_DIR", ""),
+            ("CLAUDE_PLUS_HOME", ""),
+        ]))
+        .unwrap();
+        assert_eq!(paths, Paths::resolve(Path::new("/home/ada"), None, None));
+    }
+
+    #[test]
+    fn missing_or_empty_home_is_an_error() {
+        for pairs in [&[][..], &[("HOME", "")][..]] {
+            let error = Paths::from_vars(vars(pairs)).unwrap_err();
+            assert_eq!(error.to_string(), "HOME is not set");
+        }
+    }
+
+    #[test]
+    fn from_env_uses_the_process_environment() {
+        let expected = Paths::from_vars(|name| std::env::var_os(name)).unwrap();
+        assert_eq!(Paths::from_env().unwrap(), expected);
     }
 
     #[cfg(unix)]
