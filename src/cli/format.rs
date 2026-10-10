@@ -1,17 +1,23 @@
+const CENTS: usize = 2;
+const SUB_CENTS: usize = 4;
+
 pub fn usd(value: f64) -> String {
-    let magnitude = value.abs();
-    let body = if (magnitude * 10_000.0).round() < 10_000.0 {
-        format!("{magnitude:.4}")
-    } else {
-        let rounded = format!("{magnitude:.2}");
-        let (whole, cents) = rounded.split_once('.').unwrap_or((&rounded, "00"));
-        format!("{}.{cents}", count(whole.parse().unwrap_or_default()))
-    };
-    let sign = if value < 0.0 && body != "0.0000" {
-        "-"
-    } else {
-        ""
-    };
+    usd_with(value, column_decimals(&[value]))
+}
+
+pub fn column_decimals(values: &[f64]) -> usize {
+    let reaches_a_dollar = values
+        .iter()
+        .any(|value| (value.abs() * 10_000.0).round() >= 10_000.0);
+    if reaches_a_dollar { CENTS } else { SUB_CENTS }
+}
+
+pub fn usd_with(value: f64, decimals: usize) -> String {
+    let rounded = format!("{:.decimals$}", value.abs());
+    let (whole, fraction) = rounded.split_once('.').unwrap_or((&rounded, ""));
+    let body = format!("{}.{fraction}", count(whole.parse().unwrap_or_default()));
+    let is_zero = fraction.bytes().all(|b| b == b'0') && whole == "0";
+    let sign = if value < 0.0 && !is_zero { "-" } else { "" };
     format!("{sign}${body}")
 }
 
@@ -62,6 +68,20 @@ mod tests {
     fn negative_money_always_has_the_sign_first() {
         assert_eq!(usd(-0.5), "-$0.5000");
         assert_eq!(usd(-0.00001), "$0.0000");
+    }
+
+    #[test]
+    fn a_column_uses_two_decimals_once_any_value_reaches_a_dollar() {
+        assert_eq!(column_decimals(&[0.5, -0.25, 0.0]), 4);
+        assert_eq!(column_decimals(&[0.5, 1.0]), 2);
+        assert_eq!(column_decimals(&[-1.5, 0.01]), 2);
+        assert_eq!(column_decimals(&[0.99996]), 2);
+        assert_eq!(column_decimals(&[0.99994]), 4);
+        assert_eq!(column_decimals(&[]), 4);
+        assert_eq!(usd_with(0.0011, 2), "$0.00");
+        assert_eq!(usd_with(1234.5, 2), "$1,234.50");
+        assert_eq!(usd_with(2.0, 4), "$2.0000");
+        assert_eq!(usd_with(-0.001, 2), "$0.00");
     }
 
     #[test]

@@ -171,6 +171,7 @@ const STATS_TABLE: &str = "\
 │ 2026-10-02 ┆ claude-sonnet-5-5         ┆        1 ┆ $0.0045 │
 │ 2026-10-03 ┆ claude-haiku-4-5-20251001 ┆        - ┆ $0.0011 │
 │ 2026-10-03 ┆ claude-sonnet-5-5         ┆        2 ┆ $0.0112 │
+├────────────┼───────────────────────────┼──────────┼─────────┤
 │ Total      ┆                           ┆        5 ┆ $0.0812 │
 └────────────┴───────────────────────────┴──────────┴─────────┘
   includes $0.0111 reconciled from Claude Code session counters
@@ -388,7 +389,8 @@ fn stats_shows_reconciled_share() {
     let today = stdout_of(&env, &["stats", "--days", "1"]);
     assert!(
         today.ends_with(
-            "│ Total      ┆                           ┆        2 ┆ $0.0123 │
+            "├────────────┼───────────────────────────┼──────────┼─────────┤
+│ Total      ┆                           ┆        2 ┆ $0.0123 │
 └────────────┴───────────────────────────┴──────────┴─────────┘
   includes $0.0111 reconciled from Claude Code session counters
 "
@@ -640,5 +642,37 @@ fn doctor_reports_a_corrupt_database() {
             database.display()
         )),
         "{doctor}"
+    );
+}
+
+#[test]
+fn stats_columns_share_one_precision_with_aligned_decimals() {
+    let env = env();
+    write_unpriced_transcript(&env);
+    let session = "88888888-8888-8888-8888-888888888888";
+    let dir = env.claude.join("projects/-work-big");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{session}.jsonl")),
+        format!(
+            r#"{{"type":"assistant","sessionId":"{session}","timestamp":"2026-10-03T11:00:00Z","requestId":"req_big","message":{{"id":"req_big","model":"claude-opus-5-5","content":[{{"type":"text","text":"x"}}],"usage":{{"input_tokens":0,"output_tokens":100000}}}}}}"#
+        ) + "\n",
+    )
+    .unwrap();
+    assert_eq!(
+        stdout_of(&env, &["stats", "--days", "1"]),
+        "\
+┌────────────┬───────────────────────────┬──────────┬─────────────────────┐
+│ Day        ┆ Model                     ┆ Requests ┆                Cost │
+╞════════════╪═══════════════════════════╪══════════╪═════════════════════╡
+│ 2026-10-03 ┆ claude-haiku-4-5-20251001 ┆        - ┆ $0.00               │
+│ 2026-10-03 ┆ claude-mystery-9          ┆        1 ┆ $0.00 (+1 unpriced) │
+│ 2026-10-03 ┆ claude-opus-5-5           ┆        1 ┆ $2.00               │
+│ 2026-10-03 ┆ claude-sonnet-5-5         ┆        2 ┆ $0.01               │
+├────────────┼───────────────────────────┼──────────┼─────────────────────┤
+│ Total      ┆                           ┆        4 ┆ $2.01 (+1 unpriced) │
+└────────────┴───────────────────────────┴──────────┴─────────────────────┘
+  includes $0.0111 reconciled from Claude Code session counters
+"
     );
 }
