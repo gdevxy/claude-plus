@@ -2,6 +2,7 @@ mod events;
 mod reconcile;
 mod schema;
 mod session;
+mod timeline;
 mod writer;
 
 use std::collections::BTreeMap;
@@ -17,6 +18,7 @@ use crate::transcript::location::Location;
 pub use events::{EventRow, StoredEvent};
 pub use reconcile::Reconciliation;
 pub use session::{ModelTotal, SessionTotals};
+pub use timeline::{PREFIX_KINDS, RequestPoint};
 pub use writer::*;
 
 const GENERATION_MARK: &str = "#gen-";
