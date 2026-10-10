@@ -1,3 +1,4 @@
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -199,7 +200,15 @@ pub fn stop(paths: &Paths) -> Result<Stopped> {
 
 fn start(paths: &Paths) -> Result<Ensured> {
     paths.ensure_data_dir()?;
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    // SAFETY: setsid is async-signal-safe, so it may run between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::setsid()?;
+            Ok(())
+        });
+    }
+    let mut child = command
         .args(["daemon", "--detached"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

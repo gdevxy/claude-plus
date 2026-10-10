@@ -532,3 +532,17 @@ fn stop_terminates_a_daemon_that_does_not_answer() {
     assert!(log.contains(" info  SIGTERM received, stopping\n"), "{log}");
     assert!(!log.contains("shutdown requested over the socket"), "{log}");
 }
+
+#[test]
+fn an_ensured_daemon_leads_its_own_session() {
+    let env = env();
+    let _cleanup = Detached { env: &env };
+    let pid = pid_in(&stdout_of(&env, &["daemon", "--ensure"]));
+    let daemon = Pid::from_raw(pid as i32).unwrap();
+    assert_eq!(rustix::process::getsid(Some(daemon)).unwrap(), daemon);
+    assert_eq!(rustix::process::getpgid(Some(daemon)).unwrap(), daemon);
+    assert_ne!(
+        rustix::process::getsid(None).unwrap(),
+        rustix::process::getsid(Some(daemon)).unwrap()
+    );
+}

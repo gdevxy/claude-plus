@@ -31,9 +31,6 @@ pub enum Mode {
 }
 
 pub fn run(paths: &Paths, prices: PriceTable, mode: Mode, rescan_every: Duration) -> Result<()> {
-    if mode == Mode::Detached {
-        let _ = rustix::process::setsid();
-    }
     api::check_socket_path(&paths.socket())?;
     paths.ensure_data_dir()?;
     let log = Arc::new(Log::open(&paths.daemon_log(), mode == Mode::Foreground)?);
