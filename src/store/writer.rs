@@ -88,15 +88,20 @@ pub struct CostStateRow {
 }
 
 impl Writer<'_> {
+    fn exec(&self, sql: &str, params: impl rusqlite::Params) -> Result<usize> {
+        Ok(self.tx.prepare_cached(sql)?.execute(params)?)
+    }
+
     pub fn file(&mut self, path: &str, size: u64, mtime: i64) -> Result<i64> {
         let existing: Option<i64> = self
             .tx
-            .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+            .prepare_cached("SELECT id FROM files WHERE path = ?1")?
+            .query_row([path], |r| r.get(0))
             .optional()?;
         if let Some(id) = existing {
             return Ok(id);
         }
-        self.tx.execute(
+        self.exec(
             "INSERT INTO files (path, size, mtime) VALUES (?1, ?2, ?3)",
             params![path, size as i64, mtime],
         )?;
@@ -112,7 +117,7 @@ impl Writer<'_> {
         mtime: i64,
         new_parse_errors: u64,
     ) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "UPDATE files SET offset = ?2, lines = ?3, size = ?4, mtime = ?5, parse_errors = parse_errors + ?6 WHERE id = ?1",
             params![file_id, offset as i64, lines as i64, size as i64, mtime, new_parse_errors as i64],
         )?;
@@ -120,15 +125,21 @@ impl Writer<'_> {
     }
 
     pub fn reset_file(&mut self, file_id: i64) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "UPDATE files SET offset = 0, lines = 0, parse_errors = 0 WHERE id = ?1",
             [file_id],
         )?;
+        for table in ["raw_records", "attachments", "compactions", "cost_states"] {
+            self.exec(
+                &format!("DELETE FROM {table} WHERE file_id = ?1"),
+                [file_id],
+            )?;
+        }
         Ok(())
     }
 
     pub fn raw(&mut self, file_id: i64, line_no: u64, kind: &str, json: &str) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "INSERT OR REPLACE INTO raw_records (file_id, line_no, kind, json) VALUES (?1, ?2, ?3, ?4)",
             params![file_id, line_no as i64, kind, json],
         )?;
@@ -136,7 +147,7 @@ impl Writer<'_> {
     }
 
     pub fn session(&mut self, row: &SessionRow) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "INSERT INTO sessions (id, project, cwd, started_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?4)
              ON CONFLICT(id) DO UPDATE SET
                cwd = COALESCE(sessions.cwd, excluded.cwd),
@@ -152,7 +163,7 @@ impl Writer<'_> {
     }
 
     pub fn title(&mut self, session_id: &str, title: &str, is_custom: bool) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "UPDATE sessions SET title = ?2, title_is_custom = ?3 WHERE id = ?1 AND (?3 = 1 OR title_is_custom = 0)",
             params![session_id, title, is_custom],
         )?;
@@ -163,16 +174,13 @@ impl Writer<'_> {
         let t = &row.tokens;
         let stored_output: Option<i64> = self
             .tx
-            .query_row(
-                "SELECT output FROM requests WHERE key = ?1",
-                [&row.key],
-                |r| r.get(0),
-            )
+            .prepare_cached("SELECT output FROM requests WHERE key = ?1")?
+            .query_row([&row.key], |r| r.get(0))
             .optional()?;
         if stored_output.is_some_and(|output| output >= t.output as i64) {
             return Ok(RequestWrite::Unchanged);
         }
-        self.tx.execute(
+        self.exec(
             "INSERT INTO requests (key, session_id, ts, model, input, output, thinking, cache_read,
                cache_write_5m, cache_write_1h, cost_usd, is_sidechain, agent_id, skill, mcp_server, effort)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
@@ -194,7 +202,7 @@ impl Writer<'_> {
     }
 
     pub fn tool_use(&mut self, row: &ToolUseRow) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "INSERT OR IGNORE INTO tool_uses (id, session_id, ts, name, input_chars) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![row.id, row.session_id, row.ts, row.name, row.input_chars as i64],
         )?;
@@ -202,7 +210,7 @@ impl Writer<'_> {
     }
 
     pub fn tool_result(&mut self, row: &ToolResultRow) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "INSERT OR IGNORE INTO tool_results (tool_use_id, session_id, ts, chars, images, is_error) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![row.tool_use_id, row.session_id, row.ts, row.chars as i64, row.images, row.is_error],
         )?;
@@ -210,7 +218,7 @@ impl Writer<'_> {
     }
 
     pub fn attachment(&mut self, row: &AttachmentRow) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "INSERT OR REPLACE INTO attachments (file_id, line_no, session_id, ts, kind, chars, names)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![row.file_id, row.line_no as i64, row.session_id, row.ts, row.kind, row.chars as i64, serde_json::to_string(&row.names)?],
@@ -219,7 +227,7 @@ impl Writer<'_> {
     }
 
     pub fn compaction(&mut self, row: &CompactionRow) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "INSERT OR REPLACE INTO compactions (file_id, line_no, session_id, ts, trigger, pre_tokens, post_tokens)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![row.file_id, row.line_no as i64, row.session_id, row.ts, row.trigger, row.pre_tokens.map(|v| v as i64), row.post_tokens.map(|v| v as i64)],
@@ -228,7 +236,7 @@ impl Writer<'_> {
     }
 
     pub fn cost_state(&mut self, row: &CostStateRow) -> Result<()> {
-        self.tx.execute(
+        self.exec(
             "INSERT OR REPLACE INTO cost_states (file_id, line_no, session_id, total_cost_usd, json) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![row.file_id, row.line_no as i64, row.session_id, row.total_cost_usd, row.json],
         )?;

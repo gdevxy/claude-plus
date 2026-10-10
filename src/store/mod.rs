@@ -3,7 +3,7 @@ mod writer;
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -80,12 +80,20 @@ impl Store {
     fn migrated(mut conn: Connection) -> Result<Self> {
         let current: usize =
             conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? as usize;
-        let tx = conn.transaction()?;
-        for migration in &schema::MIGRATIONS[current.min(schema::MIGRATIONS.len())..] {
-            tx.execute_batch(migration)?;
+        let latest = schema::MIGRATIONS.len();
+        if current > latest {
+            bail!(
+                "database schema v{current} is newer than this claude-plus supports (v{latest}); upgrade claude-plus"
+            );
         }
-        tx.pragma_update(None, "user_version", schema::MIGRATIONS.len() as i64)?;
-        tx.commit()?;
+        if current < latest {
+            let tx = conn.transaction()?;
+            for migration in &schema::MIGRATIONS[current..] {
+                tx.execute_batch(migration)?;
+            }
+            tx.pragma_update(None, "user_version", latest as i64)?;
+            tx.commit()?;
+        }
         Ok(Self { conn })
     }
 
@@ -194,37 +202,43 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn raw_records(&self, kinds: &[&str]) -> Result<Vec<RawRow>> {
+    pub fn raw_files(&self) -> Result<Vec<(i64, String)>> {
         let mut statement = self.conn.prepare(
-            "SELECT r.file_id, r.line_no, r.kind, r.json, f.path FROM raw_records r JOIN files f ON f.id = r.file_id
-             ORDER BY r.file_id, r.line_no",
+            "SELECT id, path FROM files WHERE id IN (SELECT DISTINCT file_id FROM raw_records) ORDER BY id",
         )?;
-        let rows = statement.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)? as u64,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (file_id, line_no, kind, json, path) = row?;
-            if kinds.is_empty() || kinds.contains(&kind.as_str()) {
-                let location = crate::ingest::TranscriptFile::from_path(Path::new(&path));
-                out.push(RawRow {
-                    file_id,
-                    line_no,
-                    kind,
-                    json,
-                    project: location.project,
-                    session_hint: location.session_hint,
-                    agent_id: location.agent_id,
-                });
-            }
+        let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn raw_records(&self, file_id: i64, kinds: &[&str]) -> Result<Vec<RawRow>> {
+        let path: String =
+            self.conn
+                .query_row("SELECT path FROM files WHERE id = ?1", [file_id], |r| {
+                    r.get(0)
+                })?;
+        let location = crate::ingest::TranscriptFile::from_path(Path::new(&path));
+        let mut sql =
+            String::from("SELECT line_no, kind, json FROM raw_records WHERE file_id = ?1");
+        if !kinds.is_empty() {
+            let placeholders = vec!["?"; kinds.len()].join(",");
+            sql.push_str(&format!(" AND kind IN ({placeholders})"));
         }
-        Ok(out)
+        sql.push_str(" ORDER BY line_no");
+        let mut statement = self.conn.prepare(&sql)?;
+        let params = std::iter::once(&file_id as &dyn rusqlite::ToSql)
+            .chain(kinds.iter().map(|kind| kind as &dyn rusqlite::ToSql));
+        let rows = statement.query_map(rusqlite::params_from_iter(params), |r| {
+            Ok(RawRow {
+                file_id,
+                line_no: r.get::<_, i64>(0)? as u64,
+                kind: r.get(1)?,
+                json: r.get(2)?,
+                project: location.project.clone(),
+                session_hint: location.session_hint.clone(),
+                agent_id: location.agent_id.clone(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn clear_derived(&mut self) -> Result<()> {
@@ -449,9 +463,117 @@ mod tests {
         w.commit().unwrap();
         store.clear_derived().unwrap();
         assert_eq!(store.totals().unwrap().requests, 0);
-        let raw = store.raw_records(&["assistant"]).unwrap();
+        assert_eq!(
+            store.raw_files().unwrap(),
+            vec![(file, "/p/proj/s1.jsonl".to_string())]
+        );
+        let raw = store.raw_records(file, &["assistant"]).unwrap();
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].project, "proj");
+    }
+
+    #[test]
+    fn raw_records_filter_by_kind_in_line_order() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let file = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
+        w.raw(file, 3, "user", "{}").unwrap();
+        w.raw(file, 2, "assistant", "{}").unwrap();
+        w.raw(file, 1, "system", "{}").unwrap();
+        w.commit().unwrap();
+        let kinds = |wanted: &[&str]| -> Vec<(u64, String)> {
+            store
+                .raw_records(file, wanted)
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.line_no, r.kind))
+                .collect()
+        };
+        assert_eq!(
+            kinds(&["assistant", "user"]),
+            vec![(2, "assistant".into()), (3, "user".into())]
+        );
+        assert_eq!(kinds(&[]).len(), 3);
+    }
+
+    #[test]
+    fn reset_file_removes_rows_keyed_by_file() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let file = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
+        w.raw(file, 1, "attachment", "{}").unwrap();
+        w.attachment(&AttachmentRow {
+            file_id: file,
+            line_no: 1,
+            session_id: "s".into(),
+            ts: None,
+            kind: "k".into(),
+            chars: 1,
+            names: vec![],
+        })
+        .unwrap();
+        w.compaction(&CompactionRow {
+            file_id: file,
+            line_no: 2,
+            session_id: "s".into(),
+            ts: None,
+            trigger: None,
+            pre_tokens: None,
+            post_tokens: None,
+        })
+        .unwrap();
+        w.cost_state(&CostStateRow {
+            file_id: file,
+            line_no: 3,
+            session_id: "s".into(),
+            total_cost_usd: 1.0,
+            json: "{}".into(),
+        })
+        .unwrap();
+        w.advance_file(file, 50, 3, 50, 1, 2).unwrap();
+        w.reset_file(file).unwrap();
+        w.commit().unwrap();
+        for table in ["raw_records", "attachments", "compactions", "cost_states"] {
+            let count: i64 = store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+        let checkpoint = store.checkpoint("/p/proj/s1.jsonl").unwrap().unwrap();
+        assert_eq!((checkpoint.offset, checkpoint.lines), (0, 0));
+        assert_eq!(store.parse_error_total().unwrap(), 0);
+    }
+
+    #[test]
+    fn reopening_a_file_store_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            let mut w = store.writer().unwrap();
+            w.request(&request("r1", 1, "m", Some(1.0))).unwrap();
+            w.commit().unwrap();
+        }
+        assert_eq!(Store::open(&path).unwrap().totals().unwrap().requests, 1);
+    }
+
+    #[test]
+    fn newer_schema_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 99)
+            .unwrap();
+        let error = Store::open(&path).err().expect("must refuse").to_string();
+        assert_eq!(
+            error,
+            format!(
+                "database schema v99 is newer than this claude-plus supports (v{}); upgrade claude-plus",
+                schema::MIGRATIONS.len()
+            )
+        );
     }
 
     #[cfg(unix)]
