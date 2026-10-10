@@ -51,6 +51,18 @@ impl Paths {
         self.claude_dir.join("settings.json")
     }
 
+    pub fn socket(&self) -> PathBuf {
+        self.data_dir.join("daemon.sock")
+    }
+
+    pub fn daemon_lock(&self) -> PathBuf {
+        self.data_dir.join("daemon.lock")
+    }
+
+    pub fn daemon_log(&self) -> PathBuf {
+        self.data_dir.join("daemon.log")
+    }
+
     pub fn ensure_data_dir(&self) -> Result<()> {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
@@ -94,6 +106,14 @@ mod tests {
         assert_eq!(
             paths.settings_file(),
             PathBuf::from("/home/ada/.claude/settings.json")
+        );
+        assert_eq!(
+            [paths.socket(), paths.daemon_lock(), paths.daemon_log()],
+            [
+                PathBuf::from("/home/ada/.claude-plus/daemon.sock"),
+                PathBuf::from("/home/ada/.claude-plus/daemon.lock"),
+                PathBuf::from("/home/ada/.claude-plus/daemon.log"),
+            ]
         );
     }
 
