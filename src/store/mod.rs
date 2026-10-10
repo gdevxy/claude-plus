@@ -1,3 +1,4 @@
+mod events;
 mod reconcile;
 mod schema;
 mod writer;
@@ -12,6 +13,7 @@ use rusqlite::{
 };
 
 use crate::transcript::location::Location;
+pub use events::{EventRow, StoredEvent};
 pub use reconcile::Reconciliation;
 pub use writer::*;
 
@@ -27,6 +29,14 @@ pub struct Busy;
 #[derive(Debug, thiserror::Error)]
 #[error("database was created by a pre-release claude-plus")]
 pub struct PreRelease;
+
+#[derive(Debug, thiserror::Error)]
+#[error("schema migration step {step} (v{version}) failed: {message}")]
+pub struct MigrationFailed {
+    step: usize,
+    version: usize,
+    message: String,
+}
 
 pub struct Store {
     conn: Connection,
@@ -153,16 +163,23 @@ impl Store {
     }
 
     fn migrated(conn: Connection) -> Result<Self> {
+        Self::migrated_with(conn, schema::MIGRATIONS)
+    }
+
+    fn migrated_with(conn: Connection, migrations: &[&str]) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         let mut store = Self { conn };
         store.refuse_unsupported_schema()?;
-        while store.schema_version()? < Self::latest_schema_version() {
+        let latest = schema::version_of(migrations.len() - 1);
+        while store.schema_version()? < latest {
             let tx = begin_write(&mut store.conn)?;
-            let Some((version, sql)) = schema::next_migration(user_version(&tx)?) else {
+            let Some((version, sql)) = schema::next_migration(migrations, user_version(&tx)?)
+            else {
                 break;
             };
-            tx.execute_batch(sql)?;
+            tx.execute_batch(sql)
+                .map_err(|error| migration_failed(version, error))?;
             set_user_version(&tx, version)?;
             tx.commit().map_err(friendly)?;
         }
@@ -325,12 +342,29 @@ impl Store {
     }
 }
 
+fn migration_failed(version: usize, error: rusqlite::Error) -> anyhow::Error {
+    let message = match error {
+        rusqlite::Error::SqlInputError { msg, .. } => msg,
+        rusqlite::Error::SqliteFailure(_, Some(msg)) => msg,
+        other => other.to_string(),
+    };
+    MigrationFailed {
+        step: schema::step_of(version),
+        version,
+        message,
+    }
+    .into()
+}
+
 fn opening_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
     if error.is::<PreRelease>() {
         return anyhow::anyhow!(
             "database at {} was created by a pre-release claude-plus; delete it and run claude-plus import",
             path.display()
         );
+    }
+    if let Some(failed) = error.downcast_ref::<MigrationFailed>() {
+        return anyhow::anyhow!("cannot upgrade {}: {failed}", path.display());
     }
     match error.downcast_ref::<rusqlite::Error>() {
         Some(sqlite) if !error.is::<Busy>() => {
@@ -1021,7 +1055,7 @@ mod tests {
                 })
                 .collect();
             for open in opens {
-                assert_eq!(open.join().unwrap().unwrap(), 7);
+                assert_eq!(open.join().unwrap().unwrap(), 8);
             }
         });
     }
@@ -1052,10 +1086,58 @@ mod tests {
     }
 
     #[test]
-    fn a_new_store_starts_at_the_first_released_version() {
+    fn a_new_store_is_at_the_latest_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 7);
-        assert_eq!(Store::latest_schema_version(), 7);
+        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(Store::latest_schema_version(), 8);
+    }
+
+    #[test]
+    fn a_first_release_store_is_upgraded_in_place() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            let mut store = Store::migrated_with(conn, &schema::MIGRATIONS[..1]).unwrap();
+            assert_eq!(store.schema_version().unwrap(), 7);
+            let mut w = store.writer().unwrap();
+            w.request(&request("r1", 1, "m", Some(1.0))).unwrap();
+            w.commit().unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.totals().unwrap().requests, 1);
+        assert_eq!(store.dump("events"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_failing_migration_names_its_step_without_repeating_the_sql() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        let broken = [
+            schema::MIGRATIONS[0],
+            schema::MIGRATIONS[1],
+            "CREATE TABLE files (id INTEGER PRIMARY KEY);",
+        ];
+        let error = Store::migrated_with(Connection::open(&path).unwrap(), &broken)
+            .err()
+            .expect("must fail");
+        assert_eq!(
+            error.to_string(),
+            "schema migration step 3 (v9) failed: table files already exists"
+        );
+        assert_eq!(
+            opening_error(&path, error).to_string(),
+            format!(
+                "cannot upgrade {}: schema migration step 3 (v9) failed: table files already exists",
+                path.display()
+            )
+        );
+        let version: i64 = Connection::open(&path)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
     }
 
     #[test]

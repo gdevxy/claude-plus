@@ -1,6 +1,7 @@
 pub const PRE_RELEASE_VERSIONS: std::ops::RangeInclusive<usize> = 1..=6;
 
-pub const MIGRATIONS: &[&str] = &[r#"
+pub const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE files (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -109,15 +110,31 @@ CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-"#];
+"#,
+    r#"
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ts_ms INTEGER NOT NULL,
+    received_ms INTEGER NOT NULL,
+    json TEXT NOT NULL
+);
+CREATE INDEX events_by_session_kind ON events(session_id, kind, ts_ms);
+"#,
+];
 
 pub fn version_of(index: usize) -> usize {
     PRE_RELEASE_VERSIONS.end() + index + 1
 }
 
-pub fn next_migration(version: usize) -> Option<(usize, &'static str)> {
+pub fn next_migration<'a>(migrations: &[&'a str], version: usize) -> Option<(usize, &'a str)> {
     let index = version.saturating_sub(*PRE_RELEASE_VERSIONS.end());
-    MIGRATIONS.get(index).map(|sql| (version_of(index), *sql))
+    migrations.get(index).map(|sql| (version_of(index), *sql))
+}
+
+pub fn step_of(version: usize) -> usize {
+    version - PRE_RELEASE_VERSIONS.end()
 }
 
 pub const DERIVED_TABLES: &[&str] = &[
