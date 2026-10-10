@@ -300,3 +300,24 @@ fn a_missing_daemon_is_reported_as_not_running() {
         format!("no claude-plus daemon is listening on {}", socket.display())
     );
 }
+
+#[test]
+fn snapshots_are_refused_while_the_store_is_being_rebuilt() {
+    let server = Server::start();
+    server.client().import().unwrap();
+    let mut store = Store::open(&server.temp.path().join("data.db")).unwrap();
+    let mut writer = store.writer().unwrap();
+    writer.mark_reindex_pending(true).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(
+        server.raw(Method::GET, &format!("/snapshot?session={SESSION}"), ""),
+        (503, json!({"error": "the store is being rebuilt"}))
+    );
+    assert!(server.client().health().unwrap().ingest.rebuilding);
+    server.client().import().unwrap();
+    assert!(!server.client().health().unwrap().ingest.rebuilding);
+    assert_eq!(
+        server.client().snapshot(SESSION).unwrap().totals.requests,
+        1
+    );
+}

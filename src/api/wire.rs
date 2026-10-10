@@ -28,6 +28,8 @@ pub struct IngestHealth {
     pub progress: Option<Progress>,
     pub watching: bool,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub rebuilding: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -32,6 +32,7 @@ use wire::{
 
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_SOCKET_PATH: usize = if cfg!(target_os = "linux") { 107 } else { 103 };
+pub const REBUILDING: &str = "the store is being rebuilt";
 const DRAIN: Duration = Duration::from_secs(2);
 const ROUTES: &[(&str, Method)] = &[
     ("/health", Method::GET),
@@ -222,8 +223,14 @@ fn health(state: &State) -> Health {
                 .map(|(done, total)| Progress { done, total }),
             watching: state.watching.load(Ordering::Relaxed),
             last_error: status.last_error,
+            rebuilding: rebuilding(state),
         },
     }
+}
+
+fn rebuilding(state: &State) -> bool {
+    let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+    reader.reindex_pending().unwrap_or(false)
 }
 
 async fn snapshot(state: Arc<State>, query: Option<&str>) -> Reply {
@@ -241,15 +248,19 @@ async fn snapshot(state: Arc<State>, query: Option<&str>) -> Reply {
     if !events::is_session_id(&session) {
         return failure(StatusCode::BAD_REQUEST, events::SESSION_RULE);
     }
-    let built = tokio::task::spawn_blocking(move || -> Result<Snapshot> {
+    let built = tokio::task::spawn_blocking(move || -> Result<Option<Snapshot>> {
         let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+        if reader.reindex_pending()? {
+            return Ok(None);
+        }
         let totals = reader.session_totals(&session)?;
         let measure = reader.latest_event(&session, MEASURE_KIND)?;
-        Snapshot::of(&session, totals, measure, epoch_ms(SystemTime::now()))
+        Snapshot::of(&session, totals, measure, epoch_ms(SystemTime::now())).map(Some)
     })
     .await;
     match built {
-        Ok(Ok(snapshot)) => json(StatusCode::OK, &snapshot),
+        Ok(Ok(Some(snapshot))) => json(StatusCode::OK, &snapshot),
+        Ok(Ok(None)) => failure(StatusCode::SERVICE_UNAVAILABLE, REBUILDING),
         Ok(Err(error)) => failure(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
         Err(error) => failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }

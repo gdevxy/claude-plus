@@ -39,31 +39,44 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
             &format!("bundled prices {}", prices.version())
         )
     );
-    println!("{}", labeled("Daemon:", &daemon(paths)));
+    let (line, status) = daemon(paths);
+    println!("{}", labeled("Daemon:", &line));
 
     match readable_store(paths)? {
-        Some(store) => print_database(&store),
+        Some(store) => print_database(&store, &status),
         None => Ok(()),
     }
 }
 
-fn daemon(paths: &Paths) -> String {
+fn daemon(paths: &Paths) -> (String, Status) {
     if let Some(problem) = api::socket_path_problem(&paths.socket()) {
-        return format!("cannot run, {problem}");
+        return (format!("cannot run, {problem}"), Status::NotRunning);
     }
-    match control::status(paths) {
-        Ok(Status::Running(health)) => format!(
+    let status = match control::status(paths) {
+        Ok(status) => status,
+        Err(error) => return (format!("{error:#}"), Status::NotRunning),
+    };
+    let line = match &status {
+        Status::Running(health) => format!(
             "running · pid {} · up {}",
             health.pid,
             duration(health.uptime_s)
         ),
-        Ok(Status::NotRunning) => "not running, start it with claude-plus daemon --ensure".into(),
-        Ok(Status::Unresponsive { pid }) => format!(
+        Status::NotRunning => "not running, start it with claude-plus daemon --ensure".into(),
+        Status::Unresponsive { pid } => format!(
             "{} does not answer, see {}",
             pid.map_or("the lock holder".to_string(), |pid| format!("pid {pid}")),
             paths.daemon_log().display()
         ),
-        Err(error) => format!("{error:#}"),
+    };
+    (line, status)
+}
+
+fn reindex_state(pending: bool, daemon: &Status) -> Option<&'static str> {
+    match daemon {
+        _ if !pending => None,
+        Status::Running(health) if health.ingest.rebuilding => Some("running in the daemon"),
+        _ => Some("interrupted, the next import finishes it"),
     }
 }
 
@@ -92,7 +105,7 @@ fn readable_store(paths: &Paths) -> Result<Option<Store>> {
     Ok(Some(store))
 }
 
-fn print_database(store: &Store) -> Result<()> {
+fn print_database(store: &Store, daemon: &Status) -> Result<()> {
     let reconciliation = store.reconciliation_summary()?;
     let totals = store.totals()?;
     let files = store.file_counts()?;
@@ -111,11 +124,8 @@ fn print_database(store: &Store) -> Result<()> {
         )
     );
     println!("{}", labeled("Imported:", &imported));
-    if store.reindex_pending()? {
-        println!(
-            "{}",
-            labeled("Reindex:", "interrupted, the next import finishes it")
-        );
+    if let Some(state) = reindex_state(store.reindex_pending()?, daemon) {
+        println!("{}", labeled("Reindex:", state));
     }
     let unpriced_requests = store.unpriced_models()?;
     for (model, requests) in &unpriced_requests {
@@ -194,4 +204,47 @@ fn retention(paths: &Paths) -> (String, Option<&'static str>) {
     };
     let hint = (days <= DEFAULT_RETENTION_DAYS).then_some(RETENTION_HINT);
     (value, hint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::wire::{Health, IngestHealth};
+
+    fn running(rebuilding: bool) -> Status {
+        Status::Running(Health {
+            v: 1,
+            version: "0.1.0".into(),
+            schema: 8,
+            pid: 42,
+            uptime_s: 1,
+            claude_dir: "/c".into(),
+            ingest: IngestHealth {
+                lag_ms: 0,
+                backlog: 0,
+                last_ingest_ms: None,
+                progress: None,
+                watching: true,
+                last_error: None,
+                rebuilding,
+            },
+        })
+    }
+
+    #[test]
+    fn a_pending_reindex_is_running_in_an_answering_daemon_and_interrupted_otherwise() {
+        assert_eq!(reindex_state(false, &running(false)), None);
+        assert_eq!(
+            reindex_state(true, &running(true)),
+            Some("running in the daemon")
+        );
+        assert_eq!(
+            reindex_state(true, &Status::NotRunning),
+            Some("interrupted, the next import finishes it")
+        );
+        assert_eq!(
+            reindex_state(true, &Status::Unresponsive { pid: Some(7) }),
+            Some("interrupted, the next import finishes it")
+        );
+    }
 }
