@@ -1,7 +1,7 @@
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use super::record::ATTACHMENT_METADATA_KEYS;
-use super::text::{SHRUNK_KEY, is_label, shrink};
+use super::text::{is_label, is_shrunk, shrink, shrunk};
 
 pub const RAW_STRING_LIMIT: usize = 2048;
 pub const TOOL_INPUT_LIMIT: usize = 256;
@@ -86,7 +86,8 @@ fn redact_fields(record: &mut Map<String, Value>, fields: &[&str], kept: &[&str]
 
 fn lengths(value: &Value, kept: &[&str]) -> Value {
     match value {
-        Value::String(s) => json!({ SHRUNK_KEY: s.chars().count() }),
+        Value::String(s) => shrunk(s),
+        shrunk_marker if is_shrunk(shrunk_marker) => shrunk_marker.clone(),
         Value::Array(items) => Value::Array(items.iter().map(|item| lengths(item, kept)).collect()),
         Value::Object(map) => Value::Object(
             map.iter()
@@ -107,6 +108,7 @@ fn lengths(value: &Value, kept: &[&str]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transcript::text::NON_PROMPT_PREFIXES;
     use crate::transcript::{Record, parse_value};
     use serde_json::json;
 
@@ -161,15 +163,32 @@ mod tests {
         json!({"type":"last-prompt","sessionId":"s1","lastPrompt":secret(10)})
     }
 
+    fn tooling_messages() -> Vec<Value> {
+        NON_PROMPT_PREFIXES
+            .iter()
+            .flat_map(|prefix| {
+                let body = format!("\n{prefix}>{}", secret(20));
+                [
+                    json!({"type":"user","sessionId":"s1","message":{"role":"user","content":body}}),
+                    json!({"type":"user","sessionId":"s1","message":{"role":"user","content":[
+                        {"type":"text","text":body}
+                    ]}}),
+                ]
+            })
+            .collect()
+    }
+
     fn samples() -> Vec<Value> {
-        vec![
+        let mut samples = vec![
             assistant(),
             user_with_tool_results(),
             prompt(),
             attachment(),
             system(),
             last_prompt(),
-        ]
+        ];
+        samples.extend(tooling_messages());
+        samples
     }
 
     #[test]
@@ -230,6 +249,26 @@ mod tests {
     }
 
     #[test]
+    fn tooling_markers_survive_redaction() {
+        let redacted = redact(&tooling_messages()[0]);
+        assert_eq!(
+            redacted["message"]["content"],
+            json!({"$chars": 40, "$prefix": "<task-notification"})
+        );
+    }
+
+    #[test]
+    fn prompt_classification_survives_redaction() {
+        assert!(derived(prompt()) == derived(redact(&prompt())));
+        for message in tooling_messages() {
+            let Derived::User(_, _, is_prompt) = derived(redact(&message)) else {
+                panic!("{message}");
+            };
+            assert!(!is_prompt, "{message}");
+        }
+    }
+
+    #[test]
     fn redaction_is_idempotent() {
         for sample in samples() {
             let once = redact(&sample);
@@ -243,7 +282,7 @@ mod tests {
             Vec<crate::transcript::ToolUse>,
             crate::transcript::TokenCounts,
         ),
-        User(Vec<crate::transcript::ToolResult>, u64),
+        User(Vec<crate::transcript::ToolResult>, u64, bool),
         Attachment(String, u64, Vec<String>),
         Other(String),
     }
@@ -251,7 +290,7 @@ mod tests {
     fn derived(value: Value) -> Derived {
         match parse_value(value).unwrap().record {
             Record::Assistant(a) => Derived::Assistant(a.tool_uses, a.usage),
-            Record::User(u) => Derived::User(u.tool_results, u.text_chars),
+            Record::User(u) => Derived::User(u.tool_results, u.text_chars, u.is_prompt),
             Record::Attachment(a) => Derived::Attachment(a.kind, a.chars, a.names),
             other => Derived::Other(other.kind().to_string()),
         }

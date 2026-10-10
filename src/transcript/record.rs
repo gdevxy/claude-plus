@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::TokenCounts;
-use super::text::{string_chars, string_chars_except};
+use super::text::{leading_text, non_prompt_prefix, string_chars, string_chars_except};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -113,14 +113,6 @@ pub struct TitleRecord {
     pub title: String,
     pub is_custom: bool,
 }
-
-const NON_PROMPT_PREFIXES: &[&str] = &[
-    "<task-notification",
-    "<command-",
-    "<local-command",
-    "<system-reminder",
-    "[Request interrupted",
-];
 
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
@@ -274,7 +266,7 @@ fn user(raw: &Value) -> UserRecord {
         && !flag("/isVisibleInTranscriptOnly")
         && tool_results.is_empty()
         && text_chars > 0
-        && !starts_with_non_prompt_prefix(&first_text(raw));
+        && non_prompt_prefix(first_text(raw)).is_none();
     UserRecord {
         common: common(raw),
         is_prompt,
@@ -391,21 +383,15 @@ fn field_of_each(value: &Value, array: &str, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn starts_with_non_prompt_prefix(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    NON_PROMPT_PREFIXES
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
-}
-
-fn first_text(raw: &Value) -> String {
+fn first_text(raw: &Value) -> &str {
     match raw.pointer("/message/content") {
-        Some(Value::String(s)) => s.clone(),
-        _ => blocks(raw)
+        Some(Value::Array(_)) => blocks(raw)
             .find(|block| text(block, "/type").as_deref() == Some("text"))
-            .and_then(|block| text(block, "/text"))
-            .unwrap_or_default(),
+            .and_then(|block| block.get("text"))
+            .and_then(leading_text),
+        content => content.and_then(leading_text),
     }
+    .unwrap_or_default()
 }
 
 fn result_chars(content: &Value) -> u64 {

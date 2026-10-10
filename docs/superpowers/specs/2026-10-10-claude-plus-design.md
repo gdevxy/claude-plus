@@ -227,6 +227,7 @@ Claude Code documents the transcript format as internal and subject to change, s
   - Tool result content, text and thinking blocks, user prompts, tool results echoed in `toolUseResult` and `mcpMeta`, peer message bodies, system message content and attachment content become `{"$chars": n}`, so derived character counts stay exact.
   - Strings in `tool_use.input` and its `wireToolInputs` copy keep up to 256 bytes, so file paths and commands survive, and attachment names and paths are kept.
   - Any other string longer than 2,048 bytes becomes `{"$chars": n}`.
+  - A shrunk string that starts with a tooling marker such as `<command-` or `<task-notification` keeps that marker as `"$prefix"`, so prompt classification survives redaction.
   - A store written before these rules is rewritten once on first open after the upgrade, then compacted.
   - A migration that changes how rows are derived marks the store, and the next import rebuilds the derived tables from raw records before reading new lines.
 - `files(id, path, offset, size, mtime, parse_errors)` holds ingestion checkpoints.

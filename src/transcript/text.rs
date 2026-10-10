@@ -1,6 +1,47 @@
 use serde_json::{Map, Value, json};
 
 pub const SHRUNK_KEY: &str = "$chars";
+pub const PREFIX_KEY: &str = "$prefix";
+
+pub const NON_PROMPT_PREFIXES: &[&str] = &[
+    "<task-notification",
+    "<command-",
+    "<local-command",
+    "<system-reminder",
+    "[Request interrupted",
+];
+
+pub fn non_prompt_prefix(text: &str) -> Option<&'static str> {
+    let trimmed = text.trim_start();
+    NON_PROMPT_PREFIXES
+        .iter()
+        .find(|prefix| trimmed.starts_with(**prefix))
+        .copied()
+}
+
+pub fn shrunk(text: &str) -> Value {
+    let length = text.chars().count();
+    match non_prompt_prefix(text) {
+        Some(prefix) => json!({ SHRUNK_KEY: length, PREFIX_KEY: prefix }),
+        None => json!({ SHRUNK_KEY: length }),
+    }
+}
+
+pub fn is_shrunk(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|map| shrunk_length(map).is_some())
+}
+
+pub fn leading_text(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(text) => Some(text),
+        Value::Object(map) if shrunk_length(map).is_some() => {
+            map.get(PREFIX_KEY).and_then(Value::as_str)
+        }
+        _ => None,
+    }
+}
 
 pub fn string_chars(value: &Value) -> u64 {
     match value {
@@ -39,7 +80,7 @@ pub fn is_label(value: &Value) -> bool {
 
 pub fn shrink(value: &Value, max_len: usize) -> Value {
     match value {
-        Value::String(s) if s.len() > max_len => json!({ SHRUNK_KEY: s.chars().count() }),
+        Value::String(s) if s.len() > max_len => shrunk(s),
         Value::Array(items) => {
             Value::Array(items.iter().map(|item| shrink(item, max_len)).collect())
         }
@@ -53,7 +94,10 @@ pub fn shrink(value: &Value, max_len: usize) -> Value {
 }
 
 fn shrunk_length(map: &Map<String, Value>) -> Option<u64> {
-    if map.len() == 1 {
+    let marker_only = map
+        .iter()
+        .all(|(key, value)| key == SHRUNK_KEY || (key == PREFIX_KEY && value.is_string()));
+    if marker_only {
         map.get(SHRUNK_KEY)?.as_u64()
     } else {
         None
