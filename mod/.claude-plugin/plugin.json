@@ -1,0 +1,21 @@
+{
+  "name": "plus",
+  "version": "0.1.0",
+  "description": "Token usage, context, cache and cost in a pane beside the conversation",
+  "author": { "name": "Gabriel Dinant" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "binaryPath": {
+      "type": "string",
+      "title": "claude-plus binary",
+      "description": "The claude-plus command the pane starts its daemon with",
+      "default": "claude-plus"
+    },
+    "animations": {
+      "type": "boolean",
+      "title": "Animations",
+      "description": "Let the cache heartbeat breathe and numbers ease to new values",
+      "default": true
+    }
+  }
+}

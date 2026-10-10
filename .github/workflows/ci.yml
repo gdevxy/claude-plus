@@ -22,3 +22,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - run: cargo check --locked --all-targets
+  mod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: curl -fsSL https://claude.ai/install.sh | bash -s 2.1.296
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: claude plugin validate mod
+      - run: claude plugin test mod
+      - run: npx --yes -p typescript@6.0.3 tsc -p mod-dev/tsconfig.json
