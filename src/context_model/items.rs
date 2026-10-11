@@ -7,6 +7,7 @@ use super::ratios::{Ratios, TextKind};
 use crate::config_scan::{Loading, Scan, Scope, Source, SourceKind};
 
 pub const MAX_ITEMS: usize = 100;
+pub const FIXED_SKILL_SOURCES: &[&str] = &["built-in", "mcp"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,10 +80,18 @@ pub fn sized(items: &[Item]) -> Vec<Item> {
         .collect()
 }
 
-pub fn dead_weight(items: &[Item]) -> Vec<Item> {
+pub fn dead_weight(items: &[Item], breakdown: Option<&Breakdown>) -> Vec<Item> {
+    let fixed: Vec<&str> = breakdown
+        .map(|b| &b.skills[..])
+        .unwrap_or_default()
+        .iter()
+        .filter(|skill| FIXED_SKILL_SOURCES.contains(&skill.source.as_str()))
+        .map(|skill| skill.name.as_str())
+        .collect();
     items
         .iter()
         .filter(|item| item.tokens > 0 && item.uses_14d == Some(0))
+        .filter(|item| !(item.kind == ItemKind::Skill && fixed.contains(&item.name.as_str())))
         .cloned()
         .collect()
 }
@@ -421,7 +430,7 @@ mod tests {
         );
         assert_eq!(sized(&all).len(), 7);
         assert_eq!(
-            rows(&dead_weight(&all)),
+            rows(&dead_weight(&all, Some(&breakdown))),
             vec![(ItemKind::Skill, "tidy", None, 300, false, Some(0), Some(0))]
         );
     }
@@ -462,7 +471,7 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(dead_weight(&all).len(), 1);
+        assert_eq!(dead_weight(&all, None).len(), 1);
     }
 }
 #[cfg(test)]
@@ -526,7 +535,50 @@ mod naming {
                 ("spring-boot-4-migration-skill", Some(3)),
             ]
         );
-        assert!(dead_weight(&all).is_empty());
+        assert!(dead_weight(&all, None).is_empty());
+    }
+
+    fn listing(skills: Vec<Entry>) -> Breakdown {
+        Breakdown {
+            ts_ms: 1,
+            model: String::new(),
+            total_tokens: 0,
+            max_tokens: 0,
+            percentage: 0.0,
+            auto_compact_threshold: None,
+            categories: vec![],
+            memory_files: vec![],
+            mcp_tools: vec![],
+            agents: vec![],
+            skills,
+            skills_total: 0,
+            skills_included: 0,
+        }
+    }
+
+    #[test]
+    fn skills_the_person_cannot_remove_are_never_dead_weight() {
+        let entry = |name: &str, source: &str| Entry {
+            name: name.into(),
+            source: source.into(),
+            plugin: None,
+            tokens: 50,
+        };
+        let breakdown = listing(vec![
+            entry("init", "built-in"),
+            entry("docs-search", "mcp"),
+            entry("tidy", "userSettings"),
+        ]);
+        let all = items(
+            Some(&breakdown),
+            &Scan::default(),
+            &Ratios::default(),
+            &Uses::default(),
+        );
+        assert_eq!(
+            named(&dead_weight(&all, Some(&breakdown))),
+            vec![("tidy", Some(0))]
+        );
     }
 
     #[test]

@@ -105,6 +105,7 @@ pub fn read(store: &Store, request: &Request) -> Result<ContextReport> {
         recent_tools: store.mcp_tool_uses_since(since)?,
     };
     let all = items::items(live.as_ref(), request.scan, &ratios, &uses);
+    let dead_weight = items::dead_weight(&all, live.as_ref());
     let tool_results = store
         .largest_tool_results(
             session,
@@ -136,7 +137,7 @@ pub fn read(store: &Store, request: &Request) -> Result<ContextReport> {
         }),
         history,
         items: items::sized(&all),
-        dead_weight: items::dead_weight(&all),
+        dead_weight,
         tool_results,
         config: summary(request.scan, request.scanned_at_ms, &ratios),
         ratios,
