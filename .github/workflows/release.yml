@@ -9,7 +9,24 @@ env:
   CC_x86_64_unknown_linux_musl: musl-gcc
   CC_aarch64_unknown_linux_musl: musl-gcc
 jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the tag names the version of the crate and of the mod
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)" = "$version"
+          test "$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' mod/.claude-plugin/plugin.json)" = "$version"
+      - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
+      - run: cargo test --locked
   build:
+    needs: test
     strategy:
       matrix:
         include:
@@ -26,15 +43,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check that the tag names this version
-        run: test "claude-plus ${GITHUB_REF_NAME#v}" = "claude-plus $(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
       - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "${{ matrix.target }}" && rustup default "$RUST_TOOLCHAIN"
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - run: cargo build --release --locked --target "${{ matrix.target }}"
       - name: Check that the binary runs and names its version
-        if: matrix.target != 'x86_64-apple-darwin'
-        run: test "$("target/${{ matrix.target }}/release/claude-plus" --version)" = "claude-plus ${GITHUB_REF_NAME#v}"
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          binary="target/$TARGET/release/claude-plus"
+          if [ "$TARGET" = x86_64-apple-darwin ]; then
+            version=$(arch -x86_64 "$binary" --version)
+          else
+            version=$("$binary" --version)
+          fi
+          test "$version" = "claude-plus ${GITHUB_REF_NAME#v}"
       - run: sh packaging/package.sh "${{ matrix.target }}" "target/${{ matrix.target }}/release/claude-plus" dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

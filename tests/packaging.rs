@@ -435,6 +435,15 @@ fn workflows_pin_every_action_to_a_commit_and_every_runner_to_an_image() {
                     assert!(!image.ends_with("-latest"), "{name}: {line}");
                 }
             }
+            if let Some(runner) = line.strip_prefix("runs-on: ") {
+                assert!(
+                    runner == "${{ matrix.os }}"
+                        || ["macos-15", "ubuntu-24.04", "ubuntu-24.04-arm"].contains(&runner),
+                    "{name}: {line}"
+                );
+            }
+            assert!(!line.contains("pull_request_target"), "{name}: {line}");
+            assert!(!line.contains("${{ github.event"), "{name}: {line}");
             assert!(
                 !line.contains("| bash") && !line.contains("| sh"),
                 "{name}: {line}"
@@ -467,6 +476,14 @@ fn the_release_only_drafts_and_the_tag_must_match_the_version() {
         )
     );
     assert_eq!(release.matches("contents: write").count(), 1);
+    assert!(release.contains("  test:\n"), "{release}");
+    assert!(release.contains("cargo test --locked"), "{release}");
+    assert!(release.contains("    needs: test\n"), "{release}");
+    assert!(
+        release.contains("mod/.claude-plugin/plugin.json"),
+        "{release}"
+    );
+    assert!(release.contains("arch -x86_64"), "{release}");
     for target in TARGETS {
         assert!(
             release.contains(&format!("          - target: {target}\n")),
