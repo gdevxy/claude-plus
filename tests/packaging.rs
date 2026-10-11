@@ -1,0 +1,231 @@
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+const TARGETS: [&str; 4] = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+];
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn script(name: &str) -> PathBuf {
+    root().join("packaging").join(name)
+}
+
+fn scratch() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("cp-pkg-")
+        .tempdir_in("/tmp")
+        .unwrap()
+}
+
+fn run(command: &mut Command) -> Output {
+    command.output().unwrap()
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+fn release(dir: &Path, owner: &str) -> PathBuf {
+    let dist = dir.join("dist");
+    for target in TARGETS {
+        let packaged = run(Command::new("sh")
+            .arg(script("package.sh"))
+            .args([target, env!("CARGO_BIN_EXE_claude-plus")])
+            .arg(&dist));
+        assert!(packaged.status.success(), "{}", text(&packaged.stderr));
+    }
+    let assets = run(Command::new("sh")
+        .arg(script("release-assets.sh"))
+        .args([VERSION, owner])
+        .arg(&dist));
+    assert!(assets.status.success(), "{}", text(&assets.stderr));
+    dist
+}
+
+fn install(script: &Path, home: &Path, vars: &[(&str, &str)]) -> Output {
+    run(Command::new("sh")
+        .arg(script)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .envs(vars.iter().copied()))
+}
+
+#[test]
+fn the_installer_of_a_release_installs_its_binary_into_a_scratch_home_with_a_space() {
+    let temp = scratch();
+    let dist = release(temp.path(), "ada");
+    let home = temp.path().join("my home");
+    let url = format!("file://{}", dist.display());
+    let output = install(
+        &dist.join("install.sh"),
+        &home,
+        &[("CLAUDE_PLUS_DOWNLOAD_URL", &url)],
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let bin = home.join(".local/bin");
+    assert_eq!(
+        text(&output.stdout),
+        format!(
+            "✻ Installed claude-plus {VERSION} to {0}/claude-plus\n  {0} is not on PATH; add it, for example with: export PATH=\"{0}:$PATH\"\n✻ Next, run claude-plus install to add the pane to Claude Code\n",
+            bin.display()
+        )
+    );
+    let version = run(Command::new(bin.join("claude-plus")).arg("--version"));
+    assert_eq!(text(&version.stdout), format!("claude-plus {VERSION}\n"));
+    assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 1);
+}
+
+#[test]
+fn the_installer_installs_where_it_is_told_and_says_nothing_about_a_path_that_has_it() {
+    let temp = scratch();
+    let dist = release(temp.path(), "ada");
+    let dir = temp.path().join("tools");
+    let url = format!("file://{}", dist.display());
+    let output = run(Command::new("sh")
+        .arg(dist.join("install.sh"))
+        .env_clear()
+        .env("HOME", temp.path())
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", dir.display()),
+        )
+        .env("CLAUDE_PLUS_DOWNLOAD_URL", &url)
+        .env("CLAUDE_PLUS_INSTALL_DIR", &dir));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        format!(
+            "✻ Installed claude-plus {VERSION} to {}/claude-plus\n✻ Next, run claude-plus install to add the pane to Claude Code\n",
+            dir.display()
+        )
+    );
+}
+
+#[test]
+fn the_installer_refuses_a_download_that_does_not_match_its_checksum() {
+    let temp = scratch();
+    let dist = release(temp.path(), "ada");
+    let sums = std::fs::read_to_string(dist.join("SHA256SUMS")).unwrap();
+    let tampered: String = sums
+        .lines()
+        .map(|line| format!("{}{}\n", "0".repeat(64), &line[64..]))
+        .collect();
+    std::fs::write(dist.join("SHA256SUMS"), tampered).unwrap();
+    let home = temp.path().join("home");
+    let url = format!("file://{}", dist.display());
+    let output = install(
+        &dist.join("install.sh"),
+        &home,
+        &[("CLAUDE_PLUS_DOWNLOAD_URL", &url)],
+    );
+    assert!(!output.status.success());
+    assert!(
+        text(&output.stderr)
+            .ends_with("does not match its SHA256SUMS line, so nothing was installed\n"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!home.join(".local/bin/claude-plus").exists());
+}
+
+#[test]
+fn the_installer_in_the_repository_asks_for_a_github_owner() {
+    let temp = scratch();
+    let output = install(&script("install.sh"), temp.path(), &[]);
+    assert!(!output.status.success());
+    assert_eq!(
+        text(&output.stderr),
+        "claude-plus install.sh: this copy of install.sh names no GitHub owner; use the install.sh of a claude-plus release, or set CLAUDE_PLUS_GITHUB_OWNER\n"
+    );
+}
+
+#[test]
+fn the_installer_names_a_platform_without_a_build() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = scratch();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("uname"),
+        "#!/bin/sh\ncase \"$1\" in -s) echo FreeBSD ;; -m) echo amd64 ;; esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("uname"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = run(Command::new("sh")
+        .arg(script("install.sh"))
+        .env_clear()
+        .env("HOME", temp.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("CLAUDE_PLUS_GITHUB_OWNER", "ada"));
+    assert!(!output.status.success());
+    assert_eq!(
+        text(&output.stderr),
+        "claude-plus install.sh: claude-plus runs on macOS and Linux, not FreeBSD\n"
+    );
+}
+
+#[test]
+fn release_assets_hold_checksums_a_formula_and_an_installer_for_the_owner() {
+    let temp = scratch();
+    let dist = release(temp.path(), "ada");
+    let sums = std::fs::read_to_string(dist.join("SHA256SUMS")).unwrap();
+    let names: Vec<&str> = sums.lines().map(|line| &line[66..]).collect();
+    assert_eq!(
+        names,
+        TARGETS.map(|target| format!("claude-plus-{target}.tar.gz"))
+    );
+    let formula = std::fs::read_to_string(dist.join("claude-plus.rb")).unwrap();
+    for line in sums.lines() {
+        let (sum, archive) = line.split_once("  ").unwrap();
+        assert!(formula.contains(&format!(
+            "      url \"https://github.com/ada/claude-plus/releases/download/v{VERSION}/{archive}\"\n      sha256 \"{sum}\"\n"
+        )), "{formula}");
+    }
+    assert!(formula.contains(&format!("  version \"{VERSION}\"\n")));
+    assert!(!formula.contains('@'), "{formula}");
+    let ruby = run(Command::new("ruby")
+        .arg("-c")
+        .arg(dist.join("claude-plus.rb")));
+    assert!(ruby.status.success(), "{}", text(&ruby.stderr));
+    let installer = std::fs::read_to_string(dist.join("install.sh")).unwrap();
+    assert!(installer.contains("github_owner=\"${CLAUDE_PLUS_GITHUB_OWNER:-ada}\"\n"));
+    assert!(!installer.contains("@GITHUB_OWNER@"));
+    let parsed = run(Command::new("sh").arg("-n").arg(dist.join("install.sh")));
+    assert!(parsed.status.success(), "{}", text(&parsed.stderr));
+    let listing = run(Command::new("tar")
+        .arg("-tzf")
+        .arg(dist.join("claude-plus-x86_64-apple-darwin.tar.gz")));
+    assert_eq!(text(&listing.stdout), "claude-plus\nLICENSE\nREADME.md\n");
+}
+
+#[test]
+fn release_assets_need_all_four_builds() {
+    let temp = scratch();
+    let dist = temp.path().join("dist");
+    std::fs::create_dir_all(&dist).unwrap();
+    let packaged = run(Command::new("sh")
+        .arg(script("package.sh"))
+        .args(["aarch64-apple-darwin", env!("CARGO_BIN_EXE_claude-plus")])
+        .arg(&dist));
+    assert!(packaged.status.success());
+    let assets = run(Command::new("sh")
+        .arg(script("release-assets.sh"))
+        .args([VERSION, "ada"])
+        .arg(&dist));
+    assert!(!assets.status.success());
+    assert_eq!(
+        text(&assets.stderr),
+        format!(
+            "release-assets.sh: {}/claude-plus-x86_64-apple-darwin.tar.gz is missing\n",
+            dist.display()
+        )
+    );
+}

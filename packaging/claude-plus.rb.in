@@ -1,0 +1,43 @@
+class ClaudePlus < Formula
+  desc "Token, cache and cost visibility for Claude Code"
+  homepage "https://github.com/@GITHUB_OWNER@/claude-plus"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/@GITHUB_OWNER@/claude-plus/releases/download/v@VERSION@/claude-plus-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256_AARCH64_APPLE_DARWIN@"
+    end
+    on_intel do
+      url "https://github.com/@GITHUB_OWNER@/claude-plus/releases/download/v@VERSION@/claude-plus-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256_X86_64_APPLE_DARWIN@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/@GITHUB_OWNER@/claude-plus/releases/download/v@VERSION@/claude-plus-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_AARCH64_UNKNOWN_LINUX_MUSL@"
+    end
+    on_intel do
+      url "https://github.com/@GITHUB_OWNER@/claude-plus/releases/download/v@VERSION@/claude-plus-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_X86_64_UNKNOWN_LINUX_MUSL@"
+    end
+  end
+
+  def install
+    bin.install "claude-plus"
+  end
+
+  def caveats
+    <<~EOS
+      Run claude-plus install to add the pane to Claude Code.
+      After an upgrade, new Claude Code sessions update the pane by themselves.
+    EOS
+  end
+
+  test do
+    assert_match "claude-plus #{version}", shell_output("#{bin}/claude-plus --version")
+  end
+end
