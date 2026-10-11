@@ -203,6 +203,8 @@ describe('daemon client', () => {
     expect(await fetchHistory(refused, '/s.sock', '7d')).toEqual({ kind: 'failed', reason: '400: range must be 24h, 7d, 30d or 90d' })
     const garbled = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: '{"v":1}' }))
     expect(await fetchHistory(garbled, '/s.sock', '7d')).toEqual({ kind: 'failed', reason: 'unreadable history' })
+    const older = answering(Promise.resolve({ status: 404, ok: false, headers: {}, text: '{"error":"no route for GET /history"}' }))
+    expect(await fetchHistory(older, '/s.sock', '7d')).toEqual({ kind: 'missing' })
   })
 
   test('only a version 1 history report with its lists is accepted', () => {

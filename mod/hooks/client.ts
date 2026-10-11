@@ -8,6 +8,7 @@ export const HISTORY_TIMEOUT_MS = 3000
 export const OUTBOX_LIMIT = 256
 export const HOST = 'http://claude-plus'
 export const REBUILDING_STATUS = 503
+export const NOT_FOUND_STATUS = 404
 
 export type Io = {
   fetch: (url: string, init: HttpInit) => Promise<HttpResponse>
@@ -32,6 +33,7 @@ export type ContextReply =
 export type HistoryReply =
   | { kind: 'history'; report: HistoryReport }
   | { kind: 'rebuilding' }
+  | { kind: 'missing' }
   | { kind: 'failed'; reason: string }
 
 export type PlusEvent = { id: string; session: string; kind: string; ts_ms: number; data: { [key: string]: JsonValue } }
@@ -127,6 +129,7 @@ export function historyPath(range: HistoryRange): string {
 export async function fetchHistory(io: Io, socket: string, range: HistoryRange): Promise<HistoryReply> {
   const reply = await request(io, socket, historyPath(range), {}, HISTORY_TIMEOUT_MS)
   if (!reply.ok) {
+    if (reply.status === NOT_FOUND_STATUS) return { kind: 'missing' }
     return reply.status === REBUILDING_STATUS ? { kind: 'rebuilding' } : { kind: 'failed', reason: reply.reason }
   }
   const report = parseHistory(reply.text)

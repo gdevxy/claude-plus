@@ -13,6 +13,7 @@ type Wiring = {
   serving: 'current' | 'older' | 'newer'
   lag: (() => Promise<void>) | null
   historyLag: (() => Promise<void>) | null
+  historyStatus: number | null
   openRefusal: string | null
   resets: number
   ensureCures: boolean
@@ -258,7 +259,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, historyStatus: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -304,6 +305,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     }
     if (e.url.endsWith('/events')) wiring.delivered.push(e)
     if (wiring.rebuilding && e.url.includes('/snapshot')) return { value: { status: 503, ok: false, headers: {}, text: '{"error":"rebuilding"}' } }
+    if (wiring.historyStatus !== null && e.url.includes('/history')) return { value: { status: wiring.historyStatus, ok: false, headers: {}, text: '{"error":"no route for GET /history"}' } }
     const body = e.url.includes('/snapshot')
       ? JSON.stringify(servedBody(wiring))
       : e.url.includes('/history')
@@ -1113,7 +1115,7 @@ describe('plus mod', () => {
       const rows = paintTree(await ui.drawn(), columns)
       expect(rows.filter(row => row.length > columns)).toEqual([])
       expect(trimmed(rows.slice(0, 4))).toEqual([HISTORY_HEADERS[columns], '', ' r: 7 days  g: Cost', ''])
-      const screen = historyScreen({ width: columns, range: '7d', metric: 'cost', reports: { '7d': historyReport() }, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [] })
+      const screen = historyScreen({ width: columns, range: '7d', metric: 'cost', reports: { '7d': historyReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [] })
       expect(trimmed(rows.slice(4))).toEqual(trimmed(painted(screen, columns)))
       await ui.unmount()
     })
@@ -1246,6 +1248,40 @@ describe('plus mod', () => {
     await ui.press({ key: 'range' })
     await clock.advance(1000)
     expect((await ui.find({ key: 'hist-loading' }))?.text).toBe('Loading the last 30 days… ✻')
+    expect(await ui.find({ key: 'hist-spend-chart' })).toBeUndefined()
+  })
+
+  test('a daemon without the History route is named and asked again every 30 s until it has one', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { historyStatus: 404 })
+    const asked = () => wiring.fetched.filter(call => call.url.includes('/history')).length
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    expect(await ui.find({ key: 'hist-loading' })).toBeUndefined()
+    expect((await ui.find({ key: 'hist-failed' }))?.text).toBe('This claude-plus daemon is older than the pane and has no History')
+    expect((await ui.find({ key: 'hist-retry' }))?.text).toBe('Run claude-plus daemon stop to restart it')
+    expect(asked()).toBe(1)
+    await clock.advance(30_000)
+    expect(asked()).toBe(2)
+    wiring.historyStatus = null
+    await clock.advance(30_000)
+    expect(asked()).toBe(3)
+    expect(await ui.find({ key: 'hist-failed' })).toBeUndefined()
+    expect((await ui.find({ key: 'hist-spend-chart' }))?.type).toBe('Raster')
+  })
+
+  test('a History report that takes longer than 3 s is cut off and reads as not loaded', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on, { historyLag: () => clock.sleep(5000) })
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-history' })
+    for (let step = 0; step < 29; step += 1) await clock.advance(100)
+    expect((await ui.find({ key: 'hist-loading' }))?.text).toBe('Loading the last 7 days… ✻')
+    for (let step = 0; step < 3; step += 1) await clock.advance(100)
+    expect((await ui.find({ key: 'hist-failed' }))?.text).toBe('Could not load the last 7 days: no answer within 3000 ms')
     expect(await ui.find({ key: 'hist-spend-chart' })).toBeUndefined()
   })
 

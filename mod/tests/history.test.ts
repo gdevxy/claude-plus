@@ -13,7 +13,7 @@ const OK = { status: 'ok', detail: null } as const
 const MIN_SERIES_DISTANCE = 20
 
 function input(overrides: Partial<HistoryInput> = {}): HistoryInput {
-  return { width: 40, range: '7d', metric: 'cost', reports: { '7d': historyReport(), '24h': dayReport() }, context: contextReport(), local: local(), daemon: OK, expanded: [], ...overrides }
+  return { width: 40, range: '7d', metric: 'cost', reports: { '7d': historyReport(), '24h': dayReport() }, failures: {}, context: contextReport(), local: local(), daemon: OK, expanded: [], ...overrides }
 }
 
 function line(lines: Line[], key: string): Line {
@@ -188,6 +188,23 @@ describe('history screen', () => {
     const kept = historyScreen(input({ daemon: { status: 'unreachable', detail: null } }))
     expect(kept.slice(0, 3).map(line => line.key)).toEqual(['daemon', 'daemon-fix', 'gap-1'])
     expect(kept.some(line => line.key === 'hist-spend-chart')).toBe(true)
+  })
+
+  test('a report that failed to load says why and that it will try again, instead of loading forever', () => {
+    const failed = historyScreen(input({ range: '30d', context: null, failures: { '30d': { kind: 'failed', reason: 'no answer within 3000 ms' } } }))
+    expect(failed.map(text)).toEqual(['Last 30 days', 'Could not load the last 30 days: no answer within 3000 ms', 'Trying again every 30 s'])
+    expect(failed.slice(1).map(found => found.segments[0]?.dim)).toEqual([true, true])
+    const older = historyScreen(input({ range: '30d', context: null, failures: { '30d': { kind: 'missing', reason: 'this daemon has no History' } } }))
+    expect(older.map(text)).toEqual(['Last 30 days', 'This claude-plus daemon is older than the pane and has no History', 'Run claude-plus daemon stop to restart it'])
+    const other = historyScreen(input({ range: '30d', context: null, failures: { '7d': { kind: 'failed', reason: 'boom' } } }))
+    expect(other.map(text)).toEqual(['Last 30 days', 'Loading the last 30 days… ✻'])
+  })
+
+  test('a kept report whose refresh failed stays, with a note under its counts', () => {
+    const lines = historyScreen(input({ failures: { '7d': { kind: 'failed', reason: '500: database is locked' } } }))
+    expect(lines.slice(0, 3).map(text)).toEqual(['Last 7 days                     $15.97', '9 sessions · 160 requests', 'Could not refresh: 500: database is locked'])
+    expect(line(lines, 'hist-stale').segments[0]?.dim).toBe(true)
+    expect(lines.some(found => found.key === 'hist-spend-chart')).toBe(true)
   })
 
   test('the context curve belongs to this session and needs two requests', () => {

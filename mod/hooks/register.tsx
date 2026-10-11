@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 'claude-code'
 
-import type { Chart, ContextReport, Daemon, DaemonStatus, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
+import type { Chart, ContextReport, Daemon, DaemonStatus, Failures, HistoryFailure, HistoryRange, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
 import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
 import { contextScreen } from './context'
@@ -45,6 +45,7 @@ const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
 const context = atom({ plugin: 'plus', key: 'context' } as const, null as ContextReport | null, { shape: 'context-1' })
 const history = atom({ plugin: 'plus', key: 'history' } as const, {} as Reports, { shape: 'history-1' })
+const failures = atom({ plugin: 'plus', key: 'failures' } as const, {} as Failures)
 const chart = atom({ plugin: 'plus', key: 'chart' } as const, { range: '7d', metric: 'cost' } as Chart)
 const theme = atom({ plugin: 'plus', key: 'theme' } as const, 'auto')
 const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-2' })
@@ -271,11 +272,24 @@ async function pollHistory($: EngineInterface): Promise<void> {
     if (path === null) return
     const range = (await read($, chart)).range
     const reply = await fetchHistory(io($), path, range)
-    if (reply.kind !== 'history' || reply.report.range !== range) return
-    await update($, history, known => ({ ...known, [range]: reply.report }))
+    if (reply.kind === 'history') {
+      if (reply.report.range !== range) return
+      await update($, history, known => ({ ...known, [range]: reply.report }))
+      await recordFailure($, range, null)
+      return
+    }
+    if (reply.kind === 'missing') await recordFailure($, range, { kind: 'missing', reason: 'this daemon has no History' })
+    else await recordFailure($, range, { kind: 'failed', reason: reply.kind === 'rebuilding' ? 'the store is being rebuilt' : reply.reason })
   } finally {
     runtime.historyRunning = false
   }
+}
+
+async function recordFailure($: EngineInterface, range: HistoryRange, failure: HistoryFailure | null): Promise<void> {
+  await update($, failures, known => {
+    const { [range]: _dropped, ...rest } = known
+    return failure === null ? rest : { ...rest, [range]: failure }
+  })
 }
 
 async function readTheme($: EngineInterface): Promise<void> {
@@ -545,7 +559,7 @@ export const register: Register = (on, options) => {
       shownView === 'context'
         ? contextScreen({ width: e.props.bodyColumns, nowMs, report: await read($, context), local: known, daemon: status, expanded: open })
         : shownView === 'history'
-          ? historyScreen({ width: e.props.bodyColumns, range: chosen.range, metric: chosen.metric, reports, context: await read($, context), local: known, daemon: status, expanded: open })
+          ? historyScreen({ width: e.props.bodyColumns, range: chosen.range, metric: chosen.metric, reports, failures: await read($, failures), context: await read($, context), local: known, daemon: status, expanded: open })
           : screen({
               width: e.props.bodyColumns,
               nowMs,

@@ -1,6 +1,6 @@
 import type { ThemeKey } from 'claude-code'
 
-import type { Bucket, ContextReport, Daemon, HistoryRange, HistoryReport, Local, Metric, Reports, Spend } from '../types'
+import type { Bucket, ContextReport, Daemon, Failures, HistoryFailure, HistoryRange, HistoryReport, Local, Metric, Reports, Spend } from '../types'
 import type { Layout, Piece } from './chart'
 import { area, bars, grouped, layout, markers, MARKER, stacked } from './chart'
 import { compositionOf, reportOf } from './context'
@@ -19,6 +19,7 @@ export const HIT_FLOOR_CAP = 0.9
 export const MODEL_COLORS: readonly ThemeKey[] = ['claude', 'permission', 'planMode', 'ide', 'text']
 export const OTHER_COLOR: ThemeKey = 'subtle'
 export const INDENT = '  '
+export const RETRY_SECONDS = 30
 
 const RANGE_LABELS: Readonly<Record<HistoryRange, string>> = { '24h': '24 hours', '7d': '7 days', '30d': '30 days', '90d': '90 days' }
 const METRIC_LABELS: Readonly<Record<Metric, string>> = { cost: 'Cost', tokens: 'Tokens', pct: '% of 5h' }
@@ -28,6 +29,7 @@ export type HistoryInput = {
   range: HistoryRange
   metric: Metric
   reports: Reports
+  failures: Failures
   context: ContextReport | null
   local: Local
   daemon: Daemon
@@ -89,8 +91,10 @@ export function historyScreen(input: HistoryInput): Line[] {
 
 function headline(input: HistoryInput, report: HistoryReport | null, metric: Metric, width: number): Line[] {
   const title = `Last ${rangeLabel(input.range)}`
+  const failure = input.failures[input.range]
   if (report === null) {
     if (input.daemon.status !== 'ok') return []
+    if (failure !== undefined) return [plain('hist-head', title, { bold: true }), ...failed(input.range, failure)]
     return [plain('hist-head', title, { bold: true }), prose('hist-loading', `Loading the last ${rangeLabel(input.range)}… ✻`, { dim: true })]
   }
   const { totals } = report
@@ -104,6 +108,7 @@ function headline(input: HistoryInput, report: HistoryReport | null, metric: Met
   const sessions = `${count(totals.sessions)} ${totals.sessions === 1 ? 'session' : 'sessions'}`
   const requests = `${count(totals.requests)} ${totals.requests === 1 ? 'request' : 'requests'}`
   lines.push(plain('hist-sub', `${sessions} · ${requests}`, { dim: true }))
+  if (failure !== undefined) lines.push(prose('hist-stale', `Could not refresh: ${failure.reason}`, { dim: true }))
   if (totals.unpriced > 0) {
     const noun = totals.unpriced === 1 ? 'request on an unknown model is' : 'requests on unknown models are'
     lines.push(prose('hist-unpriced', fitting(width, `${count(totals.unpriced)} ${noun} not priced`, `${count(totals.unpriced)} unpriced`), { dim: true }))
@@ -115,6 +120,19 @@ function headline(input: HistoryInput, report: HistoryReport | null, metric: Met
     )
   }
   return lines
+}
+
+function failed(range: HistoryRange, failure: HistoryFailure): Line[] {
+  if (failure.kind === 'missing') {
+    return [
+      prose('hist-failed', 'This claude-plus daemon is older than the pane and has no History', { dim: true }),
+      prose('hist-retry', 'Run claude-plus daemon stop to restart it', { dim: true }),
+    ]
+  }
+  return [
+    prose('hist-failed', `Could not load the last ${rangeLabel(range)}: ${failure.reason}`, { dim: true }),
+    prose('hist-retry', `Trying again every ${RETRY_SECONDS} s`, { dim: true }),
+  ]
 }
 
 function per(report: HistoryReport, shape: Layout): string {

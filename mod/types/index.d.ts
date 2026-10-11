@@ -236,6 +236,10 @@ export type HistoryReport = {
 
 export type Reports = Partial<Record<HistoryRange, HistoryReport>>
 
+export type HistoryFailure = { kind: 'missing' | 'failed'; reason: string }
+
+export type Failures = Partial<Record<HistoryRange, HistoryFailure>>
+
 export type Chart = { range: HistoryRange; metric: Metric }
 
 export type DaemonStatus = 'starting' | 'ok' | 'rebuilding' | 'unreachable' | 'outdated' | 'behind' | 'newer' | 'missing' | 'failed'
@@ -253,6 +257,7 @@ declare module 'claude-code' {
       snapshot: Shaped<Snapshot | null>
       context: Shaped<ContextReport | null>
       history: Shaped<Reports>
+      failures: Failures
       chart: Chart
       theme: string
       local: Shaped<Local>
