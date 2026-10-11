@@ -24,15 +24,22 @@ impl Found {
             .iter()
             .find(|p| p.id == PLUGIN_ID && p.scope == "user")
     }
+
+    pub fn marketplace_is(&self, dir: &Path) -> bool {
+        self.marketplace()
+            .and_then(|m| m.path.as_deref())
+            .is_some_and(|path| same_path(Path::new(path), dir))
+    }
+
+    pub fn newer_elsewhere(&self, dir: &Path, version: &str) -> Option<&Plugin> {
+        self.plugin()
+            .filter(|plugin| !self.marketplace_is(dir) && is_older(version, &plugin.version))
+    }
 }
 
 pub fn install_steps(found: &Found, dir: &Path, version: &str) -> Vec<Step> {
-    let ours = found
-        .marketplace()
-        .and_then(|m| m.path.as_deref())
-        .is_some_and(|path| same_path(Path::new(path), dir));
     let mut steps = Vec::new();
-    if !ours {
+    if !found.marketplace_is(dir) {
         steps.push(Step::AddMarketplace(dir.to_path_buf()));
     }
     match found.plugin() {
@@ -153,6 +160,46 @@ mod tests {
             install_steps(&found, &dir, "0.1.0"),
             [Step::AddMarketplace(dir.clone())]
         );
+    }
+
+    #[test]
+    fn only_a_newer_mod_from_another_marketplace_counts_as_newer_elsewhere() {
+        let dir = PathBuf::from("/home/ada/.claude-plus/marketplace");
+        let github = Marketplace {
+            source: "github".into(),
+            path: None,
+            repo: Some("ada/claude-plus".into()),
+            ..ours(&dir)
+        };
+        let from = |marketplace: Marketplace, version: &str| Found {
+            marketplaces: vec![marketplace],
+            plugins: vec![plus(version, true)],
+        };
+        assert!(
+            from(github.clone(), "0.2.0")
+                .newer_elsewhere(&dir, "0.1.0")
+                .is_some()
+        );
+        assert!(
+            from(github.clone(), "0.1.0")
+                .newer_elsewhere(&dir, "0.1.0")
+                .is_none()
+        );
+        assert!(
+            from(github, "0.2.0")
+                .newer_elsewhere(&dir, "0.3.0")
+                .is_none()
+        );
+        assert!(
+            from(ours(&dir), "0.2.0")
+                .newer_elsewhere(&dir, "0.1.0")
+                .is_none()
+        );
+        let orphan = Found {
+            marketplaces: vec![],
+            plugins: vec![plus("0.2.0", true)],
+        };
+        assert!(orphan.newer_elsewhere(&dir, "0.1.0").is_some());
     }
 
     #[test]

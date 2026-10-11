@@ -33,8 +33,19 @@ pub fn install(paths: &Paths, yes: bool) -> Result<()> {
     }
     let dir = paths.marketplace_dir();
     let found = found(&claude)?;
-    let newer = newer_installed(&dir, &found);
+    let newer = bundle::version_in(&dir).filter(|folder| is_older(bundle::VERSION, folder));
     let target = newer.as_deref().unwrap_or(bundle::VERSION);
+    if let Some(plugin) = found.newer_elsewhere(&dir, target) {
+        let from = found
+            .marketplace()
+            .map_or("another marketplace".into(), |m| {
+                format!("the {MARKETPLACE} marketplace at {}", m.location())
+            });
+        bail!(
+            "the plus mod v{} comes from {from}, and this claude-plus carries the older v{target}; upgrade claude-plus to keep it, or run claude plugin uninstall {PLUGIN_ID} first to switch to v{target}",
+            plugin.version
+        );
+    }
     let steps = install_steps(&found, &dir, target);
     confirm_settings(paths, "install", &steps, &[], yes)?;
     paths.ensure_data_dir()?;
@@ -113,17 +124,6 @@ pub fn uninstall(paths: &Paths, purge: bool, yes: bool) -> Result<()> {
         "✻ claude-plus is uninstalled · close open Claude Code sessions, or their pane starts the daemon again"
     );
     Ok(())
-}
-
-fn newer_installed(dir: &Path, found: &Found) -> Option<String> {
-    [
-        bundle::version_in(dir),
-        found.plugin().map(|plugin| plugin.version.clone()),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|installed| is_older(bundle::VERSION, installed))
-    .reduce(|a, b| if is_older(&a, &b) { b } else { a })
 }
 
 fn found(claude: &ClaudeCode) -> Result<Found> {

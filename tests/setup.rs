@@ -678,3 +678,70 @@ fn a_data_dir_swapped_for_a_symlink_while_purge_asks_is_refused() {
     );
     assert_eq!(names_in(&victim), before);
 }
+
+fn installed_from_github(env: &Env, version: &str) {
+    std::fs::create_dir_all(env.claude_state()).unwrap();
+    std::fs::remove_file(env.claude_state().join("marketplace")).ok();
+    std::fs::write(
+        env.claude_state().join("marketplace-repo"),
+        "ada/claude-plus",
+    )
+    .unwrap();
+    std::fs::write(env.claude_state().join("plugin"), version).unwrap();
+}
+
+#[test]
+fn a_newer_mod_from_another_marketplace_is_never_replaced_by_this_older_one() {
+    let env = env();
+    let refusal = format!(
+        "claude-plus: the plus mod v999.0.0 comes from the claude-plus marketplace at ada/claude-plus, and this claude-plus carries the older v{VERSION}; upgrade claude-plus to keep it, or run claude plugin uninstall plus@claude-plus first to switch to v{VERSION}\n"
+    );
+    installed_from_github(&env, "999.0.0");
+    cmd(&env, &["install", "--yes"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(refusal.clone());
+    assert_eq!(env.claude_calls(), listing_calls());
+    assert!(!env.plus.exists());
+
+    let _daemon = Daemon(&env);
+    std::fs::remove_dir_all(env.claude_state()).unwrap();
+    cmd(&env, &["install", "--yes"]).assert().success();
+    installed_from_github(&env, "999.0.0");
+    let before = env.claude_calls().len();
+    cmd(&env, &["install", "--yes"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(refusal);
+    assert_eq!(env.claude_calls()[before..], listing_calls());
+    assert_eq!(
+        claude_plus::setup::bundle::version_in(&marketplace(&env)).as_deref(),
+        Some(VERSION)
+    );
+}
+
+#[test]
+fn an_older_mod_from_another_marketplace_is_switched_to_this_one() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    installed_from_github(&env, "0.0.9");
+    cmd(&env, &["install", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(format!(
+            "✻ Pointed the claude-plus marketplace at {} (was ada/claude-plus)\n✻ Updated the plus mod from v0.0.9 to v{VERSION}\n",
+            marketplace(&env).display()
+        )));
+    assert_eq!(
+        claude_plus::setup::bundle::version_in(&marketplace(&env)).as_deref(),
+        Some(VERSION)
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.claude_state().join("plugin"))
+            .unwrap()
+            .trim(),
+        VERSION
+    );
+}
