@@ -156,7 +156,7 @@ impl<'a> Version<'a> {
     }
 }
 
-fn is_older(version: &str, than: &str) -> bool {
+pub fn is_older(version: &str, than: &str) -> bool {
     match (Version::parse(version), Version::parse(than)) {
         (Some(version), Some(than)) => version.precedes(&than),
         (None, Some(_)) => true,

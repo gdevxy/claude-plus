@@ -1,0 +1,78 @@
+#!/bin/sh
+set -eu
+state="${FAKE_CLAUDE_STATE:?FAKE_CLAUDE_STATE is not set}"
+mkdir -p "$state"
+printf '%s\n' "$*" >> "$state/calls"
+
+ok() {
+  printf '{"command":"%s","outcome":"ok","message":"%s"}\n' "$1" "$2"
+}
+
+failed() {
+  printf '{"command":"%s","outcome":"failed","message":"%s","failureCode":"%s"}\n' "$1" "$2" "$3"
+  exit 1
+}
+
+manifest_version() {
+  sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$(cat "$state/marketplace")/mod/.claude-plugin/plugin.json"
+}
+
+if [ -f "$state/fail" ] && [ "$(cat "$state/fail")" = "$*" ]; then
+  failed fake "the fake was told to fail" fake_failure
+fi
+
+case "$*" in
+  --version)
+    printf '%s (Claude Code)\n' "${FAKE_CLAUDE_VERSION:-2.1.296}"
+    ;;
+  "plugin marketplace list --json")
+    if [ -f "$state/marketplace" ]; then
+      printf '[{"name":"claude-plus","source":"directory","path":"%s"}]\n' "$(cat "$state/marketplace")"
+    else
+      echo '[]'
+    fi
+    ;;
+  "plugin marketplace add "*" --json")
+    path="$4"
+    [ -d "$path" ] || failed marketplace-add "Path does not exist: $path" invalid_source
+    printf '%s' "$path" > "$state/marketplace"
+    ok marketplace-add "Successfully added marketplace: claude-plus"
+    ;;
+  "plugin marketplace remove claude-plus --json")
+    [ -f "$state/marketplace" ] || failed marketplace-remove "Marketplace 'claude-plus' not found" not_configured
+    rm "$state/marketplace"
+    ok marketplace-remove "Successfully removed marketplace: claude-plus"
+    ;;
+  "plugin list --json")
+    if [ -f "$state/plugin" ]; then
+      printf '[{"id":"plus@claude-plus","version":"%s","scope":"user","enabled":%s,"readFromFolder":"%s/mod","folderVersion":"%s"}]\n' \
+        "$(cat "$state/plugin")" "$(cat "$state/enabled" 2>/dev/null || echo true)" \
+        "$(cat "$state/marketplace")" "$(manifest_version)"
+    else
+      echo '[]'
+    fi
+    ;;
+  "plugin install plus@claude-plus --json")
+    [ -f "$state/marketplace" ] || failed install "Plugin \\\"plus\\\" not found" not_found
+    manifest_version > "$state/plugin"
+    ok install "Successfully installed plugin: plus@claude-plus (scope: user)"
+    ;;
+  "plugin update plus@claude-plus --json")
+    old="$(cat "$state/plugin")"
+    manifest_version > "$state/plugin"
+    ok update "Plugin \\\"plus\\\" updated from $old to $(cat "$state/plugin") for scope user."
+    ;;
+  "plugin enable plus@claude-plus --json")
+    echo true > "$state/enabled"
+    ok enable "Enabled plus@claude-plus"
+    ;;
+  "plugin uninstall plus@claude-plus --json")
+    [ -f "$state/plugin" ] || failed uninstall "Plugin \\\"plus@claude-plus\\\" not found in installed plugins" not_installed
+    rm -f "$state/plugin" "$state/enabled"
+    ok uninstall "Successfully uninstalled plugin: plus (scope: user)"
+    ;;
+  *)
+    echo "fake claude does not know: $*" >&2
+    exit 2
+    ;;
+esac

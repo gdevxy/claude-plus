@@ -4,6 +4,7 @@ mod export;
 pub mod format;
 mod import;
 mod reindex;
+mod setup;
 mod stats;
 
 use std::path::Path;
@@ -36,6 +37,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Add the claude-plus pane to Claude Code and start the daemon")]
+    Install {
+        #[arg(short, long, help = "Agree to the Claude Code changes without asking")]
+        yes: bool,
+    },
     #[command(about = "Read new Claude Code transcripts into the local store")]
     Import,
     #[command(about = "Show daily cost per model, importing first")]
@@ -95,6 +101,7 @@ pub fn run() -> Result<()> {
         Command::Export { format, days } => export::run(&paths, &prices, format, days),
         Command::Doctor => doctor::run(&paths, &prices),
         Command::Reindex => reindex::run(&paths, &prices),
+        Command::Install { yes } => setup::install(&paths, yes),
         Command::Daemon {
             action: Some(DaemonAction::Stop),
             ..

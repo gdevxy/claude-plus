@@ -19,24 +19,31 @@ pub fn run(paths: &Paths, prices: PriceTable, detached: bool, rescan_secs: u64) 
 }
 
 pub fn ensure(paths: &Paths) -> Result<()> {
-    match control::ensure(paths)? {
-        Ensured::Running(health) => println!("{}", running(&health)),
-        Ensured::KeptNewer(health) => {
-            println!("{}", running(&health));
-            println!(
+    for line in ensured(&control::ensure(paths)?) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+pub fn ensured(ensured: &Ensured) -> Vec<String> {
+    match ensured {
+        Ensured::Running(health) => vec![running(health)],
+        Ensured::KeptNewer(health) => vec![
+            running(health),
+            format!(
                 "  It runs v{}, newer than this claude-plus v{}",
                 health.version,
                 control::VERSION
-            );
-        }
+            ),
+        ],
         Ensured::Started(health) => {
-            println!("✻ Started the claude-plus daemon · pid {}", health.pid)
+            vec![format!(
+                "✻ Started the claude-plus daemon · pid {}",
+                health.pid
+            )]
         }
-        Ensured::Restarted { previous, health } => {
-            println!("{}", restarted(&previous, &health))
-        }
+        Ensured::Restarted { previous, health } => vec![restarted(previous, health)],
     }
-    Ok(())
 }
 
 fn restarted(previous: &Health, health: &Health) -> String {

@@ -43,6 +43,25 @@ pub fn env() -> Env {
     }
 }
 
+impl Env {
+    pub fn claude_state(&self) -> PathBuf {
+        self._temp.path().join("fake-claude")
+    }
+
+    pub fn claude_calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.claude_state().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+}
+
+pub fn fake_claude_path() -> std::ffi::OsString {
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake-claude");
+    std::env::join_paths([fake.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap()
+}
+
 pub const VARS: &[(&str, &str)] = &[
     ("TZ", "UTC"),
     ("CLAUDE_PLUS_NOW", "2026-10-03T12:00:00Z"),
@@ -55,6 +74,8 @@ pub fn cmd(env: &Env, args: &[&str]) -> Command {
         .args(args)
         .env("CLAUDE_CONFIG_DIR", &env.claude)
         .env("CLAUDE_PLUS_HOME", &env.plus)
+        .env("PATH", fake_claude_path())
+        .env("FAKE_CLAUDE_STATE", env.claude_state())
         .envs(VARS.iter().copied());
     command
 }
@@ -65,6 +86,8 @@ pub fn process(env: &Env, args: &[&str]) -> std::process::Command {
         .args(args)
         .env("CLAUDE_CONFIG_DIR", &env.claude)
         .env("CLAUDE_PLUS_HOME", &env.plus)
+        .env("PATH", fake_claude_path())
+        .env("FAKE_CLAUDE_STATE", env.claude_state())
         .envs(VARS.iter().copied());
     command
 }

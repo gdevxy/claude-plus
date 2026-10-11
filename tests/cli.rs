@@ -625,6 +625,7 @@ fn help_describes_every_command() {
     let env = env();
     let help = stdout_of(&env, &["--help"]);
     for line in [
+        "  install  Add the claude-plus pane to Claude Code and start the daemon\n",
         "  import   Read new Claude Code transcripts into the local store\n",
         "  stats    Show daily cost per model, importing first\n",
         "  export   Print stored usage per day, project and model, importing first\n",
