@@ -32,7 +32,7 @@ pub fn budget(paths: &Paths, prices: &PriceTable, action: BudgetAction) -> Resul
 }
 
 pub fn current(store: &Store) -> Result<Option<String>> {
-    Ok(store.latest_session_account()?.or(store.open_account()?))
+    store.current_account()
 }
 
 pub fn resolve(store: &Store, given: Option<&str>) -> Result<String> {
@@ -79,6 +79,27 @@ pub fn scope(store: &Store, given: Option<&str>) -> Result<(Scope, String)> {
         }
         None => Ok((Scope::All, ALL_ACCOUNTS.to_string())),
     }
+}
+
+pub fn note_left_out(
+    store: &Store,
+    given: Option<&str>,
+    scope: &Scope,
+    label: &str,
+    (since, until): (i64, i64),
+) -> Result<()> {
+    if given.is_some() || scope.account().is_none() {
+        return Ok(());
+    }
+    let kept = scope.sessions(store)?;
+    let left_out = store
+        .sessions_spending_between(since, until)?
+        .iter()
+        .any(|session| !scope.keeps(&kept, &session.id));
+    if left_out {
+        eprintln!("Showing {label}; --account all for every account");
+    }
+    Ok(())
 }
 
 pub fn described(store: &Store, id: &str) -> Result<String> {
@@ -289,12 +310,7 @@ impl BudgetFacts {
             .chain(reported_usd)
             .collect();
         let decimals = column_decimals(&values);
-        let width = values
-            .iter()
-            .map(|value| usd_with(*value, decimals).len())
-            .max()
-            .unwrap_or(0);
-        let money = |value: f64| format!("{:>width$}", usd_with(value, decimals));
+        let money = |value: f64| usd_with(value, decimals);
         let resets_in = until(next_month_start_utc(self.now_ms) - self.now_ms);
         lines.push(super::labeled(
             "Budget:",
@@ -397,8 +413,8 @@ mod tests {
             [
                 "  Account:     Acme · Enterprise (oauth:work)",
                 "  Budget:      $700.00 a month, resets in 10d",
-                "  Reported:     $28.00 used, 4.0% of the spend limit",
-                "  Local:        $23.10 spent this month on this machine",
+                "  Reported:    $28.00 used, 4.0% of the spend limit",
+                "  Local:       $23.10 spent this month on this machine",
                 "  Pace:        on pace for 6.0% by the reset",
             ]
         );
@@ -409,7 +425,7 @@ mod tests {
         let lines = facts(Some(700.0), None, MID_MONTH).lines();
         assert_eq!(
             lines[2],
-            "  Local:        $23.10 spent this month on this machine"
+            "  Local:       $23.10 spent this month on this machine"
         );
         assert_eq!(lines[3], "  Pace:        on pace for 5.0% by the reset");
         assert_eq!(lines.len(), 4);

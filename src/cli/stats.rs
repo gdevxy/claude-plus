@@ -29,6 +29,7 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32, account: Option<&str>)
     }
     reconciled?;
     let (scope, label) = super::accounts::scope(&store, account)?;
+    super::accounts::note_left_out(&store, account, &scope, &label, (since, until))?;
     let rows = store.daily_costs(since, until, &Local, scope.sessions(&store)?.as_ref())?;
     let total = Total::of(&rows);
     let decimals = column_decimals(

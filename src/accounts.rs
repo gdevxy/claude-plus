@@ -36,6 +36,8 @@ pub struct Auth {
     pub api_key: bool,
 }
 
+const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
+
 pub fn read_login(claude_json: &Path) -> Result<Login> {
     let text = std::fs::read_to_string(claude_json)
         .with_context(|| format!("cannot read {}", claude_json.display()))?;
@@ -116,7 +118,12 @@ pub fn auth_account(auth: &Auth) -> Option<AccountRow> {
             label,
         ));
     }
-    if let Some((origin, host)) = auth.base_url.as_deref().and_then(origin_of) {
+    if let Some((origin, host)) = auth
+        .base_url
+        .as_deref()
+        .and_then(origin_of)
+        .filter(|(_, host)| host != ANTHROPIC_API_HOST)
+    {
         return Some(row(format!("gateway:{origin}"), AccountKind::Gateway, host));
     }
     auth.api_key
@@ -494,5 +501,30 @@ mod tests {
         assert_eq!(bare.label, "llm.corp");
         assert_eq!(gateway("").map(|row| row.kind), None);
         assert_eq!(gateway("   ").map(|row| row.kind), None);
+    }
+
+    #[test]
+    fn the_anthropic_api_as_a_base_url_is_no_gateway() {
+        let auth = |url: &str, api_key: bool| {
+            auth_account(&Auth {
+                provider: "anthropic".into(),
+                base_url: Some(url.into()),
+                api_key,
+            })
+            .map(|row| row.id)
+        };
+        for url in [
+            "https://api.anthropic.com",
+            "https://API.Anthropic.com:443/v1/",
+            "api.anthropic.com",
+            "https://user:secret@api.anthropic.com?x=1",
+        ] {
+            assert_eq!(auth(url, false), None, "{url}");
+            assert_eq!(auth(url, true).as_deref(), Some("api"), "{url}");
+        }
+        assert_eq!(
+            auth("https://api.anthropic.com.corp.example", false).as_deref(),
+            Some("gateway:https://api.anthropic.com.corp.example:443")
+        );
     }
 }

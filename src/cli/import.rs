@@ -50,7 +50,11 @@ fn locally(paths: &Paths, prices: &PriceTable) -> Result<(Store, IngestReport, R
         bar.set_position(done as u64);
     })?;
     bar.finish_and_clear();
-    let _ = accounts::observe(&mut store, &paths.claude_json, now_ms);
+    if let Err(error) = accounts::observe(&mut store, &paths.claude_json, now_ms)
+        && paths.claude_json.exists()
+    {
+        eprintln!("Cannot read the Claude Code login: {error:#}");
+    }
     accounts::attribute_pending(&mut store)?;
     let reconciled = report
         .reconcile_error

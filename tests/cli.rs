@@ -905,7 +905,7 @@ fn a_budget_is_set_shown_and_cleared_for_the_signed_in_account() {
         at(&env, &["budget", "show"], MID_MONTH),
         "  Account:     Acme · Enterprise (oauth:work)
   Budget:      $700.00 a month, resets in 10d
-  Local:        $23.10 spent this month on this machine
+  Local:       $23.10 spent this month on this machine
   Pace:        on pace for 5.0% by the reset
 "
     );
@@ -929,8 +929,8 @@ fn budget_show_derives_dollars_from_the_reported_percent() {
         at(&env, &["budget", "show"], MID_MONTH),
         "  Account:     Acme · Enterprise (oauth:work)
   Budget:      $700.00 a month, resets in 10d
-  Reported:     $28.00 used, 4.0% of the spend limit
-  Local:        $23.10 spent this month on this machine
+  Reported:    $28.00 used, 4.0% of the spend limit
+  Local:       $23.10 spent this month on this machine
   Pace:        on pace for 6.0% by the reset
 "
     );
@@ -1156,4 +1156,95 @@ fn export_keeps_only_the_asked_account() {
     );
     let all = export(&["--account", "all"]);
     assert!(all.contains("Acme") && all.contains("Me · Max"), "{all}");
+}
+
+#[test]
+fn the_current_account_follows_a_login_switch_before_its_first_session() {
+    let env = env();
+    env.write_claude_json(ME);
+    at(&env, &["import"], "2026-10-21T08:00:00Z");
+    env.write_transcript_at("mine", "claude-sonnet-5-5", "2026-10-21T09:00:00Z", 45_000);
+    at(&env, &["import"], "2026-10-21T09:30:00Z");
+    env.write_claude_json(WORK);
+    let shown = at(&env, &["budget", "show"], MID_MONTH);
+    assert!(
+        shown.starts_with("  Account:     Acme · Enterprise (oauth:work)\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn an_unreadable_login_is_warned_about_once_and_a_missing_one_not_at_all() {
+    let env = env();
+    cmd(&env, &["import"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+    env.write_claude_json("{broken");
+    let output = cmd(&env, &["import"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with("Cannot read the Claude Code login: ")
+            && stderr.contains(".claude.json is not valid JSON"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn stats_and_export_say_on_stderr_when_other_accounts_are_left_out() {
+    let env = env();
+    two_logins(&env);
+    let note = "Showing Acme · Enterprise; --account all for every account\n";
+    let stderr_of = |args: &[&str]| {
+        let output = cmd(&env, args)
+            .env("CLAUDE_PLUS_NOW", MID_MONTH)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        (
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let (stats, stats_err) = stderr_of(&["stats", "--days", "1"]);
+    assert_eq!(stats_err, note);
+    assert!(!stats.contains("--account all"), "{stats}");
+    let (export, export_err) = stderr_of(&["export", "--format", "csv", "--days", "1"]);
+    assert_eq!(export_err, note);
+    assert!(!export.contains("--account all"), "{export}");
+    for args in [
+        ["stats", "--days", "1", "--account", "all"].as_slice(),
+        ["stats", "--days", "1", "--account", "oauth:work"].as_slice(),
+        [
+            "export",
+            "--format",
+            "csv",
+            "--days",
+            "1",
+            "--account",
+            "all",
+        ]
+        .as_slice(),
+    ] {
+        assert_eq!(stderr_of(args).1, "", "{args:?}");
+    }
+}
+
+#[test]
+fn stats_say_nothing_extra_when_only_the_current_account_spent() {
+    let env = env();
+    signed_in_with_spend(&env);
+    let output = cmd(&env, &["stats", "--days", "1"])
+        .env("CLAUDE_PLUS_NOW", MID_MONTH)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 }

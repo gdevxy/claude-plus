@@ -36,7 +36,8 @@ pub fn run(
         eprintln!("{line}");
     }
     reconciled?;
-    let (scope, _) = super::accounts::scope(&store, account)?;
+    let (scope, label) = super::accounts::scope(&store, account)?;
+    super::accounts::note_left_out(&store, account, &scope, &label, (since, until))?;
     let kept = scope.sessions(&store)?;
     let mut requests = store.requests_between(since, until)?;
     requests.retain(|request| scope.keeps(&kept, &request.session_id));

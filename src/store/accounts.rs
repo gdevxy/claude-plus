@@ -255,15 +255,29 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn latest_session_account(&self) -> Result<Option<String>> {
-        Ok(self
+    pub fn current_account(&self) -> Result<Option<String>> {
+        let open: Option<(String, i64)> = self
             .conn
             .prepare_cached(
-                "SELECT a.account_id FROM session_accounts a JOIN sessions s ON s.id = a.session_id
+                "SELECT account_id, from_ms FROM account_periods WHERE to_ms IS NULL
+                 ORDER BY from_ms DESC, id DESC LIMIT 1",
+            )?
+            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let latest: Option<(String, Option<i64>)> = self
+            .conn
+            .prepare_cached(
+                "SELECT a.account_id, s.started_at FROM session_accounts a JOIN sessions s ON s.id = a.session_id
                  ORDER BY s.started_at DESC, s.id DESC LIMIT 1",
             )?
-            .query_row([], |r| r.get(0))
-            .optional()?)
+            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        Ok(match (open, latest) {
+            (Some((open, from_ms)), Some((_, Some(started)))) if from_ms > started * 1000 => {
+                Some(open)
+            }
+            (open, latest) => latest.map(|(id, _)| id).or(open.map(|(id, _)| id)),
+        })
     }
 
     pub fn budget(&self, account_id: &str) -> Result<Option<Budget>> {
@@ -446,10 +460,17 @@ mod tests {
             store.unattributed_sessions().unwrap(),
             vec![("s2".to_string(), 20)]
         );
-        assert_eq!(
-            store.latest_session_account().unwrap().as_deref(),
-            Some("oauth:a")
-        );
+        assert_eq!(store.current_account().unwrap().as_deref(), Some("oauth:a"));
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("b", "B"), 30_000).unwrap();
+        w.close_open_period(30_000).unwrap();
+        w.open_period("oauth:b", 30_000).unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.current_account().unwrap().as_deref(), Some("oauth:b"));
+        let mut w = store.writer().unwrap();
+        w.close_open_period(40_000).unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.current_account().unwrap().as_deref(), Some("oauth:a"));
     }
 
     #[test]
