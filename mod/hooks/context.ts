@@ -209,10 +209,12 @@ function unused(report: ContextReport | null, width: number): Line[] {
   if (items.length === 0) return []
   const total = items.reduce((sum, item) => sum + item.tokens, 0)
   const estimated = items.some(item => item.estimated)
-  return [
+  const lines = [
     pair('ctx-unused', 'Not used in 14 days', `${estimated ? '~' : ''}${tokens(total)} a turn`, width, { dim: true }, { bold: true }),
     ...items.slice(0, UNUSED_SHOWN).map((item, index) => itemRow(`ctx-unused-${index}`, item, width)),
   ]
+  const more = moreRow('ctx-unused-more', '  ', items.slice(UNUSED_SHOWN), width)
+  return more === null ? lines : [...lines, more]
 }
 
 function toolResults(report: ContextReport | null, width: number): Line[] {
@@ -279,13 +281,15 @@ function drillRows(key: string, items: readonly ContextItem[], width: number): L
   const lines = items
     .slice(0, DRILL_SHOWN)
     .map((item, index) => pair(`${key}-item-${index}`, `    ${drillLabel(item)}`, `${item.estimated ? '~' : ''}${tokens(item.tokens)}`, width, {}, { dim: true }))
-  const rest = items.slice(DRILL_SHOWN)
-  if (rest.length > 0) {
-    const sum = rest.reduce((total, item) => total + item.tokens, 0)
-    const value = `${rest.some(item => item.estimated) ? '~' : ''}${tokens(sum)}`
-    lines.push(pair(`${key}-more`, `    + ${rest.length} more`, value, width, {}, { dim: true }))
-  }
-  return lines
+  const more = moreRow(`${key}-more`, '    ', items.slice(DRILL_SHOWN), width)
+  return more === null ? lines : [...lines, more]
+}
+
+function moreRow(key: string, indent: string, rest: readonly ContextItem[], width: number): Line | null {
+  if (rest.length === 0) return null
+  const sum = rest.reduce((total, item) => total + item.tokens, 0)
+  const value = `${rest.some(item => item.estimated) ? '~' : ''}${tokens(sum)}`
+  return pair(key, `${indent}+ ${rest.length} more`, value, width, {}, { dim: true })
 }
 
 function drillLabel(item: ContextItem): string {

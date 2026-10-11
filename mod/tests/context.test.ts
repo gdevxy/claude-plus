@@ -193,6 +193,29 @@ describe('context screen', () => {
     expect(text(line(estimated, 'ctx-part-memory-item-0'))).toBe('    CLAUDE.md · Project           1.6k')
   })
 
+  test('says how many unused items are left out and what they cost', () => {
+    const report = contextReport()
+    const unused = Array.from({ length: 6 }, (_, index) => ({
+      kind: 'skill' as const,
+      name: `idle-${index}`,
+      detail: null,
+      tokens: 600 - index * 100,
+      estimated: false,
+      uses_session: 0,
+      uses_14d: 0,
+    }))
+    const lines = contextScreen(input({ report: { ...report, dead_weight: unused } }))
+    const at = frame(lines).indexOf('Not used in 14 days        2.1k a turn')
+    expect(frame(lines).slice(at, at + 6)).toEqual([
+      'Not used in 14 days        2.1k a turn',
+      '  Skill idle-0                     600',
+      '  Skill idle-1                     500',
+      '  Skill idle-2                     400',
+      '  Skill idle-3                     300',
+      '  + 2 more                         300',
+    ])
+  })
+
   test('colors categories with Claude Code theme keys and falls back to text', () => {
     expect(themeColor('permission')).toBe('permission')
     expect(themeColor('purple_FOR_SUBAGENTS_ONLY')).toBe('text')

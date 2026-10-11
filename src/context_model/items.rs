@@ -92,6 +92,7 @@ pub fn dead_weight(items: &[Item], breakdown: Option<&Breakdown>) -> Vec<Item> {
         .iter()
         .filter(|item| item.tokens > 0 && item.uses_14d == Some(0))
         .filter(|item| !(item.kind == ItemKind::Skill && fixed.contains(&item.name.as_str())))
+        .take(MAX_ITEMS)
         .cloned()
         .collect()
 }
@@ -554,6 +555,26 @@ mod naming {
             skills_total: 0,
             skills_included: 0,
         }
+    }
+
+    #[test]
+    fn dead_weight_is_capped_like_the_items() {
+        let entries = (0..MAX_ITEMS + 5)
+            .map(|index| Entry {
+                name: format!("skill-{index:03}"),
+                source: "userSettings".into(),
+                plugin: None,
+                tokens: 50,
+            })
+            .collect();
+        let breakdown = listing(entries);
+        let all = items(
+            Some(&breakdown),
+            &Scan::default(),
+            &Ratios::default(),
+            &Uses::default(),
+        );
+        assert_eq!(dead_weight(&all, Some(&breakdown)).len(), MAX_ITEMS);
     }
 
     #[test]
