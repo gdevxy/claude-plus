@@ -77,14 +77,17 @@ impl Writer<'_> {
     }
 }
 
+const SAMPLES_SINCE: &str =
+    "SELECT ts_ms, session_id, account_id, model, window, used_pct, resets_at_ms FROM limit_samples
+     WHERE ts_ms >= ?1 ORDER BY ts_ms, id";
+
 impl Store {
     pub fn limit_samples_since(&self, since_ms: i64) -> Result<Vec<LimitSample>> {
-        let mut statement = self.conn.prepare_cached(
-            "SELECT ts_ms, session_id, account_id, model, window, used_pct, resets_at_ms FROM limit_samples
-             WHERE ts_ms >= ?1 ORDER BY account_id, window, ts_ms, id",
-        )?;
+        let mut statement = self.conn.prepare_cached(SAMPLES_SINCE)?;
         let rows = statement.query_map([since_ms], read_sample)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut samples = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        samples.sort_by(|a, b| (&a.account_id, &a.window).cmp(&(&b.account_id, &b.window)));
+        Ok(samples)
     }
 
     pub fn spend_since(&self, since_ms: i64) -> Result<Vec<SpendPoint>> {
@@ -202,6 +205,24 @@ mod tests {
         assert!(w.limit_sample(&theirs).unwrap());
         w.commit().unwrap();
         assert_eq!(store.limit_samples_since(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn samples_are_read_through_the_time_index() {
+        let store = Store::open_in_memory().unwrap();
+        let plan: Vec<String> = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SAMPLES_SINCE}"))
+            .unwrap()
+            .query_map([0], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step
+                .starts_with("SEARCH limit_samples USING INDEX limit_samples_by_time (ts_ms>?)")),
+            "{plan:?}"
+        );
     }
 
     #[test]

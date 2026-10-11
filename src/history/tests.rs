@@ -539,3 +539,14 @@ fn an_account_with_nothing_spent_still_lists_itself() {
         vec!["oauth:gone", ME, WORK]
     );
 }
+
+#[test]
+fn a_report_from_an_older_daemon_without_accounts_still_reads() {
+    let mut value = serde_json::to_value(report(Range::Week)).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.remove("account");
+    object.remove("accounts");
+    let older: HistoryReport = serde_json::from_value(value).unwrap();
+    assert_eq!(older.account, None);
+    assert!(older.accounts.is_empty());
+}

@@ -156,7 +156,9 @@ pub struct HistoryReport {
     pub generated_at_ms: i64,
     pub since_ms: i64,
     pub until_ms: i64,
+    #[serde(default)]
     pub account: Option<String>,
+    #[serde(default)]
     pub accounts: Vec<AccountRef>,
     pub calibration: Calibration,
     pub totals: Totals,

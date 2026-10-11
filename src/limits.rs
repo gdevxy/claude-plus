@@ -126,19 +126,23 @@ pub fn fit(
     settled_before_ms: i64,
 ) -> Vec<Fit> {
     let mut ratios: BTreeMap<(Option<String>, String, String), Vec<f64>> = BTreeMap::new();
+    let mut spend_by_account: HashMap<Option<&str>, Vec<&SpendPoint>> = HashMap::new();
+    for point in spend {
+        let account = accounts.get(&point.session_id).map(String::as_str);
+        spend_by_account.entry(account).or_default().push(point);
+    }
     for instance in instances(samples) {
         let account = instance[0].account_id.as_deref();
-        let own: Vec<&SpendPoint> = spend
-            .iter()
-            .filter(|point| accounts.get(&point.session_id).map(String::as_str) == account)
-            .collect();
+        let own = spend_by_account
+            .get(&account)
+            .map_or(&[][..], Vec::as_slice);
         for pair in instance.windows(2) {
             let (from, to) = (&pair[0], &pair[1]);
             let gained = to.used_pct - from.used_pct;
             if to.ts_ms > settled_before_ms || gained <= 0.0 {
                 continue;
             }
-            let Some((family, usd)) = dominant_spend(&own, from.ts_ms, to.ts_ms) else {
+            let Some((family, usd)) = dominant_spend(own, from.ts_ms, to.ts_ms) else {
                 continue;
             };
             ratios

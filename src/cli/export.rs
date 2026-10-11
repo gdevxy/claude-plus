@@ -6,7 +6,7 @@ use chrono::{Days, Local};
 use clap::ValueEnum;
 
 use crate::history::calendar::local_midnight;
-use crate::history::export;
+use crate::history::export::{self, SessionAccount};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
 use crate::store::Store;
@@ -40,7 +40,7 @@ pub fn run(paths: &Paths, prices: &PriceTable, format: Format, days: Option<u32>
     print(format, &rows)
 }
 
-fn account_labels(store: &Store) -> Result<HashMap<String, String>> {
+fn account_labels(store: &Store) -> Result<HashMap<String, SessionAccount>> {
     let labels: HashMap<String, String> = store
         .accounts()?
         .into_iter()
@@ -49,7 +49,10 @@ fn account_labels(store: &Store) -> Result<HashMap<String, String>> {
     Ok(store
         .session_accounts()?
         .into_iter()
-        .filter_map(|(session, account)| Some((session, labels.get(&account)?.clone())))
+        .filter_map(|(session, id)| {
+            let label = labels.get(&id)?.clone();
+            Some((session, SessionAccount { id, label }))
+        })
         .collect())
 }
 

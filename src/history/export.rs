@@ -29,6 +29,12 @@ pub struct ExportRow {
     pub reconciled_usd: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionAccount {
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Serialize)]
 struct Export<'a> {
     v: u32,
@@ -39,7 +45,7 @@ pub fn rows<Tz: TimeZone>(
     requests: &[SpentRequest],
     adjustments: &[SpentAdjustment],
     sessions: &[SessionInfo],
-    accounts: &HashMap<String, String>,
+    accounts: &HashMap<String, SessionAccount>,
     tz: &Tz,
 ) -> Vec<ExportRow> {
     let names = project_names(sessions);
@@ -53,23 +59,24 @@ pub fn rows<Tz: TimeZone>(
         })
         .collect();
     let mut grouped = Grouped::new();
-    let key = |session: &str, ts: i64, model: &str| -> Option<Key> {
+    let key = |session: &str, ts: i64, model: &str| -> Option<(Key, String)> {
         let day = DateTime::from_timestamp(ts, 0)?
             .with_timezone(tz)
             .date_naive()
             .to_string();
         let project = projects.get(session).cloned().unwrap_or_default();
-        let account = accounts
-            .get(session)
-            .map_or(UNKNOWN_ACCOUNT, String::as_str)
-            .to_string();
-        Some((day, project, account, model.to_string()))
+        let (id, label) = accounts.get(session).map_or_else(
+            || (String::new(), UNKNOWN_ACCOUNT.to_string()),
+            |account| (account.id.clone(), account.label.clone()),
+        );
+        Some(((day, project, id, model.to_string()), label))
     };
     for request in requests {
-        let Some(key) = key(&request.session_id, request.point.ts, &request.point.model) else {
+        let Some((key, label)) = key(&request.session_id, request.point.ts, &request.point.model)
+        else {
             continue;
         };
-        let row = row_of(&mut grouped, key);
+        let row = row_of(&mut grouped, key, label);
         row.requests += 1;
         add_tokens(row, &request.point.tokens);
         match request.cost_usd {
@@ -78,10 +85,11 @@ pub fn rows<Tz: TimeZone>(
         }
     }
     for adjustment in adjustments {
-        let Some(key) = key(&adjustment.session_id, adjustment.ts, &adjustment.model) else {
+        let Some((key, label)) = key(&adjustment.session_id, adjustment.ts, &adjustment.model)
+        else {
             continue;
         };
-        let row = row_of(&mut grouped, key);
+        let row = row_of(&mut grouped, key, label);
         add_tokens(row, &adjustment.tokens);
         let usd = adjustment.cost_usd.unwrap_or(0.0);
         row.cost_usd += usd;
@@ -104,13 +112,13 @@ fn to_six_decimals(usd: f64) -> f64 {
 type Key = (String, String, String, String);
 type Grouped = BTreeMap<Key, ExportRow>;
 
-fn row_of(grouped: &mut Grouped, key: Key) -> &mut ExportRow {
+fn row_of(grouped: &mut Grouped, key: Key, label: String) -> &mut ExportRow {
     grouped
         .entry(key)
-        .or_insert_with_key(|(day, project, account, model)| ExportRow {
+        .or_insert_with_key(|(day, project, _, model)| ExportRow {
             day: day.clone(),
             project: project.clone(),
-            account: account.clone(),
+            account: label,
             model: model.clone(),
             ..Default::default()
         })
@@ -195,10 +203,17 @@ mod tests {
         }
     }
 
-    fn accounts() -> HashMap<String, String> {
+    fn account(id: &str, label: &str) -> SessionAccount {
+        SessionAccount {
+            id: id.into(),
+            label: label.into(),
+        }
+    }
+
+    fn accounts() -> HashMap<String, SessionAccount> {
         HashMap::from([
-            ("s1".to_string(), "Me".to_string()),
-            ("s2".to_string(), "Work, Inc".to_string()),
+            ("s1".to_string(), account("oauth:me", "Me")),
+            ("s2".to_string(), account("oauth:work", "Work, Inc")),
         ])
     }
 
@@ -337,5 +352,39 @@ mod tests {
         );
         assert_eq!(rows[0].account, "Unknown");
         assert!(csv(&rows).contains("\n2026-10-10,app,Unknown,claude-opus-5-5,"));
+    }
+
+    #[test]
+    fn two_accounts_with_the_same_label_export_as_separate_rows() {
+        let same = HashMap::from([
+            ("s1".to_string(), account("oauth:a", "Work")),
+            ("s2".to_string(), account("oauth:b", "Work")),
+        ]);
+        let sessions = vec![
+            SessionInfo {
+                id: "s1".into(),
+                project: "-work-app".into(),
+                cwd: Some("/work/app".into()),
+                title: None,
+            },
+            SessionInfo {
+                id: "s2".into(),
+                project: "-work-app".into(),
+                cwd: Some("/work/app".into()),
+                title: None,
+            },
+        ];
+        let rows = rows(
+            &[
+                request("s1", OCT_10_23H, "claude-opus-5-5", Some(1.0)),
+                request("s2", OCT_10_23H, "claude-opus-5-5", Some(2.0)),
+            ],
+            &[],
+            &sessions,
+            &same,
+            &Utc,
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.account == "Work"));
     }
 }

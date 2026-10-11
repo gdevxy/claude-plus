@@ -174,6 +174,13 @@ pub fn recap(days: &[Day]) -> Option<Recap> {
     })
 }
 
+fn rates_for(scope: &Scope, fits: &[limits::Fit]) -> Rates {
+    match scope.account() {
+        Some(account) => Rates::of(&limits::fits_of(fits, Some(account))),
+        None => Rates::of(&[]),
+    }
+}
+
 pub fn read<Tz: TimeZone>(
     store: &Store,
     prices: &PriceTable,
@@ -244,10 +251,7 @@ where
     let dead_weight = items::dead_weight(&all, live.as_ref());
     let month_items = items::items(live.as_ref(), request.scan, &ratios, &monthly);
     let memory = memory_texts(request.scan);
-    let rates = Rates::of(&limits::fits_of(
-        &limits::stored_fit(store)?,
-        scope.account(),
-    ));
+    let rates = rates_for(&scope, &limits::stored_fit(store)?);
     let prompts: Vec<PromptPoint> = prompts_of(store, &requests, since, spans.until)?
         .into_iter()
         .filter(|p| scope.keeps(&kept, &p.session_id))
@@ -852,6 +856,22 @@ mod tests {
         assert_eq!((work.requests, work.sessions), (2, 1));
         let unattributed = insights("s3");
         assert_eq!((unattributed.requests, unattributed.sessions), (3, 2));
+    }
+
+    #[test]
+    fn an_unattributed_session_gets_no_five_hour_share_even_with_unattributed_fits() {
+        let fit = |account: Option<&str>, pct_per_usd| limits::Fit {
+            account: account.map(String::from),
+            window: "five_hour".into(),
+            family: "opus".into(),
+            pairs: 30,
+            pct_per_usd,
+        };
+        let fits = [fit(None, 2.0), fit(Some("oauth:me"), 3.0)];
+        let all = rates_for(&Scope::All, &fits);
+        assert_eq!(all.pct("claude-opus-5-5", Some(1.0)), None);
+        let mine = rates_for(&Scope::Account("oauth:me".into()), &fits);
+        assert_eq!(mine.pct("claude-opus-5-5", Some(1.0)), Some(3.0));
     }
 
     #[test]
