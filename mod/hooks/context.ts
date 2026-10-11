@@ -149,7 +149,7 @@ function categories(input: ContextInput, composition: LiveContext, width: number
     }
   })
   const deferred = composition.categories.filter(category => category.kind === 'deferred').reduce((sum, category) => sum + category.tokens, 0)
-  if (deferred > 0) lines.push(prose('ctx-deferred', `+ ${tokens(deferred)} of tool schemas load on demand`, { dim: true }, 2))
+  if (deferred > 0) lines.push(prose('ctx-deferred', `+ ${tokens(deferred)} of tool schemas load on demand`, { dim: true }))
   lines.push(...injected(reportOf(input)?.history ?? null))
   if (input.expanded.includes('categories')) {
     const ago = duration(Math.max(0, input.nowMs - composition.ts_ms))

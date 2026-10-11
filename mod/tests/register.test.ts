@@ -1,9 +1,9 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
-import type { HttpInit, On } from 'claude-code'
+import type { HttpInit, On, SessionUsageArgs } from 'claude-code'
 
-import type { Snapshot } from '../types'
-import { MINUTE_MS, NOW_MS, snapshot } from './fixtures'
+import type { ContextReport, Snapshot } from '../types'
+import { MINUTE_MS, NOW_MS, contextReport, snapshot, usage } from './fixtures'
 import { paintTree, trimmed } from './paint'
 
 type Wiring = {
@@ -14,6 +14,8 @@ type Wiring = {
   openRefusal: string | null
   resets: number
   ensureCures: boolean
+  report: ContextReport
+  usages: SessionUsageArgs[]
   silent: boolean
   holding: boolean
   held: (() => void)[]
@@ -37,7 +39,7 @@ const MEASURE = {
 
 const PANE_FRAMES: Record<number, string[]> = {
   40: [
-    ' ✻ claude-plus                     Live',
+    ' ✻ claude-plus       1: Live 2: Context',
     '',
     ' Opus 5.5 · high                  $4.18',
     '',
@@ -66,7 +68,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '         resets 2d 23h',
   ],
   60: [
-    ' ✻ claude-plus                                         Live',
+    ' ✻ claude-plus                           1: Live 2: Context',
     '',
     ' Opus 5.5 · high                                      $4.18',
     '',
@@ -95,7 +97,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '         resets in 2d 23h',
   ],
   100: [
-    ' ✻ claude-plus                                                                                 Live',
+    ' ✻ claude-plus                                                                   1: Live 2: Context',
     '',
     ' Opus 5.5 · high                                                                              $4.18',
     '',
@@ -126,12 +128,16 @@ const PANE_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), usages: [], serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.turns', () => ({ value: 14 }))
+  on('session.usage', ($, e) => {
+    wiring.usages.push(e)
+    return { value: usage() }
+  })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.open', ($, e) => {
     if (wiring.openRefusal !== null) return { deny: wiring.openRefusal }
@@ -163,7 +169,11 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     }
     if (e.url.endsWith('/events')) wiring.delivered.push(e)
     if (wiring.rebuilding && e.url.includes('/snapshot')) return { value: { status: 503, ok: false, headers: {}, text: '{"error":"rebuilding"}' } }
-    const body = e.url.includes('/snapshot') ? JSON.stringify(servedBody(wiring)) : '{"accepted":1,"rejected":[]}'
+    const body = e.url.includes('/snapshot')
+      ? JSON.stringify(servedBody(wiring))
+      : e.url.includes('/context')
+        ? JSON.stringify({ v: 1, ...wiring.report, session: wiring.session })
+        : '{"accepted":1,"rejected":[]}'
     return { value: { status: 200, ok: true, headers: {}, text: body } }
   })
   on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', props: {}, children: ['? for shortcuts'] }))
@@ -388,6 +398,7 @@ describe('plus mod', () => {
       await clock.advance(1000)
       const ui = await mount($, columns)
       expect((await ui.find({ key: 'tab-live' }))?.props).toEqual({ key: 'tab-live', hotkey: '1', plain: true, dimColor: false, label: 'Live' })
+      expect((await ui.find({ key: 'tab-context' }))?.props).toEqual({ key: 'tab-context', hotkey: '2', plain: true, dimColor: true, label: 'Context' })
       const rows = paintTree(await ui.drawn(), columns)
       expect(rows.filter(row => row.length > columns)).toEqual([])
       expect(trimmed(rows)).toEqual(PANE_FRAMES[columns])
@@ -746,5 +757,109 @@ describe('plus mod', () => {
     wiring.rebuilding = false
     await clock.advance(3000)
     expect(await ui.find({ key: 'daemon' })).toBeUndefined()
+  })
+
+  for (const columns of [40, 60, 100]) {
+    test(`the Context tab opens the view and draws the breakdown at ${columns} columns`, async ($, on) => {
+      const clock = mock.clock(on, { now: NOW_MS })
+      const wiring = wire(on)
+      await start($)
+      await $.session.measure(MEASURE)
+      await clock.advance(1000)
+      const ui = await mount($, columns)
+      await ui.press({ key: 'tab-context' })
+      await clock.advance(1000)
+      expect(wiring.usages).toEqual([{ breakdown: 'full', columns: 40 }])
+      expect((await ui.find({ key: 'tab-context' }))?.props.dimColor).toBe(false)
+      expect((await ui.find({ key: 'ctx-head' }))?.text).toBe(`Context · Opus 5.5${' '.repeat(columns - 2 - 28)}46k / 200k`)
+      expect((await ui.find({ key: 'ctx-cat-6' }))?.text.length).toBe(columns - 2)
+      expect((await ui.find({ key: 'ctx-cat-4' }))?.text.length).toBe(columns - 2)
+      expect((await ui.find({ key: 'ctx-top-0' }))?.text.startsWith('  MCP linear · 2 tools')).toBe(true)
+      expect(wiring.fetched.some(call => call.url.endsWith('/context?session=s1'))).toBe(true)
+      expect(paintTree(await ui.drawn(), columns).filter(row => row.length > columns)).toEqual([])
+      await ui.press({ key: 'open-memory_file' })
+      expect((await ui.find({ key: 'ctx-cat-4' }))?.text.startsWith('▾ Memory files')).toBe(true)
+      expect((await ui.find({ key: 'ctx-cat-4-item-0' }))?.text).toBe(`    CLAUDE.md · Project${' '.repeat(columns - 2 - 27)}1.6k`)
+      await ui.press({ key: 'open-memory_file' })
+      expect(await ui.find({ key: 'ctx-cat-4-item-0' })).toBeUndefined()
+      await ui.press({ key: 'tab-live' })
+      expect(await ui.find({ key: 'ctx-head' })).toBeUndefined()
+      expect((await ui.find({ key: 'headline' }))?.text.startsWith('Opus 5.5 · high')).toBe(true)
+      await ui.unmount()
+    })
+  }
+
+  test('the breakdown is forwarded as a session.usage event without its grid', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await $.turn.complete({ turnId: 't1', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+    await clock.advance(1000)
+    await clock.advance(1000)
+    const sent = wiring.delivered
+      .flatMap(call => (JSON.parse(call.init?.body ?? '{}') as { events: { kind: string; data: Record<string, unknown> }[] }).events)
+      .find(event => event.kind === 'session.usage')
+    expect(sent?.data.gridRows).toBeUndefined()
+    expect(sent?.data.totalTokens).toBe(46_000)
+    expect(sent?.data.contextWindow).toBe(200_000)
+    expect((sent?.data.mcpTools as unknown[]).length).toBe(1)
+  })
+
+  test('the Live view asks for a breakdown once per ten minutes of turns, the Context view once a minute', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    expect(wiring.usages.length).toBe(0)
+    await $.turn.complete({ turnId: 't1', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+    await clock.advance(1000)
+    expect(wiring.usages.length).toBe(1)
+    await $.turn.complete({ turnId: 't2', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+    await clock.advance(5 * MINUTE_MS)
+    expect(wiring.usages.length).toBe(1)
+    await clock.advance(5 * MINUTE_MS)
+    expect(wiring.usages.length).toBe(2)
+    const ui = await mount($, 60)
+    await ui.press({ key: 'tab-context' })
+    await $.turn.complete({ turnId: 't3', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+    await clock.advance(30_000)
+    expect(wiring.usages.length).toBe(2)
+    await clock.advance(30_000)
+    expect(wiring.usages.length).toBe(3)
+    await $.turn.complete({ turnId: 'a1', agentId: 'agent-1', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+    await clock.advance(2 * MINUTE_MS)
+    expect(wiring.usages.length).toBe(3)
+  })
+
+  test('the Context view keeps the breakdown from Claude Code while the daemon is down', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on, { down: true })
+    await start($)
+    await $.session.measure(MEASURE)
+    await clock.advance(1000)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-context' })
+    await clock.advance(1000)
+    await clock.advance(3000)
+    expect((await ui.find({ key: 'daemon' }))?.text).toBe('The daemon is not answering')
+    expect((await ui.find({ key: 'daemon-fix' }))?.text).toBe('Run claude-plus daemon --ensure')
+    expect((await ui.find({ key: 'ctx-head' }))?.text).toBe('Context · Opus 5.5          46k / 200k')
+    expect(await ui.find({ key: 'ctx-top' })).toBeUndefined()
+  })
+
+  test('a new session after /clear drops the previous context report', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-context' })
+    await clock.advance(1000)
+    expect(await ui.find({ key: 'ctx-top' })).toBeDefined()
+    wiring.session = 's2'
+    wiring.down = true
+    await clock.advance(3000)
+    expect(await ui.find({ key: 'ctx-top' })).toBeUndefined()
+    expect(await ui.find({ key: 'ctx-cat-6' })).toBeUndefined()
   })
 })

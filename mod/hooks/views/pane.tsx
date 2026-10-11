@@ -5,18 +5,18 @@ import { Row } from './widgets'
 
 export type Tab = { key: string; hotkey: string; label: string; isActive: boolean; onPress: () => void }
 
-export function Live({
+export function PaneBody({
   ui,
   width,
   lines,
   tabs,
-  onWhy,
+  onToggle,
 }: {
   ui: Ui
   width: number
   lines: Line[]
   tabs: Tab[]
-  onWhy: (key: string) => void
+  onToggle: (key: string) => void
 }) {
   const { Box, Text, Button } = ui
   const inner = Math.max(1, width - 2 * PADDING)
@@ -26,7 +26,7 @@ export function Live({
         <Text color="claude" bold>
           ✻ claude-plus
         </Text>
-        <Box>
+        <Box gap={1}>
           {tabs.map(tab => (
             <Button key={tab.key} hotkey={tab.hotkey} plain dimColor={!tab.isActive} label={tab.label} onPress={tab.onPress} />
           ))}
@@ -34,7 +34,7 @@ export function Live({
       </Box>
       <Text> </Text>
       {lines.map(line => (
-        <Row ui={ui} line={line} width={inner} onWhy={onWhy} />
+        <Row ui={ui} line={line} width={inner} onToggle={onToggle} />
       ))}
     </Box>
   )

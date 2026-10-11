@@ -1,9 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 'claude-code'
 
-import type { Daemon, DaemonStatus, Local, Motion, PaneState, PlusView, Snapshot } from '../types'
+import type { ContextReport, Daemon, DaemonStatus, Local, Motion, PaneState, PlusView, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
-import { Outbox, eventId, eventsBody, fetchSnapshot, measureOf, send, socketPath } from './client'
+import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
+import { contextScreen } from './context'
 import {
   EMPTY_LOCAL,
   TICK_MS,
@@ -21,7 +22,7 @@ import {
   tickPeriod,
   toggled,
 } from './state'
-import { Live } from './views/live'
+import { PaneBody } from './views/pane'
 
 export const PANE_ID = 'plus'
 export const PANE_TITLE = 'claude-plus'
@@ -31,10 +32,15 @@ export const FULLSCREEN_KEY = 'fullscreen'
 export const SERVICE_UNAVAILABLE = 503
 export const STUCK_POST_MS = 30_000
 export const ENSURE_RETRY_MS = 30_000
+export const CONTEXT_POLL_MS = 10_000
+export const USAGE_GAP_MS = 60_000
+export const USAGE_IDLE_GAP_MS = 600_000
+export const USAGE_COLUMNS = 40
 
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
-const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-1' })
+const context = atom({ plugin: 'plus', key: 'context' } as const, null as ContextReport | null, { shape: 'context-1' })
+const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-2' })
 const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false, unasked: 'settled' } as PaneState)
 const daemon = atom({ plugin: 'plus', key: 'daemon' } as const, { status: 'starting', detail: null } as Daemon)
 const now = atom({ plugin: 'plus', key: 'now' } as const, 0)
@@ -54,6 +60,10 @@ type Runtime = {
   idPrefix: string | null
   sequence: number
   polledAtMs: number
+  contextPolledAtMs: number
+  usageDue: boolean
+  usageRunning: boolean
+  usageAtMs: number
   shownStatus: string | undefined
 }
 
@@ -71,6 +81,10 @@ function fresh(options: PluginOptions): Runtime {
     idPrefix: null,
     sequence: 0,
     polledAtMs: -Infinity,
+    contextPolledAtMs: -Infinity,
+    usageDue: false,
+    usageRunning: false,
+    usageAtMs: -Infinity,
     shownStatus: undefined,
   }
 }
@@ -129,6 +143,10 @@ async function tick($: EngineInterface): Promise<void> {
     await showStatus($)
     if (runtime.outbox.size > 0) await flush($)
     if (at - runtime.polledAtMs >= POLL_MS) await poll($)
+    const shownView = await read($, view)
+    const usageGap = shownView === 'context' ? USAGE_GAP_MS : USAGE_IDLE_GAP_MS
+    if (runtime.usageDue && !runtime.usageRunning && at - runtime.usageAtMs >= usageGap) quietly(collectUsage($))
+    if (shownView === 'context' && at - runtime.contextPolledAtMs >= CONTEXT_POLL_MS) await pollContext($)
     if (needsEnsure((await read($, daemon)).status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($))
   } catch {
     return
@@ -171,7 +189,10 @@ async function follow($: EngineInterface): Promise<string> {
   if (known.session !== id) {
     await update($, local, () => ({ ...EMPTY_LOCAL, session: id }))
     await update($, snapshot, () => null)
+    await update($, context, () => null)
     await update($, motions, () => ({}))
+    runtime.usageAtMs = -Infinity
+    runtime.contextPolledAtMs = -Infinity
   }
   return id
 }
@@ -207,6 +228,44 @@ async function poll($: EngineInterface): Promise<void> {
   await animate($, async () => {
     await update($, snapshot, () => parsed)
   })
+}
+
+async function pollContext($: EngineInterface): Promise<void> {
+  runtime.contextPolledAtMs = await $.clock.now()
+  const id = await follow($)
+  const path = await socketOf($)
+  if (path === null) return
+  const reply = await fetchContext(io($), path, id)
+  if (reply.kind !== 'context' || reply.report.session !== id) return
+  await update($, context, () => reply.report)
+}
+
+async function collectUsage($: EngineInterface): Promise<void> {
+  runtime.usageRunning = true
+  runtime.usageDue = false
+  try {
+    runtime.usageAtMs = await $.clock.now()
+    const usage = await $.session.usage({ breakdown: 'full', columns: USAGE_COLUMNS }).catch(() => null)
+    if (usage === null) return
+    const id = await follow($)
+    const at = await $.clock.now()
+    const breakdown = breakdownOf(usage, at)
+    const data = usageData(usage)
+    if (breakdown === null || data === null) return
+    await update($, local, known => ({ ...known, breakdown }))
+    runtime.contextPolledAtMs = -Infinity
+    await forward($, 'session.usage', data, id)
+  } finally {
+    runtime.usageRunning = false
+  }
+}
+
+async function showView($: EngineInterface, next: PlusView): Promise<void> {
+  await update($, view, () => next)
+  if (next !== 'context') return
+  runtime.contextPolledAtMs = -Infinity
+  if ((await read($, local)).breakdown === null) runtime.usageDue = true
+  ensureTimers($)
 }
 
 async function flush($: EngineInterface): Promise<void> {
@@ -372,6 +431,7 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined) {
       const turns = await $.session.turns()
       await update($, local, known => ({ ...known, working: false, turns }))
+      runtime.usageDue = true
     }
     quietly(forward($, 'turn.complete', { turnId: e.turnId, agentId: e.agentId ?? null, reason: e.reason, usage: e.usage === undefined ? null : { ...e.usage } }))
     runtime.polledAtMs = -Infinity
@@ -380,6 +440,7 @@ export const register: Register = (on, options) => {
 
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
+    if (e.agentId === undefined) runtime.usageDue = true
     quietly(forward($, 'session.compact', {
       trigger: e.trigger,
       agentId: e.agentId ?? null,
@@ -405,23 +466,32 @@ export const register: Register = (on, options) => {
     if (e.props.placement === 'inline' || e.viewport?.isFullscreen === false) $.clock.after(0, () => quietly(closeUnasked($)))
     const nowMs = await read($, now)
     const shownView = await read($, view)
-    const lines = screen({
-      width: e.props.bodyColumns,
-      nowMs,
-      animations: runtime.animations,
-      snapshot: await read($, snapshot),
-      local: await read($, local),
-      daemon: await read($, daemon),
-      expanded: await read($, expanded),
-      motions: await read($, motions),
-    })
+    const known = await read($, local)
+    const status = await read($, daemon)
+    const open = await read($, expanded)
+    const lines =
+      shownView === 'context'
+        ? contextScreen({ width: e.props.bodyColumns, nowMs, report: await read($, context), local: known, daemon: status, expanded: open })
+        : screen({
+            width: e.props.bodyColumns,
+            nowMs,
+            animations: runtime.animations,
+            snapshot: await read($, snapshot),
+            local: known,
+            daemon: status,
+            expanded: open,
+            motions: await read($, motions),
+          })
     return (
-      <Live
+      <PaneBody
         ui={$.ui.resolve(e)}
         width={e.props.bodyColumns}
         lines={lines}
-        tabs={[{ key: 'tab-live', hotkey: '1', label: 'Live', isActive: shownView === 'live', onPress: () => quietly(update($, view, () => 'live')) }]}
-        onWhy={key => quietly(update($, expanded, list => toggled(list, key)))}
+        tabs={[
+          { key: 'tab-live', hotkey: '1', label: 'Live', isActive: shownView === 'live', onPress: () => quietly(showView($, 'live')) },
+          { key: 'tab-context', hotkey: '2', label: 'Context', isActive: shownView === 'context', onPress: () => quietly(showView($, 'context')) },
+        ]}
+        onToggle={key => quietly(update($, expanded, list => toggled(list, key)))}
       />
     )
   })

@@ -17,15 +17,24 @@ export function Piece({ ui, segment }: { ui: Ui; segment: Segment }) {
   )
 }
 
-export function Row({ ui, line, width, onWhy }: { ui: Ui; line: Line; width: number; onWhy: (key: string) => void }) {
+export function Row({ ui, line, width, onToggle }: { ui: Ui; line: Line; width: number; onToggle: (key: string) => void }) {
   const { Box, Text, Button } = ui
-  const text = (
+  const pieces = (
     <Text wrap={line.wrap === true ? 'wrap' : 'truncate-end'}>
       {line.segments.map(segment => (
         <Piece ui={ui} segment={segment} />
       ))}
     </Text>
   )
+  const toggle = line.toggle
+  const text =
+    toggle === undefined ? (
+      pieces
+    ) : (
+      <Button key={toggle} plain onPress={() => onToggle(toggle)}>
+        {pieces}
+      </Button>
+    )
   const why = line.why
   if (why === undefined) {
     return (
@@ -37,7 +46,7 @@ export function Row({ ui, line, width, onWhy }: { ui: Ui; line: Line; width: num
   return (
     <Box key={line.key} width={width} justifyContent="space-between">
       {text}
-      <Button key={`why-${why}`} plain dimColor label="?" onPress={() => onWhy(why)} />
+      <Button key={`why-${why}`} plain dimColor label="?" onPress={() => onToggle(why)} />
     </Box>
   )
 }

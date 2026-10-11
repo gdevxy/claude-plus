@@ -70,7 +70,10 @@ function cells(value: unknown): number {
 }
 
 function shownText(node: Drawn): string {
-  if (node.type === 'Button') return String(node.props?.label ?? '')
+  if (node.type === 'Button' && node.props?.label !== undefined) {
+    const hotkey = node.props.plain === true && typeof node.props.hotkey === 'string' ? `${node.props.hotkey}: ` : ''
+    return `${hotkey}${String(node.props.label)}`
+  }
   return (node.children ?? []).map(child => (typeof child === 'string' ? child : isDrawn(child) ? shownText(child) : '')).join('')
 }
 
@@ -86,13 +89,17 @@ export function paintTree(node: Drawn, width: number): string[] {
   const left = cells(props.paddingX) + cells(props.paddingLeft)
   const inner = outer - left - cells(props.paddingX)
   const children = (node.children ?? []).filter(isDrawn)
-  const rows = props.flexDirection === 'column' ? children.flatMap(child => paintTree(child, inner)) : across(children, inner, props.justifyContent === 'space-between')
+  const rows =
+    props.flexDirection === 'column'
+      ? children.flatMap(child => paintTree(child, inner))
+      : across(children, inner, props.justifyContent === 'space-between', cells(props.gap))
   return rows.map(row => `${' '.repeat(left)}${row}`)
 }
 
-function across(children: Drawn[], width: number, spread: boolean): string[] {
+function across(children: Drawn[], width: number, spread: boolean, gap: number): string[] {
   const [first, ...rest] = children
   if (first === undefined) return ['']
+  if (!spread && gap > 0) return [children.map(child => paintTree(child, width).join('')).join(' '.repeat(gap))]
   const right = rest.map(child => paintTree(child, width).join('')).join('')
   const rows = paintTree(first, width - right.length)
   const [top = '', ...below] = rows
