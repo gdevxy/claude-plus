@@ -203,10 +203,7 @@ fn count(uses: &BTreeMap<String, u64>, name: &str) -> u64 {
 }
 
 fn count_any(uses: &BTreeMap<String, u64>, names: &[&str]) -> u64 {
-    names
-        .iter()
-        .find_map(|name| uses.get(*name).copied())
-        .unwrap_or(0)
+    names.iter().map(|name| count(uses, name)).sum()
 }
 
 fn count_named(uses: &BTreeMap<String, u64>, source: &Source) -> u64 {
@@ -527,13 +524,13 @@ mod naming {
     }
 
     #[test]
-    fn a_skill_counts_its_uses_under_its_directory_name_first_then_its_frontmatter_name() {
+    fn a_skill_sums_its_uses_under_its_directory_name_and_its_frontmatter_name() {
         let all = items(None, &scan(), &Ratios::default(), &uses());
         assert_eq!(
             named(&all),
             vec![
                 ("paddle:billing-history", Some(2)),
-                ("spring-boot-4-migration-skill", Some(3)),
+                ("spring-boot-4-migration-skill", Some(10)),
             ]
         );
         assert!(dead_weight(&all, None).is_empty());
@@ -627,7 +624,7 @@ mod naming {
         let all = items(Some(&breakdown), &scan(), &Ratios::default(), &uses());
         assert_eq!(
             named(&all),
-            vec![("spring-boot-4-migration-skill", Some(3))]
+            vec![("spring-boot-4-migration-skill", Some(10))]
         );
     }
 }
