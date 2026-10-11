@@ -58,6 +58,7 @@ fn scan() -> Scan {
             ),
         ],
         memory_dirs: vec![],
+        ..Scan::default()
     }
 }
 

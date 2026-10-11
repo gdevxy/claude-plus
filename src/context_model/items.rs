@@ -319,6 +319,7 @@ mod tests {
                 ),
             ],
             memory_dirs: vec![],
+            ..Scan::default()
         }
     }
 
@@ -502,6 +503,7 @@ mod naming {
                 skill("paddle:billing-history", "paddle:paddle-billing-history"),
             ],
             memory_dirs: vec![],
+            ..Scan::default()
         }
     }
 

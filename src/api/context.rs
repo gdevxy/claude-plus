@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -17,6 +18,7 @@ pub const WARM_EVERY: Duration = Duration::from_secs(1);
 #[derive(Default)]
 pub struct Scans {
     entries: Mutex<Vec<Cached>>,
+    warned_oversized: AtomicBool,
 }
 
 struct Cached {
@@ -52,6 +54,10 @@ impl Scans {
             entries.remove(oldest);
         }
         (scan, at_ms)
+    }
+
+    pub fn first_oversized(&self, scan: &Scan) -> bool {
+        scan.claude_json_oversized && !self.warned_oversized.swap(true, Ordering::Relaxed)
     }
 
     pub fn due(&self, now: Instant) -> Vec<Roots> {
@@ -116,6 +122,12 @@ pub async fn context(state: Arc<State>, query: Option<&str>) -> Reply {
             project: project_dir.as_ref().map(PathBuf::from),
         };
         let (scan, scanned_at_ms) = state.scans.get(&roots, Instant::now());
+        if state.scans.first_oversized(&scan) {
+            state.log.warn(format!(
+                "{} is too large to read, its MCP servers are left out of the context view",
+                roots.claude_json.display()
+            ));
+        }
         let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
         reader.reading(|reader| {
             if reader.reindex_pending()? {
@@ -180,6 +192,19 @@ mod tests {
         assert!(scans.due(start).is_empty());
         let (full, _) = scans.get(&work, start + Duration::from_secs(1));
         assert_eq!(names(&full), vec!["CLAUDE.md", "api/CLAUDE.md"]);
+    }
+
+    #[test]
+    fn an_oversized_claude_json_is_reported_once() {
+        let scans = Scans::default();
+        let fine = Scan::default();
+        let oversized = Scan {
+            claude_json_oversized: true,
+            ..Scan::default()
+        };
+        assert!(!scans.first_oversized(&fine));
+        assert!(scans.first_oversized(&oversized));
+        assert!(!scans.first_oversized(&oversized));
     }
 
     #[test]

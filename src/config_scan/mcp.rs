@@ -4,13 +4,15 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::extensions::Plugin;
-use super::{Loading, Roots, Scope, Source, SourceKind, display, read_json, read_text_up_to};
+use super::{Loading, Roots, Scan, Scope, Source, SourceKind, display, read_json, read_text_up_to};
 
 pub const CLAUDE_JSON_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-pub fn servers(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
-    let claude_json = read_text_up_to(&roots.claude_json, CLAUDE_JSON_MAX_BYTES)
-        .and_then(|text| serde_json::from_str::<Value>(&text.content?).ok());
+pub fn servers(roots: &Roots, plugins: &[Plugin], scan: &mut Scan) {
+    let text = read_text_up_to(&roots.claude_json, CLAUDE_JSON_MAX_BYTES);
+    scan.claude_json_oversized = text.as_ref().is_some_and(|text| text.content.is_none());
+    let sources = &mut scan.sources;
+    let claude_json = text.and_then(|text| serde_json::from_str::<Value>(&text.content?).ok());
     let project_entry = roots.project.as_ref().and_then(|project| {
         claude_json
             .as_ref()?
@@ -200,6 +202,22 @@ mod tests {
         let found = scan(&home.roots(None));
         let servers: Vec<&str> = found.sources.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(servers, vec!["context7"]);
+        assert!(!found.claude_json_oversized);
+    }
+
+    #[test]
+    fn a_claude_json_past_the_hard_limit_is_reported_on_the_scan() {
+        let home = Home::new();
+        let path = home.write("home/.claude.json", "{}");
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(CLAUDE_JSON_MAX_BYTES + 1)
+            .unwrap();
+        let found = scan(&home.roots(None));
+        assert!(found.sources.is_empty());
+        assert!(found.claude_json_oversized);
     }
 
     #[test]

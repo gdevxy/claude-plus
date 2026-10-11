@@ -166,6 +166,7 @@ mod tests {
                 source(SourceKind::Agent, "reviewer", None, 300),
             ],
             memory_dirs: vec![],
+            ..Scan::default()
         }
     }
 

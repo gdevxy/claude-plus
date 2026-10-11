@@ -89,6 +89,7 @@ pub struct MemoryDir {
 pub struct Scan {
     pub sources: Vec<Source>,
     pub memory_dirs: Vec<MemoryDir>,
+    pub claude_json_oversized: bool,
 }
 
 pub fn scan(roots: &Roots) -> Scan {
@@ -115,7 +116,7 @@ fn scan_with(roots: &Roots, nested: Nested) -> Scan {
     extensions::skills(roots, &plugins, &mut seen, &mut scan.sources);
     extensions::agents(roots, &plugins, &mut seen, &mut scan.sources);
     extensions::output_styles(roots, &plugins, &settings, &mut seen, &mut scan.sources);
-    mcp::servers(roots, &plugins, &mut scan.sources);
+    mcp::servers(roots, &plugins, &mut scan);
     scan
 }
 
