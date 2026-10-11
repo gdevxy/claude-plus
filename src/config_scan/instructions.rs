@@ -17,6 +17,7 @@ const SKIPPED_DIRS: &[&str] = &[
     "dist",
     "build",
     "__pycache__",
+    "Library",
 ];
 const NESTED_NAMES: &[&str] = &["CLAUDE.md", "CLAUDE.local.md"];
 
@@ -75,7 +76,7 @@ pub fn claude_md(roots: &Roots, walk: Nested, seen: &mut Seen, sources: &mut Vec
             );
         }
     }
-    if walk == Nested::Skip {
+    if walk == Nested::Skip || roots.claude_dir.starts_with(project) {
         return;
     }
     for path in nested(project) {
@@ -180,6 +181,7 @@ fn nested(project: &Path) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = walkdir::WalkDir::new(project)
         .min_depth(1)
         .max_depth(NESTED_MAX_DEPTH)
+        .same_file_system(true)
         .into_iter()
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
@@ -282,6 +284,39 @@ mod tests {
                 (Scope::User, "CLAUDE.md", Loading::Always, 10),
                 (Scope::Project, "CLAUDE.md", Loading::Always, 7),
             ]
+        );
+    }
+
+    #[test]
+    fn a_project_holding_the_claude_dir_is_not_walked_for_nested_files() {
+        let home = Home::new();
+        home.write("home/work/api/CLAUDE.md", "deep");
+        home.write("home/Library/Mobile/CLAUDE.md", "cloud");
+        let mut sources = Vec::new();
+        claude_md(
+            &home.roots(Some("home")),
+            Nested::Walk,
+            &mut Seen::default(),
+            &mut sources,
+        );
+        assert_eq!(rows(&home, &sources), vec![]);
+    }
+
+    #[test]
+    fn a_library_folder_is_never_walked() {
+        let home = Home::new();
+        home.write("work/app/Library/Caches/CLAUDE.md", "cache");
+        home.write("work/app/src/CLAUDE.md", "src");
+        let mut sources = Vec::new();
+        claude_md(
+            &home.roots(Some("work/app")),
+            Nested::Walk,
+            &mut Seen::default(),
+            &mut sources,
+        );
+        assert_eq!(
+            rows(&home, &sources),
+            vec![(Scope::Nested, "src/CLAUDE.md", Loading::OnDemand, 3)]
         );
     }
 
