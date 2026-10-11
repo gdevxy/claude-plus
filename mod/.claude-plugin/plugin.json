@@ -16,6 +16,18 @@
       "title": "Animations",
       "description": "Let the cache heartbeat breathe and numbers ease to new values",
       "default": true
+    },
+    "alerts": {
+      "type": "boolean",
+      "title": "Alerts",
+      "description": "Toast when the cache is about to go cold, the 5h pace runs out before its reset or context nears auto-compact",
+      "default": true
+    },
+    "chime": {
+      "type": "boolean",
+      "title": "Chime",
+      "description": "Play a soft chime with the cache alert",
+      "default": false
     }
   }
 }
