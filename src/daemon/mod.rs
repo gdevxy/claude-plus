@@ -71,6 +71,7 @@ fn run_locked(
         history_reader: Mutex::new(history_reader),
         prices,
         started: Instant::now(),
+        home: paths.home.clone(),
         claude_dir: paths.claude_dir.clone(),
         claude_json: paths.claude_json.clone(),
         scans: api::context::Scans::default(),

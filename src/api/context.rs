@@ -110,6 +110,7 @@ pub async fn context(state: Arc<State>, query: Option<&str>) -> Reply {
             reader.session_cwd(&session)?
         };
         let roots = Roots {
+            home: state.home.clone(),
             claude_dir: state.claude_dir.clone(),
             claude_json: state.claude_json.clone(),
             project: project_dir.as_ref().map(PathBuf::from),
@@ -147,6 +148,7 @@ mod tests {
 
     fn roots(temp: &tempfile::TempDir, project: Option<&str>) -> Roots {
         Roots {
+            home: temp.path().join("home"),
             claude_dir: temp.path().join("claude"),
             claude_json: temp.path().join("claude.json"),
             project: project.map(|p| temp.path().join(p)),

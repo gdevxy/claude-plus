@@ -82,6 +82,7 @@ pub struct State {
     pub history_reader: Mutex<Store>,
     pub prices: PriceTable,
     pub started: Instant,
+    pub home: PathBuf,
     pub claude_dir: PathBuf,
     pub claude_json: PathBuf,
     pub scans: context::Scans,

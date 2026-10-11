@@ -55,6 +55,7 @@ impl Server {
             history_reader: Mutex::new(history_reader),
             prices: PriceTable::bundled(),
             started: Instant::now(),
+            home: temp.path().join("home"),
             claude_dir: temp.path().join("claude"),
             claude_json: temp.path().join("claude.json"),
             scans: context::Scans::default(),

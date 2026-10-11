@@ -16,6 +16,7 @@ pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
+    pub home: PathBuf,
     pub claude_dir: PathBuf,
     pub claude_json: PathBuf,
     pub project: Option<PathBuf>,
@@ -267,6 +268,7 @@ pub(crate) mod fixture {
 
         pub fn roots(&self, project: Option<&str>) -> Roots {
             Roots {
+                home: self.path("home"),
                 claude_dir: self.path("home/.claude"),
                 claude_json: self.path("home/.claude.json"),
                 project: project.map(|p| self.path(p)),

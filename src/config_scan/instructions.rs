@@ -76,7 +76,7 @@ pub fn claude_md(roots: &Roots, walk: Nested, seen: &mut Seen, sources: &mut Vec
             );
         }
     }
-    if walk == Nested::Skip || roots.claude_dir.starts_with(project) {
+    if walk == Nested::Skip || is_tree_root(roots, project) {
         return;
     }
     for path in nested(project) {
@@ -87,6 +87,16 @@ pub fn claude_md(roots: &Roots, walk: Nested, seen: &mut Seen, sources: &mut Vec
             Loading::OnDemand,
         );
     }
+}
+
+fn is_tree_root(roots: &Roots, project: &Path) -> bool {
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    roots.claude_dir.starts_with(project)
+        || project.parent().is_none()
+        || same(project, &roots.home)
 }
 
 pub fn memory(roots: &Roots, seen: &mut Seen, scan: &mut Scan) {
@@ -285,6 +295,20 @@ mod tests {
                 (Scope::Project, "CLAUDE.md", Loading::Always, 7),
             ]
         );
+    }
+
+    #[test]
+    fn the_home_directory_is_never_walked_even_with_the_claude_dir_elsewhere() {
+        let home = Home::new();
+        home.write("home/work/api/CLAUDE.md", "deep");
+        let mut roots = home.roots(Some("home"));
+        roots.claude_dir = home.path("elsewhere/.claude");
+        let mut sources = vec![];
+        claude_md(&roots, Nested::Walk, &mut Seen::default(), &mut sources);
+        assert_eq!(rows(&home, &sources), vec![]);
+        roots.project = Some("/".into());
+        claude_md(&roots, Nested::Walk, &mut Seen::default(), &mut sources);
+        assert_eq!(rows(&home, &sources), vec![]);
     }
 
     #[test]

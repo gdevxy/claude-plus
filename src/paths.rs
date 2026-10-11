@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
+    pub home: PathBuf,
     pub claude_dir: PathBuf,
     pub claude_json: PathBuf,
     pub data_dir: PathBuf,
@@ -35,6 +36,7 @@ impl Paths {
         plus_home: Option<PathBuf>,
     ) -> Self {
         Self {
+            home: home.to_path_buf(),
             claude_json: claude_config_dir
                 .as_ref()
                 .map_or_else(|| home.join(".claude.json"), |dir| dir.join(".claude.json")),
