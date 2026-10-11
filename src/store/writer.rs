@@ -61,6 +61,7 @@ pub struct ToolResultRow {
     pub chars: u64,
     pub images: u32,
     pub is_error: bool,
+    pub is_sidechain: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,8 +271,9 @@ impl Writer<'_> {
 
     pub fn tool_result(&mut self, row: &ToolResultRow) -> Result<()> {
         self.exec(
-            "INSERT OR IGNORE INTO tool_results (tool_use_id, session_id, ts, chars, images, is_error) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![row.tool_use_id, row.session_id, row.ts, row.chars as i64, row.images, row.is_error],
+            "INSERT OR IGNORE INTO tool_results (tool_use_id, session_id, ts, chars, images, is_error, is_sidechain)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![row.tool_use_id, row.session_id, row.ts, row.chars as i64, row.images, row.is_error, row.is_sidechain],
         )?;
         Ok(())
     }

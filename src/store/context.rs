@@ -113,10 +113,11 @@ impl Store {
     pub fn largest_tool_results(
         &self,
         session_id: &str,
+        since_ts: i64,
         limit: usize,
     ) -> Result<Vec<ToolResultPoint>> {
         let mut statement = self.conn.prepare_cached(LARGEST_TOOL_RESULTS)?;
-        let rows = statement.query_map(params![session_id, limit as i64], |r| {
+        let rows = statement.query_map(params![session_id, since_ts, limit as i64], |r| {
             Ok(ToolResultPoint {
                 tool: r.get(0)?,
                 ts: r.get(1)?,
@@ -170,7 +171,8 @@ const MCP_TOOL_USES_SINCE: &str = "SELECT name, COUNT(*) FROM tool_uses
 
 const LARGEST_TOOL_RESULTS: &str = "SELECT u.name, r.ts, r.chars, r.images FROM tool_results r
      LEFT JOIN tool_uses u ON u.id = r.tool_use_id
-     WHERE r.session_id = ?1 ORDER BY r.chars DESC, r.ts LIMIT ?2";
+     WHERE r.session_id = ?1 AND r.is_sidechain = 0 AND r.ts >= ?2
+     ORDER BY r.chars DESC, r.ts LIMIT ?3";
 
 #[cfg(test)]
 mod tests {
@@ -396,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn the_largest_tool_results_of_a_session_name_their_tool() {
+    fn the_largest_tool_results_are_the_main_threads_since_its_last_compaction() {
         let mut store = Store::open_in_memory().unwrap();
         let mut w = store.writer().unwrap();
         w.tool_use(&ToolUseRow {
@@ -407,36 +409,39 @@ mod tests {
             input_chars: 1,
         })
         .unwrap();
-        for (id, session, chars) in [
-            ("t1", "s1", 9000),
-            ("t2", "s1", 400),
-            ("t3", "s2", 99_999),
-            ("t4", "s1", 3000),
+        for (id, session, ts, chars, is_sidechain) in [
+            ("t1", "s1", 20, 9000, false),
+            ("t2", "s1", 20, 400, false),
+            ("t3", "s2", 20, 99_999, false),
+            ("t4", "s1", 20, 3000, false),
+            ("t5", "s1", 20, 60_000, true),
+            ("t6", "s1", 5, 50_000, false),
         ] {
             w.tool_result(&ToolResultRow {
                 tool_use_id: id.into(),
                 session_id: session.into(),
-                ts: 11,
+                ts,
                 chars,
                 images: 0,
                 is_error: false,
+                is_sidechain,
             })
             .unwrap();
         }
         w.commit().unwrap();
-        let largest = store.largest_tool_results("s1", 2).unwrap();
+        let largest = store.largest_tool_results("s1", 10, 2).unwrap();
         assert_eq!(
             largest,
             vec![
                 ToolResultPoint {
                     tool: Some("Read".into()),
-                    ts: 11,
+                    ts: 20,
                     chars: 9000,
                     images: 0
                 },
                 ToolResultPoint {
                     tool: None,
-                    ts: 11,
+                    ts: 20,
                     chars: 3000,
                     images: 0
                 },

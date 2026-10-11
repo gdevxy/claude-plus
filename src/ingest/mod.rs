@@ -432,6 +432,7 @@ pub fn derive(
                     chars: result.chars,
                     images: result.images,
                     is_error: result.is_error,
+                    is_sidechain: u.common.is_sidechain || location.agent_id.is_some(),
                 })?;
             }
         }
@@ -1145,6 +1146,35 @@ mod tests {
         );
         assert!(raw[1].json.len() < 1000, "tool output must be shrunk");
         assert!(raw[1].json.contains(r#""$chars":5000"#));
+    }
+
+    #[test]
+    fn a_subagent_tool_result_is_stored_as_a_sidechain() {
+        let fx = Fixture::new();
+        let result = |id: &str| {
+            format!(
+                r#"{{"type":"user","sessionId":"s1","timestamp":"2026-10-01T10:00:01Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}","content":"ok"}}]}}}}"#
+            )
+        };
+        fx.write("-w-proj/s1.jsonl", &format!("{}\n", result("main")));
+        fx.write(
+            "-w-proj/s1/subagents/agent-a1.jsonl",
+            &format!("{}\n", result("agent")),
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let flags: Vec<String> = store
+            .dump("tool_results")
+            .into_iter()
+            .map(|row| {
+                let cells: Vec<&str> = row.split('|').collect();
+                format!("{} {}", cells[0], cells[6])
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            vec![r#"Text("agent") Integer(1)"#, r#"Text("main") Integer(0)"#]
+        );
     }
 
     const DERIVED: &[&str] = &[

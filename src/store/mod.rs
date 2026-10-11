@@ -649,6 +649,7 @@ mod tests {
             chars: 40,
             images: 2,
             is_error: true,
+            is_sidechain: false,
         };
         w.tool_result(&result).unwrap();
         w.tool_result(&ToolResultRow { chars: 1, ..result })
@@ -680,7 +681,9 @@ mod tests {
         );
         assert_eq!(
             store.dump("tool_results"),
-            vec![r#"Text("t1")|Text("s1")|Integer(6)|Integer(40)|Integer(2)|Integer(1)"#]
+            vec![
+                r#"Text("t1")|Text("s1")|Integer(6)|Integer(40)|Integer(2)|Integer(1)|Integer(0)"#
+            ]
         );
         assert_eq!(
             store.dump("attachments"),
@@ -1128,7 +1131,7 @@ mod tests {
                 })
                 .collect();
             for open in opens {
-                assert_eq!(open.join().unwrap().unwrap(), 13);
+                assert_eq!(open.join().unwrap().unwrap(), 14);
             }
         });
     }
@@ -1161,8 +1164,8 @@ mod tests {
     #[test]
     fn a_new_store_is_at_the_latest_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
-        assert_eq!(Store::latest_schema_version(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(Store::latest_schema_version(), 14);
         assert!(!store.reindex_pending().unwrap());
     }
 
@@ -1185,12 +1188,38 @@ mod tests {
             )
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         assert_eq!(store.totals().unwrap().requests, 1);
         assert!(store.reindex_pending().unwrap());
         assert_eq!(store.dump("events"), Vec::<String>::new());
         assert_eq!(store.dump("limit_samples"), Vec::<String>::new());
         assert_eq!(store.dump("live_breakdowns"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn stored_tool_results_are_rebuilt_to_learn_which_thread_they_belong_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        let before = schema::MIGRATIONS.len() - 1;
+        {
+            let store = Store::migrated_with(
+                Connection::open(&path).unwrap(),
+                &schema::MIGRATIONS[..before],
+            )
+            .unwrap();
+            assert_eq!(store.schema_version().unwrap(), 13);
+            store
+                .conn
+                .execute(
+                    "INSERT INTO tool_results (tool_use_id, session_id, ts, chars, images, is_error)
+                     VALUES ('t1', 's1', 1, 10, 0, 0)",
+                    [],
+                )
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 14);
+        assert!(store.reindex_pending().unwrap());
     }
 
     #[test]

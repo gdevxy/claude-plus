@@ -89,10 +89,11 @@ pub fn read(store: &Store, request: &Request) -> Result<ContextReport> {
         .filter_map(|stored| breakdown::parse(stored.ts_ms, &stored.json))
         .collect();
     let ratios = ratios::calibrate(request.scan, &recent);
+    let compactions = store.main_compactions(session)?;
     let history = history::compose(
         &store.session_requests(session)?,
         &store.main_attachments(session)?,
-        &store.main_compactions(session)?,
+        &compactions,
         store.first_prompt_chars(session)?,
         &ratios,
     );
@@ -105,7 +106,11 @@ pub fn read(store: &Store, request: &Request) -> Result<ContextReport> {
     };
     let all = items::items(live.as_ref(), request.scan, &ratios, &uses);
     let tool_results = store
-        .largest_tool_results(session, TOOL_RESULTS)?
+        .largest_tool_results(
+            session,
+            compactions.last().copied().unwrap_or(0),
+            TOOL_RESULTS,
+        )?
         .into_iter()
         .map(|point| ToolResult {
             tokens: ratios.tokens(point.chars, TextKind::Code),

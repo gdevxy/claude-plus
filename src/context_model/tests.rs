@@ -130,6 +130,7 @@ fn store() -> Store {
         chars: 9000,
         images: 0,
         is_error: false,
+        is_sidechain: false,
     })
     .unwrap();
     w.live_breakdown(&EventRow {

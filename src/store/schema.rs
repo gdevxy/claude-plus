@@ -159,6 +159,10 @@ CREATE INDEX tool_uses_by_session ON tool_uses(session_id, name);
 CREATE INDEX tool_uses_mcp_by_ts ON tool_uses(ts, name) WHERE name >= 'mcp__' AND name < 'mcp_`';
 CREATE INDEX requests_skill_by_ts ON requests(ts, skill) WHERE skill IS NOT NULL;
 "#,
+    r#"
+ALTER TABLE tool_results ADD COLUMN is_sidechain INTEGER NOT NULL DEFAULT 0;
+INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM tool_results);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {
