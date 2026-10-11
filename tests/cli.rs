@@ -672,7 +672,48 @@ day,project,model,requests,unpriced,input,output,cache_read,cache_write_5m,cache
 #[test]
 fn export_csv_is_exact_and_matches_stats() {
     let env = env();
-    assert_eq!(stdout_of(&env, &["export", "--format", "csv"]), EXPORT_CSV);
+    let export = stdout_of(&env, &["export", "--format", "csv"]);
+    assert_eq!(export, EXPORT_CSV);
+    let mut exported: std::collections::BTreeMap<(String, String), (u64, f64)> =
+        std::collections::BTreeMap::new();
+    for line in export.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        let entry = exported
+            .entry((fields[0].to_string(), fields[2].to_string()))
+            .or_default();
+        entry.0 += fields[3].parse::<u64>().unwrap();
+        entry.1 += fields[10].parse::<f64>().unwrap();
+    }
+    let exported: Vec<(String, String, String, String)> = exported
+        .into_iter()
+        .map(|((day, model), (requests, usd))| {
+            let requests = if requests == 0 {
+                "-".to_string()
+            } else {
+                requests.to_string()
+            };
+            (day, model, requests, format!("${usd:.4}"))
+        })
+        .collect();
+    let stats = stdout_of(&env, &["stats"]);
+    let shown: Vec<(String, String, String, String)> = stats
+        .lines()
+        .filter(|line| line.starts_with("│ 2026-"))
+        .map(|line| {
+            let cells: Vec<String> = line
+                .trim_matches('│')
+                .split('┆')
+                .map(|cell| cell.trim().to_string())
+                .collect();
+            (
+                cells[0].clone(),
+                cells[1].clone(),
+                cells[2].clone(),
+                cells[3].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(exported, shown, "{stats}");
 }
 
 #[test]
