@@ -223,6 +223,8 @@ fn through_daemon<T>(
 fn open_store(paths: &Paths) -> Result<Store> {
     paths.ensure_data_dir()?;
     let store = Store::open(&paths.database())?;
-    paths.claim_data_dir()?;
+    if store.adopted() {
+        paths.adopt_data_dir()?;
+    }
     Ok(store)
 }

@@ -111,30 +111,32 @@ impl Paths {
             .create(&self.data_dir)
             .with_context(|| format!("cannot create {}", self.data_dir.display()))?;
         if !existed || self.entries()?.is_empty() {
-            return self.mark_data_dir(&[]);
+            self.mark_data_dir()?;
         }
-        self.claim_data_dir()
+        Ok(())
     }
 
-    pub fn claim_data_dir(&self) -> Result<()> {
-        if self.marker().exists() {
-            return Ok(());
-        }
+    pub fn adopt_data_dir(&self) -> Result<()> {
         let entries = self.entries()?;
-        let only_ours = entries
+        if !entries
             .iter()
-            .all(|name| OWN_NAMES.contains(&name.as_str()));
-        let store_is_ours = std::fs::File::open(self.database())
-            .is_ok_and(|mut file| crate::store::is_claude_plus_database(&mut file));
-        if !only_ours || !store_is_ours {
+            .all(|name| OWN_NAMES.contains(&name.as_str()))
+        {
             return Ok(());
         }
-        let adopted: Vec<&str> = entries
-            .iter()
-            .map(String::as_str)
-            .filter(|name| DATABASE_FILES.contains(name) || DAEMON_FILES.contains(name))
-            .collect();
-        self.mark_data_dir(&adopted)
+        self.mark_data_dir()?;
+        let mut adopted = String::new();
+        for name in entries.iter().filter(|name| {
+            DATABASE_FILES.contains(&name.as_str()) || DAEMON_FILES.contains(&name.as_str())
+        }) {
+            adopted.push_str(&format!("{ADOPTED}{name}\n"));
+        }
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.marker())
+            .and_then(|mut file| file.write_all(adopted.as_bytes()))
+            .with_context(|| format!("cannot write {}", self.marker().display()))
     }
 
     fn entries(&self) -> Result<Vec<String>> {
@@ -145,7 +147,7 @@ impl Paths {
             .with_context(|| format!("cannot read {}", self.data_dir.display()))
     }
 
-    fn mark_data_dir(&self, adopted: &[&str]) -> Result<()> {
+    fn mark_data_dir(&self) -> Result<()> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let opened = std::fs::OpenOptions::new()
@@ -153,13 +155,9 @@ impl Paths {
             .create_new(true)
             .mode(0o600)
             .open(self.marker());
-        let mut text = MARKER_TEXT.to_string();
-        for name in adopted {
-            text.push_str(&format!("{ADOPTED}{name}\n"));
-        }
         match opened {
             Ok(mut file) => file
-                .write_all(text.as_bytes())
+                .write_all(MARKER_TEXT.as_bytes())
                 .with_context(|| format!("cannot write {}", self.marker().display())),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
             Err(error) => {
@@ -322,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_new_empty_or_proven_data_dir_is_marked() {
+    fn only_a_new_or_empty_data_dir_or_one_with_an_adopted_store_is_marked() {
         let temp = tempfile::tempdir().unwrap();
         let at = |name: &str| Paths::resolve(temp.path(), None, Some(temp.path().join(name)));
         let empty = at("empty");
@@ -334,17 +332,21 @@ mod tests {
         std::fs::create_dir(&foreign.data_dir).unwrap();
         std::fs::write(foreign.data_dir.join("daemon.log"), "theirs").unwrap();
         foreign.ensure_data_dir().unwrap();
+        let store = crate::store::Store::open(&foreign.database()).unwrap();
+        assert!(!store.adopted());
         assert!(!foreign.marker().exists());
-        drop(crate::store::Store::open(&foreign.database()).unwrap());
-        foreign.claim_data_dir().unwrap();
-        assert!(foreign.marker().is_file());
+
+        let earlier = at("earlier");
+        std::fs::create_dir(&earlier.data_dir).unwrap();
+        std::fs::write(earlier.data_dir.join("daemon.log"), "ours").unwrap();
+        earlier.adopt_data_dir().unwrap();
+        let text = std::fs::read_to_string(earlier.marker()).unwrap();
+        assert_eq!(adopted_in(&text).collect::<Vec<_>>(), ["daemon.log"]);
 
         let mixed = at("mixed");
         std::fs::create_dir(&mixed.data_dir).unwrap();
         std::fs::write(mixed.data_dir.join("precious"), "theirs").unwrap();
-        drop(crate::store::Store::open(&mixed.database()).unwrap());
-        mixed.ensure_data_dir().unwrap();
-        mixed.claim_data_dir().unwrap();
+        mixed.adopt_data_dir().unwrap();
         assert!(!mixed.marker().exists());
     }
 

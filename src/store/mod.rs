@@ -70,6 +70,7 @@ pub struct MigrationFailed {
 
 pub struct Store {
     conn: Connection,
+    adopted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,10 +149,12 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        check_owner(&conn, Stamp::Yes)?;
+        let adopted = check_owner(&conn, Stamp::Yes)?;
         use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::migrated(conn)
+        let mut store = Self::migrated(conn)?;
+        store.adopted = adopted;
+        Ok(store)
     }
 
     pub fn open_read_only(path: &Path) -> Result<Self> {
@@ -162,11 +165,18 @@ impl Store {
             )?;
             conn.busy_timeout(READ_BUSY_TIMEOUT)?;
             check_owner(&conn, Stamp::No)?;
-            let store = Self { conn };
+            let store = Self {
+                conn,
+                adopted: false,
+            };
             store.refuse_unsupported_schema()?;
             Ok(store)
         };
         open().map_err(|error| opening_error(path, error))
+    }
+
+    pub fn adopted(&self) -> bool {
+        self.adopted
     }
 
     pub fn reading<T>(&self, read: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
@@ -209,7 +219,10 @@ impl Store {
     fn migrated_with(conn: Connection, migrations: &[&str]) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+            adopted: false,
+        };
         store.refuse_unsupported_schema()?;
         let latest = schema::version_of(migrations.len() - 1);
         while store.schema_version()? < latest {
@@ -420,12 +433,12 @@ enum Stamp {
     No,
 }
 
-fn check_owner(conn: &Connection, stamp: Stamp) -> Result<()> {
+fn check_owner(conn: &Connection, stamp: Stamp) -> Result<bool> {
     let id: i32 = conn
         .pragma_query_value(None, "application_id", |row| row.get(0))
         .map_err(friendly)?;
     if id == APPLICATION_ID {
-        return Ok(());
+        return Ok(false);
     }
     let objects = schema_objects(conn).map_err(friendly)?;
     if id != 0 || !objects.is_subset(schema::known_objects()) {
@@ -433,21 +446,22 @@ fn check_owner(conn: &Connection, stamp: Stamp) -> Result<()> {
     }
     let version = user_version(conn)?;
     if schema::PRE_RELEASE_VERSIONS.contains(&version) || version > Store::latest_schema_version() {
-        return Ok(());
+        return Ok(false);
     }
     if objects.is_empty() != (version == 0) {
         return Err(NotOurs.into());
     }
     let legacy = version > 0;
-    if stamp == Stamp::Yes {
-        conn.pragma_update(None, "application_id", APPLICATION_ID)
-            .map_err(friendly)?;
-        if legacy {
-            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-                .map_err(friendly)?;
-        }
+    if stamp == Stamp::No {
+        return Ok(false);
     }
-    Ok(())
+    conn.pragma_update(None, "application_id", APPLICATION_ID)
+        .map_err(friendly)?;
+    if legacy {
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(friendly)?;
+    }
+    Ok(legacy)
 }
 
 pub(crate) fn schema_objects(
@@ -1386,10 +1400,12 @@ mod tests {
             &mut std::fs::File::open(&path).unwrap()
         ));
         let store = Store::open(&path).unwrap();
+        assert!(store.adopted());
         assert!(is_claude_plus_database(
             &mut std::fs::File::open(&path).unwrap()
         ));
         drop(store);
+        assert!(!Store::open(&path).unwrap().adopted());
     }
 
     #[test]

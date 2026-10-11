@@ -745,3 +745,29 @@ fn an_older_mod_from_another_marketplace_is_switched_to_this_one() {
         VERSION
     );
 }
+
+#[test]
+fn a_store_claude_plus_creates_in_a_foreign_directory_does_not_make_it_claude_plus_s() {
+    let env = env();
+    let foreign = env.claude.parent().unwrap().join("documents");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("daemon.log"), "my own log\n").unwrap();
+    cmd(&env, &["daemon", "--ensure"])
+        .env("CLAUDE_PLUS_HOME", &foreign)
+        .assert()
+        .success();
+    cmd(&env, &["daemon", "stop"])
+        .env("CLAUDE_PLUS_HOME", &foreign)
+        .assert()
+        .success();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("CLAUDE_PLUS_HOME", &foreign)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".claude-plus-data file"));
+    assert!(
+        std::fs::read_to_string(foreign.join("daemon.log"))
+            .unwrap()
+            .starts_with("my own log\n")
+    );
+}
