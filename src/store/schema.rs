@@ -138,6 +138,10 @@ CREATE INDEX limit_samples_by_window ON limit_samples(window, ts_ms);
 ALTER TABLE events ADD COLUMN client_id TEXT;
 CREATE UNIQUE INDEX events_by_client_id ON events(session_id, client_id);
 "#,
+    r#"
+ALTER TABLE requests ADD COLUMN sent_ts INTEGER;
+INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM requests);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {

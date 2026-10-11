@@ -16,6 +16,7 @@ pub const PREFIX_KINDS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestPoint {
     pub ts: i64,
+    pub sent: Option<i64>,
     pub model: String,
     pub tokens: TokenCounts,
     pub is_sidechain: bool,
@@ -27,13 +28,14 @@ impl Store {
     pub fn session_requests(&self, session_id: &str) -> Result<Vec<RequestPoint>> {
         let mut statement = self.conn.prepare_cached(
             "SELECT ts, model, input, output, thinking, cache_read, cache_write_5m, cache_write_1h,
-                    is_sidechain, agent_id, effort
+                    is_sidechain, agent_id, effort, sent_ts
              FROM requests WHERE session_id = ?1 ORDER BY ts, key",
         )?;
         let rows = statement.query_map([session_id], |r| {
             let count = |index| -> rusqlite::Result<u64> { Ok(r.get::<_, i64>(index)? as u64) };
             Ok(RequestPoint {
                 ts: r.get(0)?,
+                sent: r.get(11)?,
                 model: r.get(1)?,
                 tokens: TokenCounts {
                     input: count(2)?,
@@ -101,6 +103,7 @@ mod tests {
             key: key.into(),
             session_id: session.into(),
             ts,
+            sent_ts: None,
             model: "claude-opus-5-5".into(),
             tokens: TokenCounts {
                 input: 3,

@@ -415,6 +415,7 @@ mod tests {
                 key: format!("{}-{}", self.id, self.next_line),
                 session_id: self.id.into(),
                 ts,
+                sent_ts: None,
                 model: model.into(),
                 tokens,
                 cost_usd: self.prices.cost(model, &tokens),

@@ -82,7 +82,7 @@ Check at 40, 60 and 100 columns of pane width (resize the terminal; the pane doc
   sqlite3 ~/.claude-plus/data.db "SELECT DISTINCT json_extract(json, '$.data.agentId') FROM events WHERE kind = 'turn.step'"
   ls ~/.claude/projects/*/*/subagents/
   ```
-- [ ] `claude-plus doctor` still reports a healthy daemon and schema 10.
+- [ ] `claude-plus doctor` still reports a healthy daemon and schema 11.
 
 ## Outcome
 

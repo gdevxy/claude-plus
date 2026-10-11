@@ -548,6 +548,7 @@ mod tests {
             key: key.into(),
             session_id: "s1".into(),
             ts,
+            sent_ts: None,
             model: model.into(),
             tokens: TokenCounts {
                 input: 1,
@@ -614,7 +615,7 @@ mod tests {
         assert_eq!(
             store.dump("requests"),
             vec![
-                r#"Text("r1")|Text("s1")|Integer(100)|Text("m")|Integer(11)|Integer(12)|Integer(13)|Integer(14)|Integer(15)|Integer(16)|Real(2.0)|Integer(0)|Null|Null|Null|Null"#
+                r#"Text("r1")|Text("s1")|Integer(100)|Text("m")|Integer(11)|Integer(12)|Integer(13)|Integer(14)|Integer(15)|Integer(16)|Real(2.0)|Integer(0)|Null|Null|Null|Null|Null"#
             ]
         );
     }
@@ -1123,7 +1124,7 @@ mod tests {
                 })
                 .collect();
             for open in opens {
-                assert_eq!(open.join().unwrap().unwrap(), 10);
+                assert_eq!(open.join().unwrap().unwrap(), 11);
             }
         });
     }
@@ -1156,8 +1157,9 @@ mod tests {
     #[test]
     fn a_new_store_is_at_the_latest_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 10);
-        assert_eq!(Store::latest_schema_version(), 10);
+        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(Store::latest_schema_version(), 11);
+        assert!(!store.reindex_pending().unwrap());
     }
 
     #[test]
@@ -1166,15 +1168,22 @@ mod tests {
         let path = temp.path().join("data.db");
         {
             let conn = Connection::open(&path).unwrap();
-            let mut store = Store::migrated_with(conn, &schema::MIGRATIONS[..1]).unwrap();
+            let store = Store::migrated_with(conn, &schema::MIGRATIONS[..1]).unwrap();
             assert_eq!(store.schema_version().unwrap(), 7);
-            let mut w = store.writer().unwrap();
-            w.request(&request("r1", 1, "m", Some(1.0))).unwrap();
-            w.commit().unwrap();
         }
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO requests (key, session_id, ts, model, input, output, thinking, cache_read,
+                   cache_write_5m, cache_write_1h, cost_usd, is_sidechain)
+                 VALUES ('r1', 's1', 1, 'm', 0, 0, 0, 0, 0, 0, 1.0, 0)",
+                [],
+            )
+            .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 10);
+        assert_eq!(store.schema_version().unwrap(), 11);
         assert_eq!(store.totals().unwrap().requests, 1);
+        assert!(store.reindex_pending().unwrap());
         assert_eq!(store.dump("events"), Vec::<String>::new());
         assert_eq!(store.dump("limit_samples"), Vec::<String>::new());
     }

@@ -4,6 +4,8 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use super::{GENERATION_MARK, REINDEX_PENDING};
 use crate::transcript::TokenCounts;
 
+const PARENT_LOOKBACK: i64 = 256;
+
 #[derive(Debug, Clone, Copy)]
 pub struct FileProgress {
     pub offset: u64,
@@ -31,6 +33,7 @@ pub struct RequestRow {
     pub key: String,
     pub session_id: String,
     pub ts: i64,
+    pub sent_ts: Option<i64>,
     pub model: String,
     pub tokens: TokenCounts,
     pub cost_usd: Option<f64>,
@@ -177,6 +180,31 @@ impl Writer<'_> {
         Ok(())
     }
 
+    pub fn written_before(
+        &mut self,
+        file_id: i64,
+        line_no: u64,
+        uuid: &str,
+    ) -> Result<Option<i64>> {
+        let mut statement = self.tx.prepare_cached(
+            "SELECT json FROM raw_records WHERE file_id = ?1 AND line_no < ?2 ORDER BY line_no DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![file_id, line_no as i64, PARENT_LOOKBACK], |r| {
+            r.get::<_, String>(0)
+        })?;
+        for json in rows {
+            let record: serde_json::Value = serde_json::from_str(&json?)?;
+            if record.get("uuid").and_then(serde_json::Value::as_str) == Some(uuid) {
+                return Ok(record
+                    .get("timestamp")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                    .map(|ts| ts.timestamp()));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn session(&mut self, row: &SessionRow) -> Result<()> {
         self.exec(
             "INSERT INTO sessions (id, project, cwd, started_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?4)
@@ -213,8 +241,8 @@ impl Writer<'_> {
         }
         self.exec(
             "INSERT INTO requests (key, session_id, ts, model, input, output, thinking, cache_read,
-               cache_write_5m, cache_write_1h, cost_usd, is_sidechain, agent_id, skill, mcp_server, effort)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+               cache_write_5m, cache_write_1h, cost_usd, is_sidechain, agent_id, skill, mcp_server, effort, sent_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(key) DO UPDATE SET
                input = excluded.input, output = excluded.output, thinking = excluded.thinking,
                cache_read = excluded.cache_read, cache_write_5m = excluded.cache_write_5m,
@@ -222,7 +250,7 @@ impl Writer<'_> {
             params![
                 row.key, row.session_id, row.ts, row.model, t.input as i64, t.output as i64, t.thinking as i64,
                 t.cache_read as i64, t.cache_write_5m as i64, t.cache_write_1h as i64, row.cost_usd,
-                row.is_sidechain, row.agent_id, row.skill, row.mcp_server, row.effort
+                row.is_sidechain, row.agent_id, row.skill, row.mcp_server, row.effort, row.sent_ts
             ],
         )?;
         Ok(if stored_output.is_some() {

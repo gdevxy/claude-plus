@@ -375,10 +375,19 @@ pub fn derive(
                 return Ok(());
             };
             let cost_usd = prices.cost(&a.model, &a.usage);
+            let sent_ts = match parsed
+                .raw
+                .get("parentUuid")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(parent) => writer.written_before(file_id, line_no, parent)?,
+                None => None,
+            };
             let write = writer.request(&RequestRow {
                 key,
                 session_id: session_id.clone(),
                 ts: ts.unwrap_or(0),
+                sent_ts,
                 model: a.model.clone(),
                 tokens: a.usage,
                 cost_usd,
@@ -1010,7 +1019,7 @@ mod tests {
             "{}",
             requests[0]
         );
-        assert!(requests[0].ends_with(r#"|Integer(1)|Text("a1")|Null|Null|Null"#));
+        assert!(requests[0].ends_with(r#"|Integer(1)|Text("a1")|Null|Null|Null|Null"#));
     }
 
     #[test]
@@ -1148,6 +1157,34 @@ mod tests {
         "sessions",
         "adjustments",
     ];
+
+    #[test]
+    fn a_request_counts_as_sent_when_the_entry_it_answers_was_written() {
+        let fx = Fixture::new();
+        let lines = [
+            serde_json::json!({"type":"user","sessionId":"s1","uuid":"u1","timestamp":"2026-10-01T09:59:00Z","message":{"role":"user","content":"go"}}),
+            serde_json::json!({"type":"attachment","sessionId":"s1","uuid":"u2","parentUuid":"u1","timestamp":"2026-10-01T09:59:01Z","attachment":{"type":"instructions","names":["a"]}}),
+            serde_json::json!({"type":"assistant","sessionId":"s1","uuid":"u3","parentUuid":"u2","timestamp":"2026-10-01T10:00:00Z","requestId":"r1","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":5}}}),
+            serde_json::json!({"type":"assistant","sessionId":"s1","uuid":"u4","timestamp":"2026-10-01T10:05:00Z","requestId":"r2","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":5}}}),
+        ];
+        let content: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        fx.write("-w-proj/s1.jsonl", &content);
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let sent = |store: &Store| -> Vec<(i64, Option<i64>)> {
+            store
+                .session_requests("s1")
+                .unwrap()
+                .iter()
+                .map(|r| (r.ts, r.sent))
+                .collect()
+        };
+        let parent = 1_790_848_740;
+        let expected = vec![(parent + 60, Some(parent + 1)), (parent + 360, None)];
+        assert_eq!(sent(&store), expected);
+        reindex(&mut store);
+        assert_eq!(sent(&store), expected);
+    }
 
     #[test]
     fn reindex_derives_the_same_rows_from_redacted_raw() {

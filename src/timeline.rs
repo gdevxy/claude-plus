@@ -74,7 +74,7 @@ impl Timeline {
             let twin = observed.iter().enumerate().position(|(index, request)| {
                 !matched[index]
                     && request.fingerprint() == step.fingerprint()
-                    && (request.ts_ms - answered_ms).abs() <= MATCH_WINDOW_MS
+                    && (requests[index].ts * 1000 - answered_ms).abs() <= MATCH_WINDOW_MS
             });
             match twin {
                 Some(index) => {
@@ -118,7 +118,11 @@ impl Timeline {
 
 fn from_transcript(point: &RequestPoint) -> Observed {
     Observed {
-        ts_ms: point.ts * 1000,
+        ts_ms: point
+            .sent
+            .filter(|sent| *sent <= point.ts)
+            .unwrap_or(point.ts)
+            * 1000,
         model: point.model.clone(),
         thread: match (&point.agent_id, point.is_sidechain) {
             (Some(agent), _) => Thread::Agent(agent.clone()),
@@ -180,6 +184,7 @@ mod tests {
     fn point(ts: i64, input: u64, read: u64, write_1h: u64, agent: Option<&str>) -> RequestPoint {
         RequestPoint {
             ts,
+            sent: None,
             model: "claude-opus-5-5".into(),
             tokens: TokenCounts {
                 input,
@@ -192,6 +197,21 @@ mod tests {
             agent_id: agent.map(String::from),
             effort: Some("high".into()),
         }
+    }
+
+    #[test]
+    fn a_transcript_row_counts_from_when_it_was_sent_never_later() {
+        let sent = RequestPoint {
+            sent: Some(940),
+            ..point(1000, 10, 20_000, 0, None)
+        };
+        let impossible = RequestPoint {
+            sent: Some(2100),
+            ..point(2000, 10, 20_000, 0, None)
+        };
+        let timeline = Timeline::build(&[sent, impossible], &[]);
+        let anchors: Vec<i64> = timeline.requests.iter().map(|r| r.ts_ms).collect();
+        assert_eq!(anchors, vec![940_000, 2_000_000]);
     }
 
     fn step(ts_ms: i64, input: u64, read: u64, write: u64, agent: Option<&str>) -> StoredEvent {
@@ -214,6 +234,17 @@ mod tests {
         assert_eq!(timeline.requests.len(), 1);
         assert_eq!(timeline.requests[0].source, Source::Transcript);
         assert_eq!(timeline.requests[0].ts_ms, 1_000_000);
+    }
+
+    #[test]
+    fn a_step_matches_its_transcript_row_however_long_ago_the_prompt_was() {
+        let thought_long = RequestPoint {
+            sent: Some(400),
+            ..point(1_000, 5, 9000, 300, None)
+        };
+        let timeline = Timeline::build(&[thought_long], &[step(1_000_400, 5, 9000, 300, None)]);
+        assert_eq!(timeline.requests.len(), 1);
+        assert_eq!(timeline.requests[0].ts_ms, 400_000);
     }
 
     #[test]

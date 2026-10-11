@@ -140,6 +140,7 @@ mod tests {
             key: key.into(),
             session_id: "s1".into(),
             ts,
+            sent_ts: None,
             model: model.into(),
             tokens,
             cost_usd: PriceTable::bundled().cost(model, &tokens),

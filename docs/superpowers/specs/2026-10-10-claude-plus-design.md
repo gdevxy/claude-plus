@@ -269,8 +269,10 @@ Claude Code documents the transcript format as internal and subject to change, s
 - TTL type for a session is taken from the most recent cache write (`1h` when `ephemeral_1h_input_tokens > 0`, else `5m`).
 - Expiry is `last_request_sent + ttl`, since every cache hit refreshes the TTL when the API serves the request; the mod counts down locally from the snapshot's `expires_at` with a 1 s clock.
 - The send time of a request is the `sent_ms` of its mod `turn.step`, and for a transcript row matched to a step, the earlier of the two times.
-- A request seen only in the transcript uses the transcript timestamp, which is that of its first content block.
-  That is a known bound: after long extended thinking it can run late by the thinking time, while every request the mod sees counts from its send.
+- A request seen only in the transcript counts from the entry it answers (its `parentUuid`: the prompt, tool result or attachment written before it was sent), stored as `requests.sent_ts`.
+  That entry is written before the request leaves, so the countdown errs low and never shows more time, also while the answer still streams.
+  Only when that entry cannot be found does the request fall back to its own timestamp, that of its first content block.
+- Matching a step to its transcript row still compares the answer times, so long thinking does not break the match.
 - Hit ratio is `cache_read / (cache_read + cache_write + input)` over the session.
 - A rebuild is detected when a request has a large cache write and near-zero cache read relative to the previous request's prefix.
 - Cause attribution: idle gap above TTL gives "idle", a model change gives "model switch", a change of an injected context attachment between the two requests gives "prefix changed", otherwise "unknown".

@@ -213,6 +213,7 @@ mod tests {
                 key: key.into(),
                 session_id: session.into(),
                 ts,
+                sent_ts: None,
                 model: "claude-opus-5-5".into(),
                 tokens: TokenCounts::default(),
                 cost_usd: cost,

@@ -111,7 +111,7 @@ fn health_reports_version_schema_and_ingest_state() {
     let health = server.client().health().unwrap();
     assert_eq!(
         (health.v, health.version.as_str(), health.schema, health.pid),
-        (1, env!("CARGO_PKG_VERSION"), 10, std::process::id())
+        (1, env!("CARGO_PKG_VERSION"), 11, std::process::id())
     );
     assert_eq!(
         health.claude_dir,
@@ -322,6 +322,30 @@ fn a_step_already_in_the_transcript_and_its_repeat_are_not_counted_again() {
     assert_eq!(live.forecast.unwrap().samples, 1);
     assert_eq!(live.cache.last_touch_ms, Some(transcript_ms));
     assert_eq!(live.cache.hit_ratio, Some(20_000.0 / 25_010.0));
+}
+
+#[test]
+fn while_an_answer_streams_the_countdown_counts_from_the_prompt() {
+    let server = Server::start();
+    let transcript = server
+        .temp
+        .path()
+        .join(format!("claude/projects/-work-demo/{SESSION}.jsonl"));
+    let mut lines = std::fs::read_to_string(&transcript).unwrap();
+    lines += &format!(
+        r#"{{"type":"user","sessionId":"{SESSION}","uuid":"p1","timestamp":"2026-10-01T10:10:00Z","message":{{"role":"user","content":"go"}}}}"#
+    );
+    lines += "\n";
+    lines += &format!(
+        r#"{{"type":"assistant","sessionId":"{SESSION}","uuid":"a1","parentUuid":"p1","timestamp":"2026-10-01T10:11:00Z","requestId":"req_streaming","message":{{"model":"claude-opus-5-5","content":[{{"type":"text","text":"so"}}],"usage":{{"input_tokens":3,"output_tokens":1,"cache_read_input_tokens":25000,"cache_creation_input_tokens":0}}}}}}"#
+    );
+    lines += "\n";
+    std::fs::write(&transcript, lines).unwrap();
+    server.client().import().unwrap();
+    let cache = server.client().snapshot(SESSION).unwrap().live.cache;
+    let prompt_ms = 1_790_848_800_000 + 600_000;
+    assert_eq!(cache.last_touch_ms, Some(prompt_ms));
+    assert_eq!(cache.expires_at_ms, Some(prompt_ms + 3_600_000));
 }
 
 #[test]
