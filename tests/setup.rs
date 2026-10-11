@@ -321,3 +321,17 @@ fn daemon_ensure_without_an_installed_mod_writes_no_folder() {
     assert!(!marketplace(&env).exists());
     assert!(!env.plus.join("marketplace.lock").exists());
 }
+
+#[test]
+fn doctor_names_the_installed_mod_and_the_folder_it_loads_from() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    cmd(&env, &["doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "  Claude Code: 2.1.296\n  Mod:         plus v{VERSION} · {}/mod\n",
+            marketplace(&env).display()
+        )));
+}

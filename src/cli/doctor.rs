@@ -7,6 +7,8 @@ use crate::daemon::control::{self, Status};
 use crate::ingest::discover;
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
+use crate::setup::bundle::{self, PLUGIN_ID};
+use crate::setup::claude::{self, ClaudeCode, Plugin};
 use crate::store::Store;
 
 pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
@@ -41,6 +43,9 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
     );
     let (line, status) = daemon(paths);
     println!("{}", labeled("Daemon:", &line));
+    let (claude_code, plus) = setup(&ClaudeCode::default());
+    println!("{}", labeled("Claude Code:", &claude_code));
+    println!("{}", labeled("Mod:", &plus));
 
     match readable_store(paths)? {
         Some(store) => print_database(&store, &status),
@@ -70,6 +75,65 @@ fn daemon(paths: &Paths) -> (String, Status) {
         ),
     };
     (line, status)
+}
+
+fn setup(claude: &ClaudeCode) -> (String, String) {
+    let version = match claude.version() {
+        Ok(Some(version)) => version,
+        Ok(None) => {
+            return (
+                format!(
+                    "not found on PATH, the pane needs {} or newer",
+                    claude::MIN_VERSION
+                ),
+                "unknown without Claude Code".into(),
+            );
+        }
+        Err(error) => return (format!("{error:#}"), "unknown".into()),
+    };
+    let plugin = claude.plugins().map(|plugins| {
+        plugins
+            .into_iter()
+            .find(|plugin| plugin.id == PLUGIN_ID && plugin.scope == "user")
+    });
+    let plus = match plugin {
+        Ok(plugin) => mod_state(plugin.as_ref()),
+        Err(error) => format!("{error:#}"),
+    };
+    (claude_code_state(&version), plus)
+}
+
+fn claude_code_state(version: &str) -> String {
+    if control::is_older(version, claude::MIN_VERSION) {
+        format!(
+            "{version}, older than the {} the pane needs, run claude update",
+            claude::MIN_VERSION
+        )
+    } else {
+        version.to_string()
+    }
+}
+
+fn mod_state(plugin: Option<&Plugin>) -> String {
+    let Some(plugin) = plugin else {
+        return "not installed, run claude-plus install".into();
+    };
+    let version = plugin.loaded_version();
+    let from = plugin
+        .folder
+        .as_deref()
+        .map(|folder| format!(" · {folder}"))
+        .unwrap_or_default();
+    if !plugin.enabled {
+        format!("plus v{version} is disabled, run claude-plus install to enable it")
+    } else if version != bundle::VERSION {
+        format!(
+            "plus v{version}, run claude-plus install to match this v{}",
+            bundle::VERSION
+        )
+    } else {
+        format!("plus v{version}{from}")
+    }
 }
 
 fn reindex_state(pending: bool, daemon: &Status) -> Option<&'static str> {
@@ -222,6 +286,45 @@ mod tests {
                 rebuilding,
             },
         })
+    }
+
+    fn plus(version: &str, enabled: bool) -> Plugin {
+        Plugin {
+            id: PLUGIN_ID.into(),
+            version: "0.0.1".into(),
+            scope: "user".into(),
+            enabled,
+            folder: Some("/home/ada/.claude-plus/marketplace/mod".into()),
+            folder_version: Some(version.into()),
+        }
+    }
+
+    #[test]
+    fn the_mod_line_says_what_loads_and_how_to_fix_it() {
+        let this = bundle::VERSION;
+        assert_eq!(
+            mod_state(Some(&plus(this, true))),
+            format!("plus v{this} · /home/ada/.claude-plus/marketplace/mod")
+        );
+        assert_eq!(mod_state(None), "not installed, run claude-plus install");
+        assert_eq!(
+            mod_state(Some(&plus(this, false))),
+            format!("plus v{this} is disabled, run claude-plus install to enable it")
+        );
+        assert_eq!(
+            mod_state(Some(&plus("0.0.9", true))),
+            format!("plus v0.0.9, run claude-plus install to match this v{this}")
+        );
+    }
+
+    #[test]
+    fn an_old_claude_code_is_named_with_the_fix() {
+        assert_eq!(claude_code_state("2.1.296"), "2.1.296");
+        assert_eq!(claude_code_state("2.2.0"), "2.2.0");
+        assert_eq!(
+            claude_code_state("2.1.200"),
+            "2.1.200, older than the 2.1.296 the pane needs, run claude update"
+        );
     }
 
     #[test]
