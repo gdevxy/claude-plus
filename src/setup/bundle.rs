@@ -107,7 +107,7 @@ fn replace(dir: &Path) -> Result<()> {
         Ok(()) => remove_if_present(&staging),
         Err(error) if error == rustix::io::Errno::NOENT => std::fs::rename(&staging, dir)
             .with_context(|| format!("cannot put the mod in {}", dir.display())),
-        Err(error) if error == rustix::io::Errno::INVAL || error == rustix::io::Errno::NOTSUP => {
+        Err(error) if cannot_swap(error) => {
             std::fs::rename(dir, &previous)
                 .with_context(|| format!("cannot move {} aside", dir.display()))?;
             std::fs::rename(&staging, dir)
@@ -118,6 +118,11 @@ fn replace(dir: &Path) -> Result<()> {
             Err(error).with_context(|| format!("cannot put the mod in {}", dir.display()))
         }
     }
+}
+
+fn cannot_swap(error: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    [Errno::INVAL, Errno::NOTSUP, Errno::NOSYS, Errno::PERM].contains(&error)
 }
 
 fn swap(staging: &Path, dir: &Path) -> rustix::io::Result<()> {
@@ -370,6 +375,17 @@ mod tests {
         assert!(probes > 0);
         assert_eq!(misses, 0, "missing in {misses} of {probes} probes");
         assert_eq!(version_in(&dir).as_deref(), Some(VERSION));
+    }
+
+    #[test]
+    fn a_system_without_the_swap_falls_back_to_two_renames() {
+        use rustix::io::Errno;
+        for errno in [Errno::INVAL, Errno::NOTSUP, Errno::NOSYS, Errno::PERM] {
+            assert!(cannot_swap(errno), "{errno:?}");
+        }
+        for errno in [Errno::NOENT, Errno::ACCESS, Errno::NOSPC, Errno::ROFS] {
+            assert!(!cannot_swap(errno), "{errno:?}");
+        }
     }
 
     #[test]
