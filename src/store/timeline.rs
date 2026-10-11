@@ -24,32 +24,36 @@ pub struct RequestPoint {
     pub effort: Option<String>,
 }
 
+pub(super) const POINT_COLUMNS: &str =
+    "ts, model, input, output, thinking, cache_read, cache_write_5m,
+     cache_write_1h, is_sidechain, agent_id, effort, sent_ts";
+
+pub(super) fn point_of(r: &rusqlite::Row) -> rusqlite::Result<RequestPoint> {
+    let count = |index| -> rusqlite::Result<u64> { Ok(r.get::<_, i64>(index)? as u64) };
+    Ok(RequestPoint {
+        ts: r.get(0)?,
+        sent: r.get(11)?,
+        model: r.get(1)?,
+        tokens: TokenCounts {
+            input: count(2)?,
+            output: count(3)?,
+            thinking: count(4)?,
+            cache_read: count(5)?,
+            cache_write_5m: count(6)?,
+            cache_write_1h: count(7)?,
+        },
+        is_sidechain: r.get(8)?,
+        agent_id: r.get(9)?,
+        effort: r.get(10)?,
+    })
+}
+
 impl Store {
     pub fn session_requests(&self, session_id: &str) -> Result<Vec<RequestPoint>> {
-        let mut statement = self.conn.prepare_cached(
-            "SELECT ts, model, input, output, thinking, cache_read, cache_write_5m, cache_write_1h,
-                    is_sidechain, agent_id, effort, sent_ts
-             FROM requests WHERE session_id = ?1 ORDER BY ts, key",
-        )?;
-        let rows = statement.query_map([session_id], |r| {
-            let count = |index| -> rusqlite::Result<u64> { Ok(r.get::<_, i64>(index)? as u64) };
-            Ok(RequestPoint {
-                ts: r.get(0)?,
-                sent: r.get(11)?,
-                model: r.get(1)?,
-                tokens: TokenCounts {
-                    input: count(2)?,
-                    output: count(3)?,
-                    thinking: count(4)?,
-                    cache_read: count(5)?,
-                    cache_write_5m: count(6)?,
-                    cache_write_1h: count(7)?,
-                },
-                is_sidechain: r.get(8)?,
-                agent_id: r.get(9)?,
-                effort: r.get(10)?,
-            })
-        })?;
+        let mut statement = self.conn.prepare_cached(&format!(
+            "SELECT {POINT_COLUMNS} FROM requests WHERE session_id = ?1 ORDER BY ts, key"
+        ))?;
+        let rows = statement.query_map([session_id], point_of)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

@@ -1,6 +1,7 @@
 mod breakdowns;
 mod context;
 mod events;
+mod history;
 mod limits;
 mod reconcile;
 mod schema;
@@ -21,6 +22,7 @@ use crate::transcript::location::Location;
 pub use breakdowns::StoredBreakdown;
 pub use context::{AttachmentPoint, ToolResultPoint};
 pub use events::{EventRow, StoredEvent};
+pub use history::{CompactionPoint, SessionInfo, SpentAdjustment, SpentRequest};
 pub use limits::{LimitSample, RESETS_AT_TOLERANCE_MS, SpendPoint};
 pub use reconcile::Reconciliation;
 pub use session::{ModelTotal, SessionTotals};

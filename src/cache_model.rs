@@ -119,10 +119,7 @@ pub fn model(timeline: &Timeline, context: &Context) -> Cache {
         Some(expires) if context.now_ms < expires => CacheState::Warm,
         Some(_) => CacheState::Cold,
     };
-    let rebuilds: Vec<Rebuild> = main
-        .windows(2)
-        .filter_map(|pair| rebuild(pair[0], pair[1], ttl, context))
-        .collect();
+    let rebuilds = rebuilds(&main, ttl, context);
     Cache {
         state,
         ttl,
@@ -134,7 +131,7 @@ pub fn model(timeline: &Timeline, context: &Context) -> Cache {
             timeline
                 .requests
                 .iter()
-                .filter_map(|request| saved(request, context.prices)),
+                .filter_map(|request| saved_usd(&request.model, &request.tokens, context.prices)),
         ),
         rebuilds: rebuilds.len() as u64,
         rebuild_usd: total(rebuilds.iter().filter_map(|r| r.extra_usd)),
@@ -158,13 +155,19 @@ fn hit_ratio(requests: &[Observed]) -> Option<f64> {
     (total > 0).then(|| read as f64 / total as f64)
 }
 
-fn saved(request: &Observed, prices: &PriceTable) -> Option<f64> {
+pub fn rebuilds(main: &[&Observed], ttl: Ttl, context: &Context) -> Vec<Rebuild> {
+    main.windows(2)
+        .filter_map(|pair| rebuild(pair[0], pair[1], ttl, context))
+        .collect()
+}
+
+pub fn saved_usd(model: &str, tokens: &TokenCounts, prices: &PriceTable) -> Option<f64> {
     let uncached = TokenCounts {
-        input: request.tokens.input + request.tokens.cache_read,
+        input: tokens.input + tokens.cache_read,
         cache_read: 0,
-        ..request.tokens
+        ..*tokens
     };
-    Some(prices.cost(&request.model, &uncached)? - prices.cost(&request.model, &request.tokens)?)
+    Some(prices.cost(model, &uncached)? - prices.cost(model, tokens)?)
 }
 
 fn rebuild(

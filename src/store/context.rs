@@ -7,7 +7,8 @@ use super::{GENERATION_MARK, Store};
 use crate::transcript::{Record, parse_line};
 
 pub const PROMPT_SEARCH_LIMIT: i64 = 500;
-const MAIN_THREAD: &str = "f.path NOT LIKE '%/subagents/%' AND instr(f.path, '#gen-') = 0";
+pub(super) const MAIN_THREAD: &str =
+    "f.path NOT LIKE '%/subagents/%' AND instr(f.path, '#gen-') = 0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentPoint {
