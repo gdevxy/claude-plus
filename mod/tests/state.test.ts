@@ -71,8 +71,8 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Sonnet 5.5       ~$0.20, then ~$0.02',
         '   Haiku 5.5        ~$0.07, then <$0.01',
         '',
-        ' Session',
-        '   Tokens in / out             2M / 61k',
+        ' Session                              ?',
+        '   Processed / generated       2M / 61k',
         '   Turns · subagents             14 · 2',
         '',
         ' Plan limits                          ?',
@@ -100,8 +100,8 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Sonnet 5.5                           ~$0.20, then ~$0.02',
         '   Haiku 5.5                            ~$0.07, then <$0.01',
         '',
-        ' Session',
-        '   Tokens in / out                                 2M / 61k',
+        ' Session                                                  ?',
+        '   Processed / generated                           2M / 61k',
         '   Turns · subagents                                 14 · 2',
         '',
         ' Plan limits                                              ?',
@@ -129,8 +129,8 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Sonnet 5.5                                                                   ~$0.20, then ~$0.02',
         '   Haiku 5.5                                                                    ~$0.07, then <$0.01',
         '',
-        ' Session',
-        '   Tokens in / out                                                                         2M / 61k',
+        ' Session                                                                                          ?',
+        '   Processed / generated                                                                   2M / 61k',
         '   Turns · subagents                                                                         14 · 2',
         '',
         ' Plan limits                                                                                      ?',
@@ -279,8 +279,8 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Sonnet 5.5       ~$0.20, then ~$0.02',
         '   Haiku 5.5        ~$0.07, then <$0.01',
         '',
-        ' Session',
-        '   Tokens in / out             2M / 61k',
+        ' Session                              ?',
+        '   Processed / generated       2M / 61k',
         '   Turns · subagents             14 · 2',
         '',
         ' Plan limits                          ?',
@@ -309,8 +309,8 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Sonnet 5.5                           ~$0.20, then ~$0.02',
         '   Haiku 5.5                            ~$0.07, then <$0.01',
         '',
-        ' Session',
-        '   Tokens in / out                                 2M / 61k',
+        ' Session                                                  ?',
+        '   Processed / generated                           2M / 61k',
         '   Turns · subagents                                 14 · 2',
         '',
         ' Plan limits                                              ?',
@@ -338,8 +338,8 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Sonnet 5.5                                                                   ~$0.20, then ~$0.02',
         '   Haiku 5.5                                                                    ~$0.07, then <$0.01',
         '',
-        ' Session',
-        '   Tokens in / out                                                                         2M / 61k',
+        ' Session                                                                                          ?',
+        '   Processed / generated                                                                   2M / 61k',
         '   Turns · subagents                                                                         14 · 2',
         '',
         ' Plan limits                                                                                      ?',
@@ -367,7 +367,7 @@ describe('frames', () => {
 describe('live screen', () => {
   for (const width of [40, 60, 100]) {
     test(`every unwrapped line fills exactly ${width - 2} columns`, () => {
-      const lines = screen(input({ width, expanded: ['cache', 'rebuilds', 'forecast', 'limits'] }))
+      const lines = screen(input({ width, expanded: ['cache', 'rebuilds', 'forecast', 'session', 'limits'] }))
       for (const drawn of lines.filter(candidate => candidate.wrap !== true && !candidate.key.startsWith('gap-'))) {
         expect([drawn.key, (drawn.indent ?? 0) + text(drawn).length + (drawn.why === undefined ? 0 : WHY_COLUMNS)]).toEqual([drawn.key, width - 2])
       }
@@ -449,7 +449,7 @@ describe('live screen', () => {
   })
 
   test('explains each number once its question mark is pressed', () => {
-    const lines = screen(input({ expanded: ['cache', 'rebuilds', 'forecast', 'limits'] }))
+    const lines = screen(input({ expanded: ['cache', 'rebuilds', 'forecast', 'session', 'limits'] }))
     expect(text(line(lines, 'explain-cache'))).toBe(
       'The last cache write in the transcript asked for a 1 hour lifetime. Every request that reads or writes the cache starts the countdown again.',
     )
@@ -461,6 +461,9 @@ describe('live screen', () => {
     )
     expect(text(line(lines, 'explain-limits'))).toBe(
       'From 23 readings, 1% of your 5h window is about $2.00 of API-priced usage on Opus. The pace projects the last 30 minutes to the reset.',
+    )
+    expect(text(line(lines, 'explain-session'))).toBe(
+      'Every request sends the whole context again, so processed sums the context of each request, mostly as cheap cache reads. Generated counts what the model wrote.',
     )
   })
 
@@ -549,7 +552,7 @@ const LEARNING = (): ScreenInput['snapshot'] => {
 }
 
 const STATES: Record<string, Partial<ScreenInput>> = {
-  'the whole session': { expanded: ['cache', 'rebuilds', 'forecast', 'limits'] },
+  'the whole session': { expanded: ['cache', 'rebuilds', 'forecast', 'session', 'limits'] },
   'a cold cache': { nowMs: NOW_MS + 53 * MINUTE_MS },
   'a fresh session': { snapshot: null, local: { ...local(), model: null, turns: 0, measure: null }, daemon: { status: 'starting', detail: null } },
   'a missing daemon': { snapshot: null, daemon: { status: 'missing', detail: null } },

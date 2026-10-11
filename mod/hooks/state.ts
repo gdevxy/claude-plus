@@ -612,14 +612,18 @@ function currentModel(model: string, value: string, width: number): Line {
 }
 
 function session(input: ScreenInput, snapshot: Snapshot | null, width: number): Line[] {
-  const lines: Line[] = [heading('session', 'Session', width)]
+  const lines: Line[] = [heading('session', 'Session', width, snapshot === null ? undefined : 'session')]
   if (snapshot !== null) {
     const t = snapshot.totals.tokens
     const prompt = t.input + t.cache_read + t.cache_write_5m + t.cache_write_1h
-    lines.push(pair('session-tokens', '  Tokens in / out', `${tokens(prompt)} / ${tokens(t.output)}`, width, {}, { dim: true }))
+    lines.push(pair('session-tokens', '  Processed / generated', `${tokens(prompt)} / ${tokens(t.output)}`, width, {}, { dim: true }))
     lines.push(pair('session-turns', '  Turns · subagents', `${input.local.turns} · ${snapshot.totals.subagents}`, width, {}, { dim: true }))
     if (snapshot.totals.reconciled_usd >= 0.01) {
       lines.push(pair('session-reconciled', '  Reconciled', money(snapshot.totals.reconciled_usd), width, { dim: true }, { dim: true }))
+    }
+    if (input.expanded.includes('session')) {
+      const why = 'Every request sends the whole context again, so processed sums the context of each request, mostly as cheap cache reads. Generated counts what the model wrote.'
+      lines.push(prose('explain-session', why, { dim: true }))
     }
     return lines
   }
