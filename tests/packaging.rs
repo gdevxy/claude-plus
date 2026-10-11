@@ -284,7 +284,11 @@ fn release_assets_hold_checksums_a_formula_and_an_installer_for_the_owner() {
             "      url \"https://github.com/ada/claude-plus/releases/download/v{VERSION}/{archive}\"\n      sha256 \"{sum}\"\n"
         )), "{formula}");
     }
-    assert!(formula.contains(&format!("  version \"{VERSION}\"\n")));
+    assert!(!formula.contains("  version "), "{formula}");
+    assert!(
+        formula.contains("Run claude-plus uninstall before brew uninstall claude-plus"),
+        "{formula}"
+    );
     assert!(!formula.contains('@'), "{formula}");
     let ruby = run(Command::new("ruby")
         .arg("-c")
