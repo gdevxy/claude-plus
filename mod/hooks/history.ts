@@ -4,7 +4,7 @@ import type { Bucket, ContextReport, Daemon, Failures, HistoryFailure, HistoryRa
 import type { Layout, Piece } from './chart'
 import { area, bars, grouped, layout, markers, MARKER, stacked } from './chart'
 import { compositionOf, reportOf } from './context'
-import { FULL_BLOCK, count, money, modelName, percent, spread, tokens } from './format'
+import { FULL_BLOCK, count, fit, money, modelName, percent, spread, tokens } from './format'
 import type { Line } from './state'
 import { LIMIT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, fitting, gap, notice, pair, plain, prose } from './state'
 
@@ -20,6 +20,9 @@ export const MODEL_COLORS: readonly ThemeKey[] = ['claude', 'permission', 'planM
 export const OTHER_COLOR: ThemeKey = 'subtle'
 export const INDENT = '  '
 export const RETRY_SECONDS = 30
+export const MIN_HEAD = 8
+
+const SEPARATOR = ' · '
 
 const RANGE_LABELS: Readonly<Record<HistoryRange, string>> = { '24h': '24 hours', '7d': '7 days', '30d': '30 days', '90d': '90 days' }
 const METRIC_LABELS: Readonly<Record<Metric, string>> = { cost: 'Cost', tokens: 'Tokens', pct: '% of 5h' }
@@ -237,13 +240,26 @@ function peakChart(report: HistoryReport, width: number): Line[] {
 function top(kind: 'projects' | 'sessions', report: HistoryReport, metric: Metric, width: number): Line[] {
   const rows =
     kind === 'projects'
-      ? report.projects.map(project => ({ name: `${project.name} · ${project.sessions} ${project.sessions === 1 ? 'session' : 'sessions'}`, spend: project }))
-      : report.sessions.map(session => ({ name: `${session.title ?? `Untitled ${session.id.slice(0, 8)}`} · ${session.project}`, spend: session }))
+      ? report.projects.map(project => ({ head: project.name, tail: `${project.sessions} ${project.sessions === 1 ? 'session' : 'sessions'}`, spend: project }))
+      : report.sessions.map(session => ({ head: session.title ?? `Untitled ${session.id.slice(0, 8)}`, tail: session.project, spend: session }))
   if (rows.length === 0) return []
   return [
     plain(`hist-${kind}`, kind === 'projects' ? 'Top projects' : 'Top sessions', { bold: true }),
-    ...rows.slice(0, TOP_SHOWN).map((row, index) => pair(`hist-${kind}-${index}`, `${INDENT}${row.name}`, amount(valueOf(row.spend, metric), metric), width, {}, { dim: true })),
+    ...rows.slice(0, TOP_SHOWN).map((row, index) => {
+      const value = amount(valueOf(row.spend, metric), metric)
+      const room = width - INDENT.length - value.length - 1
+      return pair(`hist-${kind}-${index}`, `${INDENT}${named(row.head, row.tail, room)}`, value, width, {}, { dim: true })
+    }),
   ]
+}
+
+function named(head: string, tail: string, room: number): string {
+  const whole = `${head}${SEPARATOR}${tail}`
+  if (whole.length <= room) return whole
+  const headRoom = room - SEPARATOR.length - tail.length
+  if (headRoom >= MIN_HEAD) return `${fit(head, headRoom)}${SEPARATOR}${tail}`
+  if (head.length + SEPARATOR.length + MIN_HEAD <= room) return whole
+  return head
 }
 
 function growth(input: HistoryInput, width: number): Line[] {

@@ -80,7 +80,7 @@ describe('history screen', () => {
       '   notes · 1 session              $0.67',
       '',
       ' Top sessions',
-      '   Plan the History view · claud… $6.40',
+      '   Plan the Histor… · claude-plus $6.40',
       '   Untitled a1b2c3d4 · shop       $3.90',
       '',
       ' Context this session        46k / 200k',
@@ -160,7 +160,7 @@ describe('history screen', () => {
     expect(text(line(share, 'hist-head'))).toBe('Last 7 days                     ~32%')
     expect(line(share, 'hist-head').why).toBe('hist-pct')
     expect(text(line(share, 'explain-hist-pct'))).toBe('Estimated from how far each dollar moved your 5h limit, learned from 31 limit readings. 100% is one full 5h window.')
-    expect(text(line(share, 'hist-sessions-0'))).toBe('  Plan the History view · claude… ~13%')
+    expect(text(line(share, 'hist-sessions-0'))).toBe('  Plan the History… · claude-plus ~13%')
     const learning = historyReport({ calibration: { calibrated: false, pairs: 4, needed: 20 } })
     expect(text(line(historyScreen(input({ metric: 'pct', reports: { '7d': learning } })), 'hist-head'))).toBe('Last 7 days                     $15.97')
   })
@@ -170,6 +170,22 @@ describe('history screen', () => {
     const lines = historyScreen(input({ reports: { '7d': busy } }))
     expect(text(line(lines, 'hist-sub'))).toBe('1,234 sessions · 14,577 requests')
     expect(text(line(lines, 'hist-unpriced'))).toBe('1,500 unpriced')
+  })
+
+  test('a long session title gives way to its project, and both give way to the title when the project cannot fit', () => {
+    const report = historyReport({
+      sessions: [
+        { id: 'a1b2c3d4e5', title: 'Manual dependency updates for the whole monorepo', project: 'claude-plus', last_ms: OCT_5_MS, ...spend(6.4) },
+        { id: 'b1b2c3d4e5', title: 'Short', project: 'a-project-name-far-too-long-to-show-beside-a-title', last_ms: OCT_5_MS, ...spend(3.9) },
+      ],
+    })
+    const lines = historyScreen(input({ reports: { '7d': report } }))
+    expect(text(line(lines, 'hist-sessions-0'))).toBe('  Manual dependen… · claude-plus $6.40')
+    expect(text(line(lines, 'hist-sessions-1'))).toBe('  Short · a-project-name-far-to… $3.90')
+    const narrow = historyScreen(input({ width: 26, reports: { '7d': report } }))
+    expect(text(line(narrow, 'hist-sessions-0'))).toBe('  Manual dependen… $6.40')
+    const projects = historyReport({ projects: [{ name: 'a-very-long-project-name-indeed', path: '/work/a-very-long-project-name-indeed', sessions: 12, ...spend(11.2) }] })
+    expect(text(line(historyScreen(input({ reports: { '7d': projects } })), 'hist-projects-0'))).toBe('  a-very-long-pr… · 12 sessions $11.20')
   })
 
   test('the hit ratio scale starts at the lowest tenth and says so', () => {
