@@ -90,11 +90,19 @@ describe('context screen', () => {
       '▸ Skills           ▌░░░░░░░░░░     ~2k',
       '  Messages         ██████▏░░░░  ~25.6k',
       '~12.4k injected since your first request · 1 compaction',
-      'Text Claude Code injected, at 3.5 characters per token (until a breakdown calibrates it), fitted to the 20k tokens of your first request. The rest of each request is messages.',
+      'Text Claude Code injected, at 3.5 characters per token (estimated until Claude Code counts your memory files), fitted to the 20k tokens of your first request. The rest of each request is messages.',
       ' ',
     ])
     expect(line(lines, 'ctx-part-memory').segments[1]?.color).toBe('autoAccept')
     expect(text(line(lines, 'ctx-top-0'))).toBe('  MCP linear · 2 tools            4.1k')
+  })
+
+  test('names the memory files Claude Code counted once they calibrate the estimate', () => {
+    const calibrated = contextReport({ live: null, ratios: { prose: 4, code: 3.4, schema: 2.9, calibrated: true, pairs: 3 } })
+    const lines = contextScreen(input({ report: calibrated, expanded: ['estimate'] }))
+    expect(text(line(lines, 'explain-estimate'))).toBe(
+      'Text Claude Code injected, at 4.0 characters per token (calibrated on 3 memory files Claude Code counted), fitted to the 20k tokens of your first request. The rest of each request is messages.',
+    )
   })
 
   test('the newest of the local and the stored breakdown wins, and another session is ignored', () => {

@@ -172,7 +172,9 @@ function estimate(input: ContextInput, report: ContextReport | null, width: numb
   const lines = [heading('ctx-estimate', 'Estimated from the transcript', width, 'estimate'), ...shareRows(rows, width, true, drill), ...injected(history)]
   if (input.expanded.includes('estimate')) {
     const ratio = report.ratios.prose.toFixed(1)
-    const how = report.ratios.calibrated ? `calibrated on ${report.ratios.pairs} items` : 'until a breakdown calibrates it'
+    const how = report.ratios.calibrated
+      ? `calibrated on ${report.ratios.pairs} memory files Claude Code counted`
+      : 'estimated until Claude Code counts your memory files'
     lines.push(
       prose(
         'explain-estimate',

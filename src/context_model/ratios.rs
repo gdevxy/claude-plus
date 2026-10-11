@@ -57,52 +57,19 @@ impl Ratios {
 }
 
 pub fn calibrate(scan: &Scan, recent_first: &[Breakdown]) -> Ratios {
-    let mut pairs: BTreeMap<(SourceKind, String), f64> = BTreeMap::new();
-    for breakdown in recent_first {
-        let measured = breakdown
-            .memory_files
-            .iter()
-            .map(|file| {
-                (
-                    [SourceKind::ClaudeMd, SourceKind::Memory].as_slice(),
-                    file.path.as_str(),
-                    file.tokens,
-                )
-            })
-            .chain(breakdown.skills.iter().map(|skill| {
-                (
-                    [SourceKind::Skill].as_slice(),
-                    skill.name.as_str(),
-                    skill.tokens,
-                )
-            }))
-            .chain(breakdown.agents.iter().map(|agent| {
-                (
-                    [SourceKind::Agent].as_slice(),
-                    agent.name.as_str(),
-                    agent.tokens,
-                )
-            }));
-        for (kinds, key, tokens) in measured {
-            if tokens < MIN_PAIR_TOKENS {
-                continue;
-            }
-            let source = scan.sources.iter().find(|source| {
-                kinds.contains(&source.kind)
-                    && source.loading != Loading::Off
-                    && source.chars > 0
-                    && match source.kind {
-                        SourceKind::ClaudeMd | SourceKind::Memory => {
-                            source.path.as_deref() == Some(key)
-                        }
-                        _ => source.answers_to(key),
-                    }
-            });
-            if let Some(source) = source {
-                pairs
-                    .entry((source.kind, key.to_string()))
-                    .or_insert(source.chars as f64 / tokens as f64);
-            }
+    let mut pairs: BTreeMap<&str, f64> = BTreeMap::new();
+    for file in recent_first.iter().flat_map(|b| &b.memory_files) {
+        if file.tokens < MIN_PAIR_TOKENS || pairs.contains_key(file.path.as_str()) {
+            continue;
+        }
+        let counted = scan.sources.iter().find(|source| {
+            matches!(source.kind, SourceKind::ClaudeMd | SourceKind::Memory)
+                && source.loading != Loading::Off
+                && source.chars > 0
+                && source.path.as_deref() == Some(file.path.as_str())
+        });
+        if let Some(source) = counted {
+            pairs.insert(&file.path, source.chars as f64 / file.tokens as f64);
         }
     }
     if pairs.len() < MIN_PAIRS {
@@ -217,39 +184,66 @@ mod tests {
         assert_eq!(ratios.tokens(10, TextKind::Schema), 4);
     }
 
+    fn memory_scan() -> Scan {
+        let mut scan = scan();
+        for (index, chars) in [(1, 1200), (2, 2000)] {
+            scan.sources.push(source(
+                SourceKind::ClaudeMd,
+                "CLAUDE.md",
+                Some(&format!("/w/{index}/CLAUDE.md")),
+                chars,
+            ));
+        }
+        scan
+    }
+
     #[test]
-    fn the_median_of_matched_items_scales_every_kind_by_the_same_factor() {
+    fn the_median_of_counted_memory_files_scales_every_kind_by_the_same_factor() {
         let latest = breakdown(
-            vec![("/h/.claude/CLAUDE.md", 1000), ("/elsewhere/CLAUDE.md", 50)],
             vec![
-                entry("tidy", 40),
-                entry("deploy", 100),
-                entry("unknown", 500),
-                entry("tiny", 5),
+                ("/h/.claude/CLAUDE.md", 1000),
+                ("/w/1/CLAUDE.md", 300),
+                ("/elsewhere/CLAUDE.md", 50),
+                ("/h/.claude/projects/-w/memory/MEMORY.md", 5),
             ],
+            vec![entry("tidy", 40), entry("deploy", 100)],
             vec![entry("reviewer", 75)],
         );
         let older = breakdown(
-            vec![("/h/.claude/CLAUDE.md", 10)],
+            vec![("/h/.claude/CLAUDE.md", 10), ("/w/2/CLAUDE.md", 400)],
             vec![entry("tidy", 1)],
             vec![],
         );
-        let ratios = calibrate(&scan(), &[latest, older]);
+        let ratios = calibrate(&memory_scan(), &[latest, older]);
         assert!(ratios.calibrated);
-        assert_eq!(ratios.pairs, 4);
+        assert_eq!(ratios.pairs, 3);
         assert!((ratios.prose - 4.0).abs() < 1e-9, "{ratios:?}");
         assert!((ratios.code - 3.0 * 4.0 / 3.5).abs() < 1e-9);
         assert!((ratios.schema - 2.5 * 4.0 / 3.5).abs() < 1e-9);
     }
 
     #[test]
+    fn skills_and_agents_are_claude_codes_own_estimates_and_never_calibrate() {
+        let estimates = breakdown(
+            vec![("/h/.claude/CLAUDE.md", 1000)],
+            vec![entry("tidy", 40), entry("deploy", 100)],
+            vec![entry("reviewer", 75)],
+        );
+        assert_eq!(calibrate(&scan(), &[estimates]), Ratios::default());
+    }
+
+    #[test]
     fn a_wild_calibration_is_held_to_half_or_double_the_default() {
         let wild = breakdown(
-            vec![("/h/.claude/CLAUDE.md", 100)],
-            vec![entry("tidy", 30), entry("deploy", 30)],
-            vec![entry("reviewer", 30)],
+            vec![
+                ("/h/.claude/CLAUDE.md", 100),
+                ("/w/1/CLAUDE.md", 30),
+                ("/w/2/CLAUDE.md", 30),
+            ],
+            vec![],
+            vec![],
         );
-        let ratios = calibrate(&scan(), &[wild]);
+        let ratios = calibrate(&memory_scan(), &[wild]);
         assert_eq!(ratios.prose, DEFAULT_PROSE * MAX_FACTOR);
     }
 }
