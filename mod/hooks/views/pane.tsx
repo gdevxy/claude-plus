@@ -7,7 +7,7 @@ import { Row } from './widgets'
 export const BRAND = '✻ claude-plus'
 export const SHORT_BRAND = '✻'
 
-export type Tab = { key: string; hotkey: string; label: string; isActive: boolean; onPress: () => void }
+export type Tab = { key: string; hotkey: string; label: string; short: string; isActive: boolean; onPress: () => void }
 
 export type Control = { key: string; hotkey: string; label: string; onPress: () => void }
 
@@ -17,6 +17,11 @@ export function buttonsWidth(buttons: readonly { hotkey: string; label: string }
 
 export function brandFor(inner: number, tabs: readonly Tab[]): string {
   return BRAND.length + 1 + buttonsWidth(tabs) <= inner ? BRAND : SHORT_BRAND
+}
+
+export function shownTabs(inner: number, tabs: readonly Tab[]): Tab[] {
+  if (SHORT_BRAND.length + 1 + buttonsWidth(tabs) <= inner) return [...tabs]
+  return tabs.map(tab => (tab.isActive ? tab : { ...tab, label: tab.short }))
 }
 
 export function PaneBody({
@@ -38,14 +43,15 @@ export function PaneBody({
 }) {
   const { Box, Text, Button } = ui
   const inner = Math.max(1, width - 2 * PADDING)
+  const shown = shownTabs(inner, tabs)
   return (
     <Box flexDirection="column" width={width} paddingX={PADDING}>
       <Box key="header" width={inner} justifyContent="space-between">
         <Text color="claude" bold>
-          {brandFor(inner, tabs)}
+          {brandFor(inner, shown)}
         </Text>
         <Box gap={1}>
-          {tabs.map(tab => (
+          {shown.map(tab => (
             <Button key={tab.key} hotkey={tab.hotkey} plain dimColor={!tab.isActive} label={tab.label} onPress={tab.onPress} />
           ))}
         </Box>

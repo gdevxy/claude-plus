@@ -2,9 +2,10 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
 import type { HttpInit, On, SessionUsageArgs } from 'claude-code'
 
-import type { ContextReport, HistoryReport, Snapshot } from '../types'
+import type { ContextReport, HistoryReport, InsightsReport, LimitWindow, Snapshot } from '../types'
 import { historyScreen } from '../hooks/history'
-import { MINUTE_MS, NOW_MS, contextReport, dayReport, historyReport, local, snapshot, usage } from './fixtures'
+import { insightsScreen } from '../hooks/insights'
+import { MINUTE_MS, NOW_MS, contextReport, dayReport, historyReport, insightsReport, local, snapshot, usage } from './fixtures'
 import { paintTree, painted, trimmed } from './paint'
 
 type Wiring = {
@@ -14,6 +15,11 @@ type Wiring = {
   lag: (() => Promise<void>) | null
   historyLag: (() => Promise<void>) | null
   historyStatus: number | null
+  insightsStatus: number | null
+  insightsLag: (() => Promise<void>) | null
+  insights: InsightsReport
+  toasts: { text: string; timeoutMs?: number }[]
+  played: unknown[]
   openRefusal: string | null
   resets: number
   ensureCures: boolean
@@ -46,14 +52,20 @@ const MEASURE = {
 }
 
 const HISTORY_HEADERS: Record<number, string> = {
-  40: ' ✻        1: Live 2: Context 3: History',
-  60: ' ✻ claude-plus                1: Live 2: Context 3: History',
-  100: ' ✻ claude-plus                                                        1: Live 2: Context 3: History',
+  40: ' ✻    1: Live 2: Ctx 3: History 4: Tips',
+  60: ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
+  100: ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
+}
+
+const INSIGHTS_HEADERS: Record<number, string> = {
+  40: ' ✻   1: Live 2: Ctx 3: Hist 4: Insights',
+  60: ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
+  100: ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
 }
 
 const PANE_FRAMES: Record<number, string[]> = {
   40: [
-    ' ✻        1: Live 2: Context 3: History',
+    ' ✻       1: Live 2: Ctx 3: Hist 4: Tips',
     '',
     ' Opus 5.5 · high                  $4.18',
     '',
@@ -82,7 +94,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '         resets 2d 23h',
   ],
   60: [
-    ' ✻ claude-plus                1: Live 2: Context 3: History',
+    ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
     '',
     ' Opus 5.5 · high                                      $4.18',
     '',
@@ -111,7 +123,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '         resets in 2d 23h',
   ],
   100: [
-    ' ✻ claude-plus                                                        1: Live 2: Context 3: History',
+    ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
     '',
     ' Opus 5.5 · high                                                                              $4.18',
     '',
@@ -143,7 +155,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 
 const CONTEXT_FRAMES: Record<number, string[]> = {
   40: [
-    ' ✻        1: Live 2: Context 3: History',
+    ' ✻   1: Live 2: Context 3: Hist 4: Tips',
     '',
     ' Context · Opus 5.5          46k / 200k',
     ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
@@ -181,7 +193,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
     '   Plugins                    5 · 1 off',
   ],
   60: [
-    ' ✻ claude-plus                1: Live 2: Context 3: History',
+    ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
     '',
     ' Context · Opus 5.5                              46k / 200k',
     ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
@@ -219,7 +231,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
     '   Plugins                                        5 · 1 off',
   ],
   100: [
-    ' ✻ claude-plus                                                        1: Live 2: Context 3: History',
+    ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
     '',
     ' Context · Opus 5.5                                                                      46k / 200k',
     ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
@@ -259,7 +271,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, historyStatus: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), insights: insightsReport(), insightsLag: null, toasts: [], played: [], histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, historyStatus: null, insightsStatus: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -287,6 +299,14 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     wiring.statuses.push(e.text)
     return { value: undefined }
   })
+  on('ui.toast', ($, e) => {
+    wiring.toasts.push(e)
+    return { value: undefined }
+  })
+  on('audio.play', ($, e) => {
+    wiring.played.push(e.clip)
+    return { value: undefined }
+  })
   on('process.run', ($, e) => {
     wiring.ran.push(e.argv)
     if (wiring.serving === 'older' && wiring.ensureCures) wiring.serving = 'current'
@@ -297,6 +317,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     if (wiring.silent) await new Promise(() => undefined)
     if (wiring.lag !== null && e.url.includes('/snapshot')) await wiring.lag()
     if (wiring.historyLag !== null && e.url.includes('/history')) await wiring.historyLag()
+    if (wiring.insightsLag !== null && e.url.includes('/insights')) await wiring.insightsLag()
     if (wiring.holding && e.url.endsWith('/events')) await new Promise<void>(resolve => wiring.held.push(resolve))
     if (wiring.down) throw new Error('ECONNREFUSED')
     if (wiring.resets > 0) {
@@ -306,10 +327,13 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     if (e.url.endsWith('/events')) wiring.delivered.push(e)
     if (wiring.rebuilding && e.url.includes('/snapshot')) return { value: { status: 503, ok: false, headers: {}, text: '{"error":"rebuilding"}' } }
     if (wiring.historyStatus !== null && e.url.includes('/history')) return { value: { status: wiring.historyStatus, ok: false, headers: {}, text: '{"error":"no route for GET /history"}' } }
+    if (wiring.insightsStatus !== null && e.url.includes('/insights')) return { value: { status: wiring.insightsStatus, ok: false, headers: {}, text: '{"error":"no route for GET /insights"}' } }
     const body = e.url.includes('/snapshot')
       ? JSON.stringify(servedBody(wiring))
       : e.url.includes('/history')
         ? JSON.stringify({ v: 1, ...historyOf(wiring, e.url) })
+        : e.url.includes('/insights')
+        ? JSON.stringify({ v: 1, ...wiring.insights, session: wiring.session })
         : e.url.includes('/context')
         ? JSON.stringify({ v: 1, ...wiring.report, session: wiring.reportSession ?? wiring.session })
         : '{"accepted":1,"rejected":[]}'
@@ -320,7 +344,13 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
   on('session.measure', ($, e) => ({ changed: e.changed }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   return wiring
+}
+
+function expiring(inMs: number): Snapshot {
+  const base = snapshot()
+  return snapshot({ cache: { ...base.live.cache, expires_at_ms: NOW_MS + inMs } })
 }
 
 function historyOf(wiring: Wiring, url: string): HistoryReport {
@@ -542,7 +572,7 @@ describe('plus mod', () => {
       await clock.advance(1000)
       const ui = await mount($, columns)
       expect((await ui.find({ key: 'tab-live' }))?.props).toEqual({ key: 'tab-live', hotkey: '1', plain: true, dimColor: false, label: 'Live' })
-      expect((await ui.find({ key: 'tab-context' }))?.props).toEqual({ key: 'tab-context', hotkey: '2', plain: true, dimColor: true, label: 'Context' })
+      expect((await ui.find({ key: 'tab-context' }))?.props).toEqual({ key: 'tab-context', hotkey: '2', plain: true, dimColor: true, label: columns === 40 ? 'Ctx' : 'Context' })
       const rows = paintTree(await ui.drawn(), columns)
       expect(rows.filter(row => row.length > columns)).toEqual([])
       expect(trimmed(rows)).toEqual(PANE_FRAMES[columns])
@@ -1364,5 +1394,179 @@ describe('plus mod', () => {
     await clock.advance(31_000)
     expect((await ui.find({ key: 'daemon' }))?.text).toBe('The daemon is not answering')
     expect((await ui.find({ key: 'hist-spend-chart' }))?.type).toBe('Raster')
+  })
+  for (const columns of [40, 60, 100]) {
+    test(`the Insights tab draws ranked tips at ${columns} columns`, async ($, on) => {
+      const clock = mock.clock(on, { now: NOW_MS })
+      const wiring = wire(on)
+      await start($)
+      await clock.advance(1000)
+      const ui = await mount($, columns)
+      await ui.press({ key: 'tab-insights' })
+      await clock.advance(1000)
+      expect((await ui.find({ key: 'tab-insights' }))?.props).toEqual({ key: 'tab-insights', hotkey: '4', plain: true, dimColor: false, label: 'Insights' })
+      expect(wiring.fetched.filter(call => call.url.includes('/insights')).map(call => call.url)).toEqual([
+        'http://claude-plus/insights?session=s1',
+        'http://claude-plus/insights?session=s1',
+      ])
+      const rows = paintTree(await ui.drawn(), columns)
+      expect(rows.filter(row => row.length > columns)).toEqual([])
+      expect(trimmed(rows.slice(0, 2))).toEqual([INSIGHTS_HEADERS[columns], ''])
+      const screen = insightsScreen({ width: columns, report: insightsReport(), failure: null, daemon: { status: 'ok', detail: null }, expanded: [] })
+      expect(trimmed(rows.slice(2))).toEqual(trimmed(painted(screen, columns)))
+      await ui.press({ key: 'why-ins-idle_rebuilds' })
+      expect((await ui.find({ key: 'explain-ins-idle_rebuilds' }))?.text.startsWith('Counts main-thread requests')).toBe(true)
+      await ui.unmount()
+    })
+  }
+
+  test('the Insights view asks for its report every minute while shown and not from Live', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    const asked = () => wiring.fetched.filter(call => call.url.includes('/insights')).length
+    await start($)
+    await clock.advance(120_000)
+    expect(asked()).toBe(1)
+    const ui = await mount($, 60)
+    await ui.press({ key: 'tab-insights' })
+    await clock.advance(1000)
+    expect(asked()).toBe(2)
+    await clock.advance(58_000)
+    expect(asked()).toBe(2)
+    await clock.advance(2000)
+    expect(asked()).toBe(3)
+    expect(wiring.fetched.some(call => call.url.includes('/context'))).toBe(false)
+    await ui.press({ key: 'tab-live' })
+    await clock.advance(120_000)
+    expect(asked()).toBe(3)
+  })
+
+  test('an Insights report that takes two seconds still arrives', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on, { insightsLag: () => clock.sleep(2000) })
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-insights' })
+    for (let step = 0; step < 40; step += 1) await clock.advance(100)
+    expect((await ui.find({ key: 'ins-idle_rebuilds' }))?.text.startsWith('Save ~$4.20/week')).toBe(true)
+  })
+
+  test('the Insights view keeps its last report while the daemon is down', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-insights' })
+    await clock.advance(1000)
+    wiring.down = true
+    await clock.advance(61_000)
+    expect((await ui.find({ key: 'daemon' }))?.text).toBe('The daemon is not answering')
+    expect((await ui.find({ key: 'ins-idle_rebuilds' }))?.text.startsWith('Save ~$4.20/week')).toBe(true)
+  })
+
+  test('a daemon without the Insights route is named and asked again every minute until it has one', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { insightsStatus: 404 })
+    const asked = () => wiring.fetched.filter(call => call.url.includes('/insights')).length
+    await start($)
+    await clock.settle()
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-insights' })
+    await clock.advance(1000)
+    expect(await ui.find({ key: 'ins-loading' })).toBeUndefined()
+    expect((await ui.find({ key: 'ins-failed' }))?.text).toBe('This claude-plus daemon is older than the pane and has no Insights')
+    expect((await ui.find({ key: 'ins-retry' }))?.text).toBe('Run claude-plus daemon stop to restart it')
+    expect(wiring.toasts).toEqual([])
+    const before = asked()
+    await clock.advance(60_000)
+    expect(asked()).toBe(before + 1)
+    wiring.insightsStatus = null
+    await clock.advance(60_000)
+    expect(await ui.find({ key: 'ins-failed' })).toBeUndefined()
+    expect((await ui.find({ key: 'ins-idle_rebuilds' }))?.text.startsWith('Save ~$4.20/week')).toBe(true)
+  })
+
+  test('the first session after a day of work is greeted with a recap toast, once', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.settle()
+    expect(wiring.toasts).toEqual([{ text: 'Yesterday: $12.40 · 94% cache hits · biggest win: 5 days in a row above 90% cache hits', timeoutMs: 8000 }])
+    wiring.session = 's2'
+    await start($)
+    await clock.settle()
+    expect(wiring.toasts.length).toBe(1)
+  })
+
+  test('a session without a terminal gets no recap and no alerts', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { served: expiring(90_000) })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false })
+    await clock.advance(40_000)
+    expect(wiring.toasts).toEqual([])
+  })
+
+  test('the cache warns once in its last minute and stays silent about the chime by default', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { served: expiring(90_000), insights: insightsReport({ recap: null }) })
+    await start($)
+    await clock.advance(29_000)
+    expect(wiring.toasts).toEqual([])
+    await clock.advance(2000)
+    expect(wiring.toasts).toEqual([{ text: 'Cache goes cold in under a minute ✻ rewarming later costs ~$0.40', timeoutMs: 8000 }])
+    await clock.advance(30_000)
+    expect(wiring.toasts.length).toBe(1)
+    expect(wiring.played).toEqual([])
+  })
+
+  test('chime=true plays the chime with the cache warning', { options: { chime: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { served: expiring(90_000), insights: insightsReport({ recap: null }) })
+    await start($)
+    await clock.advance(31_000)
+    expect(wiring.played).toEqual([{ asset: 'sounds/chime.wav' }])
+  })
+
+  test('alerts=false raises no alert', { options: { alerts: false } }, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { served: expiring(90_000), insights: insightsReport({ recap: null }) })
+    await start($)
+    await clock.advance(31_000)
+    expect(wiring.toasts).toEqual([])
+  })
+
+  test('a pace that fills the 5h window before its reset raises one toast', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const base = snapshot()
+    const five: LimitWindow = { ...(base.live.limits[0] as LimitWindow), pace: { pct_per_hour: 40, projected_pct: 130, full_at_ms: NOW_MS + 42 * MINUTE_MS } }
+    const wiring = wire(on, { served: snapshot({ limits: [five] }), insights: insightsReport({ recap: null }) })
+    await start($)
+    await $.session.measure(MEASURE)
+    await clock.advance(5000)
+    expect(wiring.toasts.map(toast => toast.text)).toEqual(['At this pace the 5h limit runs out in 42m, before its reset in 2h 10m'])
+  })
+
+  test('context near the auto-compact threshold asks for a free summary once and raises one toast', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { insights: insightsReport({ recap: null }) })
+    await start($)
+    await $.session.measure({ ...MEASURE, context: { tokens: 152_000, window: 200_000, percent: 76 } })
+    await clock.advance(3000)
+    expect(wiring.usages).toEqual([{ breakdown: 'summary' }])
+    expect(wiring.toasts.map(toast => toast.text)).toEqual(['Context is close to auto-compact, 152k of 167k ✻ /compact now to choose what stays'])
+    await clock.advance(10_000)
+    expect(wiring.usages.length).toBe(1)
+    expect(wiring.toasts.length).toBe(1)
+  })
+
+  test('a /clear says what the session cost and saved', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { insights: insightsReport({ recap: null }) })
+    await start($)
+    await clock.advance(1000)
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    expect(wiring.toasts).toEqual([{ text: 'That session: $4.18 · cache hits saved you $3.20 ✻', timeoutMs: 8000 }])
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } })
+    expect(wiring.toasts.length).toBe(1)
   })
 })

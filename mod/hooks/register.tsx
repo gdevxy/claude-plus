@@ -1,11 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 'claude-code'
 
-import type { Chart, ContextReport, Daemon, DaemonStatus, Failures, HistoryFailure, HistoryRange, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
+import type { Alerted, Chart, ContextReport, Daemon, DaemonStatus, Failures, HistoryFailure, HistoryRange, InsightsFailure, InsightsReport, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
-import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
+import { ALERT_TOAST_MS, CHIME, EMPTY_ALERTED, alertsOf, ownAlerts, wantsThreshold } from './alerts'
+import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchInsights, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
 import { contextScreen } from './context'
+import { money } from './format'
 import { historyScreen, metricLabel, nextMetric, nextRange, rangeLabel, shownMetric } from './history'
+import { insightsScreen, recapText } from './insights'
 import { paletteOf } from './palette'
 import {
   EMPTY_LOCAL,
@@ -40,6 +43,9 @@ export const USAGE_IDLE_GAP_MS = 600_000
 export const USAGE_COLUMNS = 40
 export const HISTORY_POLL_MS = 30_000
 export const THEME_KEY = 'theme'
+export const INSIGHTS_POLL_MS = 60_000
+export const RECAP_KEY = 'recap'
+export const RECAP_TOAST_MS = 8000
 
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
@@ -47,6 +53,9 @@ const context = atom({ plugin: 'plus', key: 'context' } as const, null as Contex
 const history = atom({ plugin: 'plus', key: 'history' } as const, {} as Reports, { shape: 'history-1' })
 const failures = atom({ plugin: 'plus', key: 'failures' } as const, {} as Failures)
 const chart = atom({ plugin: 'plus', key: 'chart' } as const, { range: '7d', metric: 'cost' } as Chart)
+const insights = atom({ plugin: 'plus', key: 'insights' } as const, null as InsightsReport | null, { shape: 'insights-1' })
+const insightsFailure = atom({ plugin: 'plus', key: 'insightsFailure' } as const, null as InsightsFailure | null)
+const alerted = atom({ plugin: 'plus', key: 'alerted' } as const, EMPTY_ALERTED as Alerted, { shape: 'alerted-1' })
 const theme = atom({ plugin: 'plus', key: 'theme' } as const, 'auto')
 const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-2' })
 const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false, unasked: 'settled' } as PaneState)
@@ -58,6 +67,9 @@ const motions = atom({ plugin: 'plus', key: 'motions' } as const, {} as Record<s
 type Runtime = {
   binary: string
   animations: boolean
+  alerts: boolean
+  chime: boolean
+  interactive: boolean
   outbox: Outbox
   timer: Timer | null
   socket: string | null | undefined
@@ -71,6 +83,8 @@ type Runtime = {
   contextPolledAtMs: number
   historyPolledAtMs: number
   historyRunning: boolean
+  insightsPolledAtMs: number
+  insightsRunning: boolean
   usageDue: boolean
   usageRunning: boolean
   usageAtMs: number
@@ -81,6 +95,9 @@ function fresh(options: PluginOptions): Runtime {
   return {
     binary: typeof options.binaryPath === 'string' && options.binaryPath !== '' ? options.binaryPath : 'claude-plus',
     animations: options.animations !== false,
+    alerts: options.alerts !== false,
+    chime: options.chime === true,
+    interactive: false,
     outbox: new Outbox(),
     timer: null,
     socket: undefined,
@@ -94,6 +111,8 @@ function fresh(options: PluginOptions): Runtime {
     contextPolledAtMs: -Infinity,
     historyPolledAtMs: -Infinity,
     historyRunning: false,
+    insightsPolledAtMs: -Infinity,
+    insightsRunning: false,
     usageDue: false,
     usageRunning: false,
     usageAtMs: -Infinity,
@@ -153,17 +172,20 @@ async function tick($: EngineInterface): Promise<void> {
     await update($, now, () => at)
     await settle($)
     await showStatus($)
+    await raiseAlerts($)
     if (runtime.outbox.size > 0) await flush($)
     if (at - runtime.polledAtMs >= POLL_MS) await poll($)
     const shownView = await read($, view)
     const usageWanted = runtime.usageDue && !runtime.usageRunning
-    const contextWanted = shownView !== 'live' && at - runtime.contextPolledAtMs >= CONTEXT_POLL_MS
+    const contextWanted = (shownView === 'context' || shownView === 'history') && at - runtime.contextPolledAtMs >= CONTEXT_POLL_MS
     const historyWanted = shownView === 'history' && !runtime.historyRunning && at - runtime.historyPolledAtMs >= HISTORY_POLL_MS
-    if ((usageWanted || contextWanted || historyWanted) && (await paneShown($))) {
+    const insightsWanted = shownView === 'insights' && !runtime.insightsRunning && at - runtime.insightsPolledAtMs >= INSIGHTS_POLL_MS
+    if ((usageWanted || contextWanted || historyWanted || insightsWanted) && (await paneShown($))) {
       const usageGap = shownView === 'context' ? USAGE_GAP_MS : USAGE_IDLE_GAP_MS
       if (usageWanted && at - runtime.usageAtMs >= usageGap) quietly(collectUsage($))
       if (contextWanted) await pollContext($)
       if (historyWanted) quietly(pollHistory($))
+      if (insightsWanted) quietly(pollInsights($))
     }
     if (needsEnsure((await read($, daemon)).status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($))
   } catch {
@@ -213,9 +235,12 @@ async function follow($: EngineInterface): Promise<string> {
     await update($, local, () => ({ ...EMPTY_LOCAL, session: id }))
     await update($, snapshot, () => null)
     await update($, context, () => null)
+    await update($, insights, () => null)
+    await update($, insightsFailure, () => null)
     await update($, motions, () => ({}))
     runtime.usageAtMs = -Infinity
     runtime.contextPolledAtMs = -Infinity
+    runtime.insightsPolledAtMs = -Infinity
   }
   return id
 }
@@ -292,6 +317,67 @@ async function recordFailure($: EngineInterface, range: HistoryRange, failure: H
   })
 }
 
+async function pollInsights($: EngineInterface): Promise<InsightsReport | null> {
+  runtime.insightsRunning = true
+  try {
+    runtime.insightsPolledAtMs = await $.clock.now()
+    const id = await follow($)
+    const path = await socketOf($)
+    if (path === null) return null
+    const reply = await fetchInsights(io($), path, id)
+    if (reply.kind !== 'insights') {
+      const failure: InsightsFailure =
+        reply.kind === 'missing'
+          ? { kind: 'missing', reason: 'this daemon has no Insights' }
+          : { kind: 'failed', reason: reply.kind === 'rebuilding' ? 'the store is being rebuilt' : reply.reason }
+      await update($, insightsFailure, () => failure)
+      return null
+    }
+    if (reply.report.session !== (await follow($))) return null
+    await update($, insights, () => reply.report)
+    await update($, insightsFailure, () => null)
+    return reply.report
+  } finally {
+    runtime.insightsRunning = false
+  }
+}
+
+async function greet($: EngineInterface, ensured: Promise<void>): Promise<void> {
+  await ensured
+  if ((await read($, daemon)).status !== 'ok') return
+  const recap = (await pollInsights($))?.recap ?? null
+  if (recap === null || (await $.store.get(RECAP_KEY)) === recap.start_ms) return
+  await $.store.set(RECAP_KEY, recap.start_ms)
+  $.ui.toast(recapText(recap), { timeoutMs: RECAP_TOAST_MS })
+}
+
+async function raiseAlerts($: EngineInterface): Promise<void> {
+  if (!runtime.alerts || !runtime.interactive) return
+  const known = await read($, alerted)
+  const input = { ...(await sources($)), known }
+  const { alerts, next } = alertsOf(input)
+  if (JSON.stringify(next) !== JSON.stringify(known)) await update($, alerted, () => next)
+  for (const alert of alerts) {
+    $.ui.toast(alert.text, { timeoutMs: ALERT_TOAST_MS })
+    if (alert.kind === 'cache' && runtime.chime) quietly($.audio.play({ asset: CHIME }))
+  }
+  if (wantsThreshold(input.local, next)) quietly(askThreshold($, input.local.session))
+}
+
+async function askThreshold($: EngineInterface, session: string | null): Promise<void> {
+  await update($, alerted, known => ({ ...ownAlerts(known, session), thresholdAsked: true }))
+  const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
+  const threshold = usage?.context.breakdown?.autoCompactThreshold ?? null
+  if (threshold === null) return
+  await update($, alerted, known => (known.session === session ? { ...known, threshold } : known))
+}
+
+function sessionRecap(kept: Snapshot | null, session: string): string | null {
+  if (kept === null || kept.session !== session || kept.totals.cost_usd < 0.01) return null
+  const saved = kept.live.cache.saved_usd
+  return `That session: ${money(kept.totals.cost_usd)}${saved >= 0.01 ? ` · cache hits saved you ${money(saved)}` : ''} ✻`
+}
+
 async function readTheme($: EngineInterface): Promise<void> {
   const rows = await $.config.list().catch(() => [])
   const value = rows.find(row => row.key === THEME_KEY)?.value
@@ -335,6 +421,11 @@ async function showView($: EngineInterface, next: PlusView): Promise<void> {
   runtime.contextPolledAtMs = -Infinity
   if (next === 'history') {
     runtime.historyPolledAtMs = -Infinity
+    ensureTimers($)
+    return
+  }
+  if (next === 'insights') {
+    runtime.insightsPolledAtMs = -Infinity
     ensureTimers($)
     return
   }
@@ -425,21 +516,25 @@ export const register: Register = (on, options) => {
   runtime = fresh(options)
 
   on('session.start', async ($, e, next) => {
+    runtime.interactive = e.isInteractive
     ensureTimers($)
     await $.command.register({ name: 'plus', description: 'Open the claude-plus pane' })
     const id = await follow($)
     const model = await $.session.model()
     const turns = await $.session.turns()
     await update($, local, known => ({ ...known, session: id, model, turns }))
-    quietly(ensureDaemon($))
+    const ensured = ensureDaemon($)
+    quietly(ensured)
     quietly(readTheme($))
     if ((await read($, pane)).session === id) return next(e)
     await update($, pane, (): PaneState => ({ session: id, asked: false, unasked: e.isInteractive ? 'waiting' : 'settled' }))
     quietly(forward($, 'session.start', { cwd: e.cwd, surface: e.surface, interactive: e.isInteractive }))
+    if (e.isInteractive) quietly(greet($, ensured))
     return next(e)
   })
 
   on('command.run', { command: 'plus' }, async ($, e) => {
+    runtime.interactive = true
     ensureTimers($)
     runtime.replaceTried = true
     quietly(ensureDaemon($))
@@ -537,6 +632,8 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     quietly(forward($, 'session.end', { reason: e.reason }, e.sessionId))
+    const recap = runtime.interactive && (e.reason === 'clear' || e.reason === 'resume') ? sessionRecap(await read($, snapshot), e.sessionId) : null
+    if (recap !== null) $.ui.toast(recap, { timeoutMs: RECAP_TOAST_MS })
     return next(e)
   })
 
@@ -558,7 +655,9 @@ export const register: Register = (on, options) => {
     const lines =
       shownView === 'context'
         ? contextScreen({ width: e.props.bodyColumns, nowMs, report: await read($, context), local: known, daemon: status, expanded: open })
-        : shownView === 'history'
+        : shownView === 'insights'
+          ? insightsScreen({ width: e.props.bodyColumns, report: await read($, insights), failure: await read($, insightsFailure), daemon: status, expanded: open })
+          : shownView === 'history'
           ? historyScreen({ width: e.props.bodyColumns, range: chosen.range, metric: chosen.metric, reports, failures: await read($, failures), context: await read($, context), local: known, daemon: status, expanded: open, theme: await read($, theme) })
           : screen({
               width: e.props.bodyColumns,
@@ -579,9 +678,10 @@ export const register: Register = (on, options) => {
         lines={lines}
         palette={e.surface === 'terminal' ? paletteOf(await read($, theme)) : null}
         tabs={[
-          { key: 'tab-live', hotkey: '1', label: 'Live', isActive: shownView === 'live', onPress: () => quietly(showView($, 'live')) },
-          { key: 'tab-context', hotkey: '2', label: 'Context', isActive: shownView === 'context', onPress: () => quietly(showView($, 'context')) },
-          { key: 'tab-history', hotkey: '3', label: 'History', isActive: shownView === 'history', onPress: () => quietly(showView($, 'history')) },
+          { key: 'tab-live', hotkey: '1', label: 'Live', short: 'Live', isActive: shownView === 'live', onPress: () => quietly(showView($, 'live')) },
+          { key: 'tab-context', hotkey: '2', label: 'Context', short: 'Ctx', isActive: shownView === 'context', onPress: () => quietly(showView($, 'context')) },
+          { key: 'tab-history', hotkey: '3', label: 'History', short: 'Hist', isActive: shownView === 'history', onPress: () => quietly(showView($, 'history')) },
+          { key: 'tab-insights', hotkey: '4', label: 'Insights', short: 'Tips', isActive: shownView === 'insights', onPress: () => quietly(showView($, 'insights')) },
         ]}
         controls={
           shownView === 'history'
