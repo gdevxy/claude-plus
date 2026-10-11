@@ -21,9 +21,13 @@ export function Piece({ ui, segment }: { ui: Ui; segment: Segment }) {
   )
 }
 
+export const RASTER_MAX_COLUMNS = 512
+export const RASTER_MAX_ROWS = 256
+
 export function Chart({ ui, chartKey, grid, width, palette }: { ui: Ui; chartKey: string; grid: Grid; width: number; palette: Palette | null }) {
   const { Box, Text, Raster } = ui
-  if (Raster !== undefined && palette !== null) return <Raster key={chartKey} columns={grid.columns} rows={grid.rows} cells={encode(grid, palette)} />
+  const fits = grid.columns <= RASTER_MAX_COLUMNS && grid.rows <= RASTER_MAX_ROWS
+  if (Raster !== undefined && palette !== null && fits) return <Raster key={chartKey} columns={grid.columns} rows={grid.rows} cells={encode(grid, palette)} />
   return (
     <Box key={chartKey} flexDirection="column" width={width}>
       {runs(grid).map((row, index) => (

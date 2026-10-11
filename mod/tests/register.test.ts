@@ -1201,6 +1201,22 @@ describe('plus mod', () => {
     await ui.unmount()
   })
 
+  test('a pane wider than a Raster can be draws its charts as text instead of refusing the tree', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on)
+    await start($)
+    await $.session.measure(MEASURE)
+    await clock.advance(1000)
+    const ui = await mount($, 600)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    for (const key of ['hist-spend-chart', 'hist-hit-chart', 'hist-peak-chart', 'hist-growth-chart']) expect([key, (await ui.find({ key }))?.type]).toEqual([key, 'Box'])
+    await ui.unmount()
+    const fits = await mount($, 514)
+    expect((await fits.find({ key: 'hist-spend-chart' }))?.type).toBe('Raster')
+    await fits.unmount()
+  })
+
   test('the desktop draws the charts as text', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     wire(on)
