@@ -139,7 +139,7 @@ fn long_evidence_lists_show_three_lines_and_count_the_rest() {
     let five = [1, 2, 3, 4, 5];
     assert_eq!(
         listed(&five, |n| format!("item {n}"), "items"),
-        ["item 1", "item 2", "item 3", "and 2 more items"]
+        ["item 1", "item 2", "item 3", "and 2\u{a0}more items"]
     );
     assert_eq!(
         listed(&five[..3], |n| n.to_string(), "items"),

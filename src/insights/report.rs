@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(with_streak.start_ms, utc("2026-10-10T00:00:00Z") * 1000);
         assert_eq!(
             with_streak.win.as_deref(),
-            Some("3 days in a row above 90% cache hits")
+            Some("3\u{a0}days in a row above 90% cache hits")
         );
         let older = recap_of(&[spent("2026-10-07T10:00:00Z", 50_000, 50_000)]).unwrap();
         assert_eq!(older.day, "Oct 7");

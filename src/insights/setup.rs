@@ -14,9 +14,12 @@ pub struct UnusedMcpServers;
 impl Rule for UnusedMcpServers {
     fn evaluate(&self, ctx: &InsightContext) -> Vec<Finding> {
         unused(ctx, ItemKind::McpServer, |items| match items {
-            [one] => format!("turn off the {} MCP server, unused for 14 days", one.name),
+            [one] => format!(
+                "turn off the {} MCP server, unused for 14\u{a0}days",
+                one.name
+            ),
             _ => format!(
-                "turn off {} you have not used in 14 days",
+                "turn off {} you have not used in 14\u{a0}days",
                 count(items.len() as u64, "MCP server", "MCP servers")
             ),
         })
@@ -30,9 +33,9 @@ pub struct UnusedSkills;
 impl Rule for UnusedSkills {
     fn evaluate(&self, ctx: &InsightContext) -> Vec<Finding> {
         unused(ctx, ItemKind::Skill, |items| match items {
-            [one] => format!("retire the {} skill, unused for 14 days", one.name),
+            [one] => format!("retire the {} skill, unused for 14\u{a0}days", one.name),
             _ => format!(
-                "retire {} you have not used in 14 days",
+                "retire {} you have not used in 14\u{a0}days",
                 count(items.len() as u64, "skill", "skills")
             ),
         })
@@ -62,12 +65,12 @@ fn unused(
         &items,
         |item| match month(item) {
             0 => format!(
-                "{}: ~{} tokens per request, unused for 30 days",
+                "{}: ~{}\u{a0}tokens per request, unused for 30\u{a0}days",
                 item.name,
                 tokens(item.tokens)
             ),
             uses => format!(
-                "{}: ~{} tokens per request, used {} in 30 days",
+                "{}: ~{}\u{a0}tokens per request, used {} in 30\u{a0}days",
                 item.name,
                 tokens(item.tokens),
                 times(uses)
@@ -80,7 +83,7 @@ fn unused(
         },
     );
     evidence.push(format!(
-        "Carried on {} in this project over 14 days",
+        "Carried on {} in this project over 14\u{a0}days",
         count(ctx.project_requests() as u64, "request", "requests")
     ));
     let measured = items.iter().all(|i| !i.estimated);
@@ -155,13 +158,18 @@ impl Rule for OversizedMemory {
         let prose = |chars: u64| ctx.ratios.tokens(chars, TextKind::Prose);
         let mut evidence = listed(
             &sized,
-            |(name, chars)| format!("{name}: ~{} tokens on every request", tokens(prose(*chars))),
+            |(name, chars)| {
+                format!(
+                    "{name}: ~{}\u{a0}tokens on every request",
+                    tokens(prose(*chars))
+                )
+            },
             "files",
         );
         let lines: usize = repeats.iter().map(|(_, extra)| extra).sum();
         if lines > 0 {
             evidence.push(format!(
-                "{} repeated in your memory files, ~{} tokens",
+                "{} repeated in your memory files, ~{}\u{a0}tokens",
                 count(lines as u64, "line", "lines"),
                 tokens(prose(repeated_chars))
             ));
@@ -205,7 +213,7 @@ impl Rule for Retention {
         vec![
             Draft {
                 rule: RuleId::Retention,
-                tip: format!("keep {WANTED_RETENTION_DAYS} days of transcripts to match the History range"),
+                tip: format!("keep {WANTED_RETENTION_DAYS}\u{a0}days of transcripts to match the History range"),
                 evidence: vec![
                     setting,
                     "Claude Code deletes older transcripts, so /resume and a fresh import cannot reach them".into(),
@@ -256,16 +264,16 @@ mod tests {
         let finding = &findings[0];
         assert_eq!(
             finding.tip,
-            "turn off 2 MCP servers you have not used in 14 days"
+            "turn off 2\u{a0}MCP servers you have not used in 14\u{a0}days"
         );
         assert_eq!(finding.confidence, Confidence::High);
         assert!((finding.saving_usd.unwrap() - carried_on_busy(60_000.0) / 2.0).abs() < 1e-9);
         assert_eq!(
             finding.evidence,
             [
-                "github: ~40k tokens per request, unused for 30 days",
-                "linear: ~20k tokens per request, used twice in 30 days",
-                "Carried on 1,000 requests in this project over 14 days",
+                "github: ~40k\u{a0}tokens per request, unused for 30\u{a0}days",
+                "linear: ~20k\u{a0}tokens per request, used twice in 30\u{a0}days",
+                "Carried on 1,000\u{a0}requests in this project over 14\u{a0}days",
             ]
         );
     }
@@ -276,7 +284,10 @@ mod tests {
         busy(&mut fixture);
         fixture.dead_weight = vec![item(ItemKind::Skill, "deploy", 9_000, true, 0)];
         let finding = &UnusedSkills.evaluate(&fixture.ctx())[0];
-        assert_eq!(finding.tip, "retire the deploy skill, unused for 14 days");
+        assert_eq!(
+            finding.tip,
+            "retire the deploy skill, unused for 14\u{a0}days"
+        );
         assert_eq!(finding.confidence, Confidence::Medium);
         assert!(UnusedMcpServers.evaluate(&fixture.ctx()).is_empty());
     }
@@ -308,14 +319,14 @@ mod tests {
         let finding = &OversizedMemory.evaluate(&fixture.ctx())[0];
         assert_eq!(
             finding.tip,
-            "remove 2 repeated lines from your memory files"
+            "remove 2\u{a0}repeated lines from your memory files"
         );
         assert_eq!(
             finding.evidence,
             [
-                "CLAUDE.md: ~14.4k tokens on every request",
-                "~/.claude/CLAUDE.md: ~33 tokens on every request",
-                "2 lines repeated in your memory files, ~29 tokens",
+                "CLAUDE.md: ~14.4k\u{a0}tokens on every request",
+                "~/.claude/CLAUDE.md: ~33\u{a0}tokens on every request",
+                "2\u{a0}lines repeated in your memory files, ~29\u{a0}tokens",
             ]
         );
         let carried = fixture
@@ -346,7 +357,7 @@ mod tests {
         assert_eq!(finding.confidence, Confidence::High);
         assert_eq!(
             finding.tip,
-            "keep 90 days of transcripts to match the History range"
+            "keep 90\u{a0}days of transcripts to match the History range"
         );
         assert_eq!(finding.evidence[0], "cleanupPeriodDays is 30, the default");
         fixture.retention_days = Some(45);

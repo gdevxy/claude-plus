@@ -136,8 +136,11 @@ impl Rule for LargeToolResults {
                 |(source, carried)| {
                     let size = tokens(carried.tokens / carried.results);
                     match carried.results {
-                        1 => format!("{}: 1 result, ~{size} tokens", source.label()),
-                        n => format!("{}: {n} results, ~{size} tokens each", source.label()),
+                        1 => format!("{}: 1\u{a0}result, ~{size}\u{a0}tokens", source.label()),
+                        n => format!(
+                            "{}: {n}\u{a0}results, ~{size}\u{a0}tokens each",
+                            source.label()
+                        ),
                     }
                 },
                 "sources",
@@ -375,14 +378,14 @@ impl Rule for LateCompaction {
         let draft = Draft {
             rule: RuleId::LateCompaction,
             tip: format!(
-                "run /compact once a session passes {} tokens",
+                "run /compact once a session passes {}\u{a0}tokens",
                 tokens(threshold)
             ),
             evidence: listed(
                 &late,
                 |(session, outcome)| {
                     format!(
-                        "{}: {} above {}, peak ~{}",
+                        "{}: {} above {}, peak\u{a0}~{}",
                         ctx.title(session),
                         count(outcome.late_turns, "turn", "turns"),
                         tokens(threshold),
@@ -469,7 +472,7 @@ impl Rule for ModelFit {
         }
         if let Some((effort, times)) = efforts.into_iter().max_by_key(|(_, n)| *n) {
             evidence.push(format!(
-                "{} of {} at {effort} effort",
+                "{}\u{a0}of {} at {effort} effort",
                 times,
                 count(quick.len() as u64, "request", "requests")
             ));
@@ -630,9 +633,9 @@ mod tests {
         assert_eq!(
             finding.evidence,
             [
-                "Read src/big.rs: 2 results, ~13.3k tokens each",
-                "Bash sed …/open-edition/progress.md: 1 result, ~10.3k tokens",
-                "Bash cat …pen-edition/lane-rules.md: 1 result, ~10.3k tokens",
+                "Read src/big.rs: 2\u{a0}results, ~13.3k\u{a0}tokens each",
+                "Bash sed …/open-edition/progress.md: 1\u{a0}result, ~10.3k\u{a0}tokens",
+                "Bash cat …pen-edition/lane-rules.md: 1\u{a0}result, ~10.3k\u{a0}tokens",
             ]
         );
         let read = 10_000.0 * (59.0 + 39.0) * 0.2 / 1e6;
@@ -678,7 +681,7 @@ mod tests {
         );
         assert_eq!(
             finding.evidence[0],
-            "Bash commands too long to name: 1 result, ~30k tokens"
+            "Bash commands too long to name: 1\u{a0}result, ~30k\u{a0}tokens"
         );
         assert_eq!(
             tip_for("mcp__linear__search", Some("open bugs")),
@@ -702,11 +705,11 @@ mod tests {
         let finding = &LateCompaction.evaluate(&fixture.ctx())[0];
         assert_eq!(
             finding.tip,
-            "run /compact once a session passes 400k tokens"
+            "run /compact once a session passes 400k\u{a0}tokens"
         );
         assert_eq!(
             finding.evidence,
-            ["Long debugging: 100 turns above 400k, peak ~400k"]
+            ["Long debugging: 100\u{a0}turns above 400k, peak\u{a0}~400k"]
         );
         let summary_request = (400_000.0 * 0.2 + 2_000.0 * 20.0) / 1e6;
         let rewrite = 10_000.0 * (5.0 - 0.2) / 1e6;
@@ -733,11 +736,11 @@ mod tests {
         let finding = &LateCompaction.evaluate(&fixture.ctx())[0];
         assert_eq!(
             finding.tip,
-            "run /compact once a session passes 400k tokens"
+            "run /compact once a session passes 400k\u{a0}tokens"
         );
         assert_eq!(
             finding.evidence,
-            ["Long debugging: 100 turns above 400k, peak ~400k"]
+            ["Long debugging: 100\u{a0}turns above 400k, peak\u{a0}~400k"]
         );
         let compact = |context: f64| (context * 0.2 + 2_000.0 * 20.0) / 1e6 + 10_000.0 * 4.8 / 1e6;
         let lighter = |turns: f64, context: f64| turns * (context - 20_000.0) * 0.2 / 1e6;
@@ -793,14 +796,14 @@ mod tests {
         let finding = &ModelFit.evaluate(&fixture.ctx())[0];
         assert_eq!(
             finding.tip,
-            "use Sonnet 5.5 for quick questions and small edits"
+            "use Sonnet\u{a0}5.5 for quick questions and small edits"
         );
         assert_eq!(
             finding.evidence,
             [
-                "2 sessions of quick tasks ran on Opus 5.5",
-                "The same tokens on Sonnet 5.5 would cost $1.80 instead of $3.60",
-                "40 of 40 requests at high effort",
+                "2\u{a0}sessions of quick tasks ran on Opus\u{a0}5.5",
+                "The same tokens on Sonnet\u{a0}5.5 would cost $1.80 instead of $3.60",
+                "40\u{a0}of 40\u{a0}requests at high effort",
             ]
         );
         close(finding.saving_usd, 0.9);
@@ -831,8 +834,8 @@ mod tests {
         assert_eq!(
             finding.evidence,
             [
-                "Migrate the schema: $2.00, 2 requests",
-                "Your typical task costs $0.04 across 11 tasks",
+                "Migrate the schema: $2.00, 2\u{a0}requests",
+                "Your typical task costs $0.04 across 11\u{a0}tasks",
             ]
         );
         fixture.prompts.truncate(9);

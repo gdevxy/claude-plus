@@ -71,7 +71,7 @@ impl Rule for IdleRebuilds {
                     duration(gap as i64),
                     duration(ttl)
                 ),
-                format!("Each rebuild rewrote ~{} tokens", tokens(rewritten)),
+                format!("Each rebuild rewrote ~{}\u{a0}tokens", tokens(rewritten)),
             ],
             confidence: Confidence::High,
             how: format!(
@@ -231,9 +231,9 @@ mod tests {
         assert_eq!(
             finding.evidence,
             [
-                "3 cache rebuilds after a break, in 2 sessions, $1.20",
+                "3\u{a0}cache rebuilds after a break, in 2\u{a0}sessions, $1.20",
                 "Typical break 14m, the cache lasts 5m",
-                "Each rebuild rewrote ~80k tokens",
+                "Each rebuild rewrote ~80k\u{a0}tokens",
             ]
         );
     }
@@ -287,10 +287,10 @@ mod tests {
         assert_eq!(
             finding.evidence,
             [
-                "2 MCP tool changes mid-session, $0.90",
-                "1 model switch mid-session, $0.30",
-                "1 change to CLAUDE.md, skills or agents mid-session, $0.20",
-                "1 rewrite mid-session with no cause in the transcripts, $0.15",
+                "2\u{a0}MCP tool changes mid-session, $0.90",
+                "1\u{a0}model switch mid-session, $0.30",
+                "1\u{a0}change to CLAUDE.md, skills or agents mid-session, $0.20",
+                "1\u{a0}rewrite mid-session with no cause in the transcripts, $0.15",
             ]
         );
     }
@@ -312,7 +312,7 @@ mod tests {
         );
         assert_eq!(
             finding.evidence,
-            ["1 change to CLAUDE.md, skills or agents mid-session, $0.60"]
+            ["1\u{a0}change to CLAUDE.md, skills or agents mid-session, $0.60"]
         );
     }
 
@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(finding.confidence, Confidence::Low);
         assert_eq!(
             finding.evidence,
-            ["2 rewrites mid-session with no cause in the transcripts, $2.65"]
+            ["2\u{a0}rewrites mid-session with no cause in the transcripts, $2.65"]
         );
         let mut trivial = Fixture::new();
         trivial.rebuilt("s1", RebuildCause::Unknown, 0.19, 60_000, &[]);

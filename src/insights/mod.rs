@@ -149,7 +149,10 @@ pub fn front_of_prompt(tokens: &TokenCounts, carried: u64) -> TokenCounts {
 pub fn listed<T>(items: &[T], line: impl Fn(&T) -> String, what: &str) -> Vec<String> {
     let mut lines: Vec<String> = items.iter().take(SHOWN_EVIDENCE).map(line).collect();
     if items.len() > SHOWN_EVIDENCE {
-        lines.push(format!("and {} more {what}", items.len() - SHOWN_EVIDENCE));
+        lines.push(format!(
+            "and {}\u{a0}more {what}",
+            items.len() - SHOWN_EVIDENCE
+        ));
     }
     lines
 }

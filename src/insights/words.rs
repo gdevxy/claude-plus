@@ -35,12 +35,12 @@ pub fn duration(ms: i64) -> String {
         let minutes = ms % HOUR_MS / MINUTE_MS;
         return match minutes {
             0 => format!("{}h", ms / HOUR_MS),
-            _ => format!("{}h {minutes}m", ms / HOUR_MS),
+            _ => format!("{}h{NBSP}{minutes}m", ms / HOUR_MS),
         };
     }
     match ms % DAY_MS / HOUR_MS {
         0 => format!("{}d", ms / DAY_MS),
-        hours => format!("{}d {hours}h", ms / DAY_MS),
+        hours => format!("{}d{NBSP}{hours}h", ms / DAY_MS),
     }
 }
 
@@ -59,19 +59,25 @@ pub fn model_name(id: &str) -> String {
     let name = format!("{}{}", family[..1].to_uppercase(), &family[1..]);
     match version.is_empty() {
         true => name,
-        false => format!("{name} {}", version.join(".")),
+        false => format!("{name}{NBSP}{}", version.join(".")),
     }
 }
 
+pub const NBSP: char = '\u{a0}';
+
 pub fn count(value: u64, one: &str, many: &str) -> String {
-    format!("{} {}", grouped(value), if value == 1 { one } else { many })
+    format!(
+        "{}{NBSP}{}",
+        grouped(value),
+        if value == 1 { one } else { many }
+    )
 }
 
 pub fn times(value: u64) -> String {
     match value {
         1 => "once".into(),
         2 => "twice".into(),
-        _ => format!("{} times", grouped(value)),
+        _ => format!("{}{NBSP}times", grouped(value)),
     }
 }
 
@@ -147,15 +153,15 @@ mod tests {
         assert_eq!(duration(30_000), "<1m");
         assert_eq!(duration(52 * MINUTE_MS), "52m");
         assert_eq!(duration(HOUR_MS), "1h");
-        assert_eq!(duration(70 * MINUTE_MS), "1h 10m");
-        assert_eq!(duration(DAY_MS + 3 * HOUR_MS), "1d 3h");
+        assert_eq!(duration(70 * MINUTE_MS), "1h\u{a0}10m");
+        assert_eq!(duration(DAY_MS + 3 * HOUR_MS), "1d\u{a0}3h");
     }
 
     #[test]
     fn model_names_read_like_the_pane() {
-        assert_eq!(model_name("claude-opus-5-5"), "Opus 5.5");
-        assert_eq!(model_name("claude-haiku-4-5-20251001"), "Haiku 4.5");
-        assert_eq!(model_name("claude-sonnet-5-5[1m]"), "Sonnet 5.5");
+        assert_eq!(model_name("claude-opus-5-5"), "Opus\u{a0}5.5");
+        assert_eq!(model_name("claude-haiku-4-5-20251001"), "Haiku\u{a0}4.5");
+        assert_eq!(model_name("claude-sonnet-5-5[1m]"), "Sonnet\u{a0}5.5");
         assert_eq!(model_name("gpt-x"), "gpt-x");
     }
 
@@ -163,8 +169,8 @@ mod tests {
     fn counts_say_once_twice_and_plurals() {
         assert_eq!(times(1), "once");
         assert_eq!(times(2), "twice");
-        assert_eq!(times(1200), "1,200 times");
-        assert_eq!(count(1, "session", "sessions"), "1 session");
-        assert_eq!(count(3, "session", "sessions"), "3 sessions");
+        assert_eq!(times(1200), "1,200\u{a0}times");
+        assert_eq!(count(1, "session", "sessions"), "1\u{a0}session");
+        assert_eq!(count(3, "session", "sessions"), "3\u{a0}sessions");
     }
 }
