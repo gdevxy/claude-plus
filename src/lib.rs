@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod forecast;
 pub mod history;
 pub mod ingest;
+pub mod insights;
 pub mod limits;
 pub mod paths;
 pub mod pricing;

@@ -173,14 +173,14 @@ pub struct Inputs<'a> {
     pub prices: &'a PriceTable,
 }
 
-struct Rates {
+pub struct Rates {
     by_family: BTreeMap<String, f64>,
     fallback: Option<f64>,
     pairs: u32,
 }
 
 impl Rates {
-    fn of(fits: &[Fit]) -> Self {
+    pub fn of(fits: &[Fit]) -> Self {
         let five_hour: Vec<&Fit> = fits.iter().filter(|fit| fit.window == FIVE_HOUR).collect();
         let calibrated: Vec<&&Fit> = five_hour
             .iter()
@@ -199,7 +199,7 @@ impl Rates {
         }
     }
 
-    fn pct(&self, model: &str, cost_usd: Option<f64>) -> Option<f64> {
+    pub fn pct(&self, model: &str, cost_usd: Option<f64>) -> Option<f64> {
         let rate = self
             .by_family
             .get(family(model))

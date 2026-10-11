@@ -1,0 +1,228 @@
+pub mod words;
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::cache_model::Rebuild;
+use crate::context_model::{Item, Ratios};
+use crate::history::Rates;
+use crate::pricing::PriceTable;
+use crate::store::{CompactionPoint, LargeResult, PromptPoint, SessionInfo, SpentRequest};
+use crate::transcript::TokenCounts;
+
+pub const INSIGHTS_VERSION: u32 = 1;
+pub const WINDOW_DAYS: i64 = 14;
+pub const WEEKS_IN_WINDOW: f64 = WINDOW_DAYS as f64 / 7.0;
+pub const MIN_WEEKLY_USD: f64 = 0.10;
+pub const SHOWN_EVIDENCE: usize = 3;
+pub const DAY_S: i64 = 86_400;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleId {
+    IdleRebuilds,
+    UnusedMcpServers,
+    UnusedSkills,
+    OversizedMemory,
+    LargeToolResults,
+    LateCompaction,
+    ModelFit,
+    CacheBusts,
+    CostlyTasks,
+    Retention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Finding {
+    pub rule: RuleId,
+    pub tip: String,
+    pub evidence: Vec<String>,
+    pub saving_usd: Option<f64>,
+    pub saving_pct_5h: Option<f64>,
+    pub confidence: Confidence,
+    pub how: String,
+}
+
+pub trait Rule {
+    fn evaluate(&self, ctx: &InsightContext) -> Vec<Finding>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rebuilt {
+    pub session_id: String,
+    pub rebuild: Rebuild,
+    pub gap_ms: i64,
+    pub ttl_ms: i64,
+    pub kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryText {
+    pub name: String,
+    pub text: String,
+}
+
+pub struct InsightContext<'a> {
+    pub now_ms: i64,
+    pub since_ts: i64,
+    pub prices: &'a PriceTable,
+    pub rates: &'a Rates,
+    pub requests: &'a [SpentRequest],
+    pub sessions: &'a [SessionInfo],
+    pub project: Option<&'a str>,
+    pub prompts: &'a [PromptPoint],
+    pub rebuilds: &'a [Rebuilt],
+    pub tool_results: &'a [LargeResult],
+    pub compactions: &'a [CompactionPoint],
+    pub dead_weight: &'a [Item],
+    pub month_items: &'a [Item],
+    pub memory: &'a [MemoryText],
+    pub ratios: &'a Ratios,
+    pub retention_days: Option<u64>,
+}
+
+pub fn rules() -> Vec<Box<dyn Rule>> {
+    Vec::new()
+}
+
+pub fn evaluate(ctx: &InsightContext) -> Vec<Finding> {
+    rank(rules().iter().flat_map(|rule| rule.evaluate(ctx)).collect())
+}
+
+pub fn rank(mut findings: Vec<Finding>) -> Vec<Finding> {
+    findings.sort_by(|a, b| {
+        b.saving_usd
+            .unwrap_or(-1.0)
+            .total_cmp(&a.saving_usd.unwrap_or(-1.0))
+            .then_with(|| a.rule.cmp(&b.rule))
+    });
+    findings
+}
+
+pub fn prompt_part(tokens: &TokenCounts) -> TokenCounts {
+    TokenCounts {
+        output: 0,
+        thinking: 0,
+        ..*tokens
+    }
+}
+
+pub fn listed<T>(items: &[T], line: impl Fn(&T) -> String, what: &str) -> Vec<String> {
+    let mut lines: Vec<String> = items.iter().take(SHOWN_EVIDENCE).map(line).collect();
+    if items.len() > SHOWN_EVIDENCE {
+        lines.push(format!("and {} more {what}", items.len() - SHOWN_EVIDENCE));
+    }
+    lines
+}
+
+pub fn is_main(request: &SpentRequest) -> bool {
+    !request.point.is_sidechain && request.point.agent_id.is_none()
+}
+
+impl InsightContext<'_> {
+    pub fn main_requests(&self) -> impl Iterator<Item = &SpentRequest> {
+        self.requests.iter().filter(|r| is_main(r))
+    }
+
+    pub fn session(&self, session_id: &str) -> Option<&SessionInfo> {
+        self.sessions.iter().find(|s| s.id == session_id)
+    }
+
+    pub fn in_project(&self, session_id: &str) -> bool {
+        self.project.is_some_and(|project| {
+            self.session(session_id)
+                .is_some_and(|session| session.project == project)
+        })
+    }
+
+    pub fn title(&self, session_id: &str) -> String {
+        self.session(session_id)
+            .and_then(|s| s.title.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "Untitled {}",
+                    session_id.chars().take(8).collect::<String>()
+                )
+            })
+    }
+
+    pub fn per_prompt_token(&self, request: &SpentRequest) -> f64 {
+        let prompt = request.point.tokens.prompt_total();
+        if prompt == 0 {
+            return 0.0;
+        }
+        self.prices
+            .cost(&request.point.model, &prompt_part(&request.point.tokens))
+            .map_or(0.0, |usd| usd / prompt as f64)
+    }
+
+    pub fn carrying_usd(&self, tokens: u64) -> f64 {
+        self.main_requests()
+            .filter(|r| self.in_project(&r.session_id))
+            .map(|r| tokens as f64 * self.per_prompt_token(r))
+            .sum()
+    }
+
+    pub fn project_requests(&self) -> usize {
+        self.main_requests()
+            .filter(|r| self.in_project(&r.session_id))
+            .count()
+    }
+
+    pub fn dominant_model(&self) -> &str {
+        let mut spend: BTreeMap<&str, f64> = BTreeMap::new();
+        for request in self.main_requests() {
+            *spend.entry(request.point.model.as_str()).or_default() +=
+                request.cost_usd.unwrap_or(0.0);
+        }
+        spend
+            .into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(a.0)))
+            .map_or("", |(model, _)| model)
+    }
+
+    pub fn priced(&self, finding: Draft, window_usd: f64) -> Option<Finding> {
+        let weekly = window_usd / WEEKS_IN_WINDOW;
+        (weekly >= MIN_WEEKLY_USD).then(|| Finding {
+            saving_usd: Some(weekly),
+            saving_pct_5h: self.rates.pct(self.dominant_model(), Some(weekly)),
+            ..finding.into_finding()
+        })
+    }
+}
+
+pub struct Draft {
+    pub rule: RuleId,
+    pub tip: String,
+    pub evidence: Vec<String>,
+    pub confidence: Confidence,
+    pub how: String,
+}
+
+impl Draft {
+    pub fn into_finding(self) -> Finding {
+        Finding {
+            rule: self.rule,
+            tip: self.tip,
+            evidence: self.evidence,
+            saving_usd: None,
+            saving_pct_5h: None,
+            confidence: self.confidence,
+            how: self.how,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fixture;
+#[cfg(test)]
+mod tests;
