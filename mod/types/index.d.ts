@@ -1,4 +1,4 @@
-export type PlusView = 'live' | 'context' | 'history'
+export type PlusView = 'live' | 'context' | 'history' | 'insights'
 
 export type Tokens = {
   input: number
@@ -242,6 +242,56 @@ export type Failures = Partial<Record<HistoryRange, HistoryFailure>>
 
 export type Chart = { range: HistoryRange; metric: Metric }
 
+export type RuleId =
+  | 'idle_rebuilds'
+  | 'unused_mcp_servers'
+  | 'unused_skills'
+  | 'oversized_memory'
+  | 'large_tool_results'
+  | 'late_compaction'
+  | 'model_fit'
+  | 'cache_busts'
+  | 'costly_tasks'
+  | 'retention'
+
+export type Confidence = 'high' | 'medium' | 'low'
+
+export type Finding = {
+  rule: RuleId
+  tip: string
+  evidence: string[]
+  saving_usd: number | null
+  saving_pct_5h: number | null
+  confidence: Confidence
+  how: string
+}
+
+export type Wins = { saved_usd_7d: number; hit_streak_days: number }
+
+export type Recap = { day: string; start_ms: number; cost_usd: number; hit_ratio: number | null; saved_usd: number; win: string | null }
+
+export type InsightsReport = {
+  session: string
+  generated_at_ms: number
+  since_ms: number
+  requests: number
+  sessions: number
+  findings: Finding[]
+  wins: Wins
+  recap: Recap | null
+}
+
+export type InsightsFailure = HistoryFailure
+
+export type Alerted = {
+  session: string | null
+  cacheFor: number | null
+  paceFor: number | null
+  contextFired: boolean
+  threshold: number | null
+  thresholdAsked: boolean
+}
+
 export type DaemonStatus = 'starting' | 'ok' | 'rebuilding' | 'unreachable' | 'outdated' | 'behind' | 'newer' | 'missing' | 'failed'
 
 export type Daemon = { status: DaemonStatus; detail: string | null }
@@ -259,6 +309,9 @@ declare module 'claude-code' {
       history: Shaped<Reports>
       failures: Failures
       chart: Chart
+      insights: Shaped<InsightsReport | null>
+      insightsFailure: InsightsFailure | null
+      alerted: Shaped<Alerted>
       theme: string
       local: Shaped<Local>
       pane: PaneState

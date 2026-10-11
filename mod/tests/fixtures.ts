@@ -1,6 +1,6 @@
 import type { SessionUsage } from 'claude-code'
 
-import type { Bucket, ContextReport, HistoryRange, HistoryReport, Local, ModelSpend, Snapshot, Spend } from '../types'
+import type { Bucket, ContextReport, Finding, HistoryRange, HistoryReport, InsightsReport, Local, ModelSpend, Snapshot, Spend } from '../types'
 
 export const NOW_MS = Date.parse('2026-10-11T09:00:00Z')
 export const MINUTE_MS = 60_000
@@ -332,4 +332,50 @@ export function dayReport(): HistoryReport {
     return bucket(start + index * HOUR_MS, label, usd === 0 ? [] : [[OPUS, usd]], 0.78 + (index % 4) * 0.05, usd === 0 ? null : usd * 10)
   })
   return historyReport({ range: '24h' as HistoryRange, bucket: 'hour', since_ms: start, until_ms: start + 24 * HOUR_MS, buckets })
+}
+
+export function finding(overrides: Partial<Finding> = {}): Finding {
+  return {
+    rule: 'idle_rebuilds',
+    tip: 'start fresh after a break instead of rewarming a long context',
+    evidence: ['12 cache rebuilds after a break, in 5 sessions, $8.40', 'Typical break 14m, the cache lasts 5m', 'Each rebuild rewrote ~86k tokens'],
+    saving_usd: 4.2,
+    saving_pct_5h: 8.4,
+    confidence: 'high',
+    how: 'Counts main-thread requests that rewrote the cache after a gap longer than its 5m lifetime in the last 14 days.',
+    ...overrides,
+  }
+}
+
+export function insightsReport(overrides: Partial<InsightsReport> = {}): InsightsReport {
+  return {
+    session: 's1',
+    generated_at_ms: NOW_MS,
+    since_ms: NOW_MS - 14 * DAY_MS,
+    requests: 1284,
+    sessions: 37,
+    findings: [
+      finding(),
+      finding({
+        rule: 'unused_mcp_servers',
+        tip: 'turn off the linear MCP server, unused for 14 days',
+        evidence: ['linear: ~4.1k tokens per request, unused for 30 days', 'Carried on 1,180 requests in this project over 14 days'],
+        saving_usd: 1.35,
+        saving_pct_5h: 2.7,
+        how: "Token sizes come from Claude Code's own /context breakdown.",
+      }),
+      finding({
+        rule: 'costly_tasks',
+        tip: 'break your biggest asks into smaller steps',
+        evidence: ['Migrate the schema: $6.20, 84 requests', 'Your typical task costs $0.31 across 412 tasks'],
+        saving_usd: null,
+        saving_pct_5h: null,
+        confidence: 'low',
+        how: 'A task runs from one prompt to the next, subagents included.',
+      }),
+    ],
+    wins: { saved_usd_7d: 21.4, hit_streak_days: 5 },
+    recap: { day: 'Yesterday', start_ms: NOW_MS - 33 * HOUR_MS, cost_usd: 12.4, hit_ratio: 0.94, saved_usd: 31.7, win: '5 days in a row above 90% cache hits' },
+    ...overrides,
+  }
 }

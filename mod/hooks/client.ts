@@ -1,10 +1,11 @@
 import type { HttpInit, HttpResponse, JsonValue, SessionMeasureInput, SessionUsage } from 'claude-code'
 
-import type { BreakdownCategory, ContextReport, HistoryRange, HistoryReport, LiveContext, Measure, Snapshot } from '../types'
+import type { BreakdownCategory, ContextReport, HistoryRange, HistoryReport, InsightsReport, LiveContext, Measure, Snapshot } from '../types'
 import { itemKinds } from './context'
 
 export const TIMEOUT_MS = 500
 export const HISTORY_TIMEOUT_MS = 3000
+export const INSIGHTS_TIMEOUT_MS = 3000
 export const OUTBOX_LIMIT = 256
 export const HOST = 'http://claude-plus'
 export const REBUILDING_STATUS = 503
@@ -32,6 +33,12 @@ export type ContextReply =
 
 export type HistoryReply =
   | { kind: 'history'; report: HistoryReport }
+  | { kind: 'rebuilding' }
+  | { kind: 'missing' }
+  | { kind: 'failed'; reason: string }
+
+export type InsightsReply =
+  | { kind: 'insights'; report: InsightsReport }
   | { kind: 'rebuilding' }
   | { kind: 'missing' }
   | { kind: 'failed'; reason: string }
@@ -142,6 +149,28 @@ export function parseHistory(text: string): HistoryReport | null {
   const lists = [value.buckets, value.models, value.projects, value.sessions]
   if (!lists.every(Array.isArray) || !isObject(value.calibration)) return null
   return value as unknown as HistoryReport
+}
+
+export function insightsPath(session: string): string {
+  return `/insights?session=${encodeURIComponent(session)}`
+}
+
+export async function fetchInsights(io: Io, socket: string, session: string): Promise<InsightsReply> {
+  const reply = await request(io, socket, insightsPath(session), {}, INSIGHTS_TIMEOUT_MS)
+  if (!reply.ok) {
+    if (reply.status === NOT_FOUND_STATUS) return { kind: 'missing' }
+    return reply.status === REBUILDING_STATUS ? { kind: 'rebuilding' } : { kind: 'failed', reason: reply.reason }
+  }
+  const report = parseInsights(reply.text)
+  return report === null ? { kind: 'failed', reason: 'unreadable insights' } : { kind: 'insights', report }
+}
+
+export function parseInsights(text: string): InsightsReport | null {
+  const value = safeJson(text)
+  if (!isObject(value) || value.v !== 1 || typeof value.session !== 'string' || typeof value.requests !== 'number') return null
+  if (!Array.isArray(value.findings) || !value.findings.every(isObject) || !isObject(value.wins)) return null
+  if (value.recap !== null && !isObject(value.recap)) return null
+  return value as unknown as InsightsReport
 }
 
 export function breakdownOf(usage: SessionUsage, atMs: number): LiveContext | null {

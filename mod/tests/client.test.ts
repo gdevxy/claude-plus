@@ -11,11 +11,14 @@ import {
   eventsBody,
   fetchContext,
   fetchHistory,
+  fetchInsights,
   historyPath,
+  insightsPath,
   fetchSnapshot,
   measureOf,
   parseContext,
   parseHistory,
+  parseInsights,
   parseSnapshot,
   request,
   send,
@@ -23,7 +26,7 @@ import {
   socketPath,
   usageData,
 } from '../hooks/client'
-import { NOW_MS, contextReport, historyReport, snapshot, usage } from './fixtures'
+import { NOW_MS, contextReport, historyReport, insightsReport, snapshot, usage } from './fixtures'
 
 function answering(response: Promise<HttpResponse>, seen: [string, HttpInit][] = []): Io {
   return {
@@ -205,6 +208,34 @@ describe('daemon client', () => {
     expect(await fetchHistory(garbled, '/s.sock', '7d')).toEqual({ kind: 'failed', reason: 'unreadable history' })
     const older = answering(Promise.resolve({ status: 404, ok: false, headers: {}, text: '{"error":"no route for GET /history"}' }))
     expect(await fetchHistory(older, '/s.sock', '7d')).toEqual({ kind: 'missing' })
+  })
+
+  test('the insights report is fetched for the session and a rebuilding or older daemon is told apart', async () => {
+    const seen: [string, HttpInit][] = []
+    const good = JSON.stringify({ v: 1, ...insightsReport() })
+    const serving = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: good }), seen)
+    expect(await fetchInsights(serving, '/s.sock', 's 1')).toEqual({ kind: 'insights', report: { v: 1, ...insightsReport() } })
+    expect(seen[0]).toEqual(['http://claude-plus/insights?session=s%201', { socketPath: '/s.sock' }])
+    expect(insightsPath('s1')).toBe('/insights?session=s1')
+    const rebuilding = answering(Promise.resolve({ status: 503, ok: false, headers: {}, text: '{"error":"the store is being rebuilt"}' }))
+    expect(await fetchInsights(rebuilding, '/s.sock', 's1')).toEqual({ kind: 'rebuilding' })
+    const older = answering(Promise.resolve({ status: 404, ok: false, headers: {}, text: '{"error":"no route for GET /insights"}' }))
+    expect(await fetchInsights(older, '/s.sock', 's1')).toEqual({ kind: 'missing' })
+    const garbled = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: '{"v":1}' }))
+    expect(await fetchInsights(garbled, '/s.sock', 's1')).toEqual({ kind: 'failed', reason: 'unreadable insights' })
+  })
+
+  test('only a version 1 insights report with its findings and wins is accepted', () => {
+    const good = { v: 1, ...insightsReport() }
+    expect(parseInsights(JSON.stringify(good))).toEqual(good)
+    expect(parseInsights(JSON.stringify({ ...good, recap: null }))?.recap).toBeNull()
+    expect(parseInsights(JSON.stringify({ ...good, v: 2 }))).toBeNull()
+    expect(parseInsights(JSON.stringify({ ...good, findings: {} }))).toBeNull()
+    expect(parseInsights(JSON.stringify({ ...good, findings: ['tip'] }))).toBeNull()
+    expect(parseInsights(JSON.stringify({ ...good, wins: null }))).toBeNull()
+    expect(parseInsights(JSON.stringify({ ...good, recap: 'Yesterday' }))).toBeNull()
+    expect(parseInsights(JSON.stringify({ ...good, requests: '3' }))).toBeNull()
+    expect(parseInsights('nope')).toBeNull()
   })
 
   test('only a version 1 history report with its lists is accepted', () => {
