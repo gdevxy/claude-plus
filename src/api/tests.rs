@@ -7,6 +7,7 @@ use super::client::{Client, ClientError};
 use super::*;
 use crate::daemon::log::Log;
 use crate::daemon::writer;
+use crate::history::Range;
 use crate::pricing::PriceTable;
 
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
@@ -449,6 +450,33 @@ fn the_context_route_joins_the_live_breakdown_the_transcript_and_the_config() {
 }
 
 #[test]
+fn the_history_route_reports_the_asked_range_in_local_time() {
+    let server = Server::start();
+    let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+    std::fs::write(
+        server
+            .temp
+            .path()
+            .join("claude/projects/-work-demo/22222222-2222-2222-2222-222222222222.jsonl"),
+        format!(
+            r#"{{"type":"assistant","sessionId":"22222222-2222-2222-2222-222222222222","timestamp":"{}","requestId":"req_recent","message":{{"model":"claude-sonnet-5-5","content":[],"usage":{{"input_tokens":10,"output_tokens":100}}}}}}"#,
+            hour_ago.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ) + "\n",
+    )
+    .unwrap();
+    server.client().import().unwrap();
+    let day = server.client().history(Range::Day).unwrap();
+    assert_eq!((day.v, day.range, day.buckets.len()), (1, Range::Day, 24));
+    assert_eq!(day.totals.spend.requests, 1);
+    assert_eq!(day.projects[0].name, "-work-demo");
+    let quarter = server.client().history(Range::Quarter).unwrap();
+    assert_eq!((quarter.range, quarter.buckets.len()), (Range::Quarter, 90));
+    assert!(quarter.totals.spend.requests >= 1);
+    let (status, body) = server.raw(Method::GET, "/history", "");
+    assert_eq!((status, body["range"].as_str()), (200, Some("7d")));
+}
+
+#[test]
 fn bad_requests_are_answered_with_a_reason() {
     let server = Server::start();
     let cases = [
@@ -482,6 +510,14 @@ fn bad_requests_are_answered_with_a_reason() {
         ),
         (Method::POST, "/context", "", 405, "use GET for /context"),
         (
+            Method::GET,
+            "/history?range=1y",
+            "",
+            400,
+            "range must be 24h, 7d, 30d or 90d",
+        ),
+        (Method::POST, "/history", "", 405, "use GET for /history"),
+        (
             Method::POST,
             "/events",
             "{not json",
@@ -497,13 +533,7 @@ fn bad_requests_are_answered_with_a_reason() {
         ),
         (Method::GET, "/events", "", 405, "use POST for /events"),
         (Method::POST, "/health", "", 405, "use GET for /health"),
-        (
-            Method::GET,
-            "/history",
-            "",
-            404,
-            "no route for GET /history",
-        ),
+        (Method::GET, "/budget", "", 404, "no route for GET /budget"),
     ];
     for (method, path, body, status, error) in cases {
         assert_eq!(
@@ -580,7 +610,7 @@ fn snapshots_and_context_are_refused_while_the_store_is_being_rebuilt() {
         writer.mark_reindex_pending(true).unwrap();
         writer.commit().unwrap();
     });
-    for route in ["snapshot", "context"] {
+    for route in ["snapshot", "context", "history"] {
         assert_eq!(
             server.raw(Method::GET, &format!("/{route}?session={SESSION}"), ""),
             (503, json!({"error": "the store is being rebuilt"})),

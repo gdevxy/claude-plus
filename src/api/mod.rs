@@ -1,6 +1,7 @@
 pub mod client;
 pub mod context;
 pub mod events;
+pub mod history;
 pub mod live;
 pub mod wire;
 
@@ -44,6 +45,7 @@ const ROUTES: &[(&str, Method)] = &[
     ("/health", Method::GET),
     ("/snapshot", Method::GET),
     ("/context", Method::GET),
+    ("/history", Method::GET),
     ("/events", Method::POST),
     ("/import", Method::POST),
     ("/reindex", Method::POST),
@@ -176,6 +178,7 @@ where
         (&Method::GET, "/health") => json(StatusCode::OK, &health(&state)),
         (&Method::GET, "/snapshot") => snapshot(state, request.uri().query()).await,
         (&Method::GET, "/context") => context::context(state, request.uri().query()).await,
+        (&Method::GET, "/history") => history::history(state, request.uri().query()).await,
         (&Method::POST, "/events") => events(state, request.into_body()).await,
         (&Method::POST, "/import") => {
             state.log.info("import requested over the socket");

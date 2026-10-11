@@ -12,6 +12,7 @@ use tokio::net::UnixStream;
 
 use super::wire::{ErrorBody, EventsAccepted, Health, ImportOutcome, Snapshot};
 use crate::context_model::ContextReport;
+use crate::history::{HistoryReport, Range};
 use crate::ingest::Rebuilt;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -69,6 +70,15 @@ impl Client {
         self.call(
             Method::GET,
             &format!("/context?session={session}"),
+            None,
+            self.timeout,
+        )
+    }
+
+    pub fn history(&self, range: Range) -> Result<HistoryReport, ClientError> {
+        self.call(
+            Method::GET,
+            &format!("/history?range={}", range.as_str()),
             None,
             self.timeout,
         )
