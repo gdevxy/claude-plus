@@ -20,7 +20,7 @@ sha256() {
 }
 
 : > "$dist/SHA256SUMS"
-substitutions="s|@VERSION@|$version|g; s|gdevxy|$owner|g"
+substitutions="s|@VERSION@|$version|g; s|@GITHUB_OWNER@|$owner|g"
 for target in $targets; do
   archive="claude-plus-$target.tar.gz"
   [ -f "$dist/$archive" ] || {
@@ -33,7 +33,7 @@ for target in $targets; do
   substitutions="$substitutions; s|@SHA256_${key}@|$sum|g"
 done
 sed "$substitutions" "$here/claude-plus.rb.in" > "$dist/claude-plus.rb"
-sed "s|gdevxy|$owner|g" "$here/install.sh" > "$dist/install.sh"
+sed "s|@GITHUB_OWNER@|$owner|g" "$here/install.sh" > "$dist/install.sh"
 if grep -n '@[A-Z0-9_][A-Z0-9_]*@' "$dist/claude-plus.rb" "$dist/install.sh" >&2; then
   echo "release-assets.sh: a placeholder above was left unfilled" >&2
   exit 1

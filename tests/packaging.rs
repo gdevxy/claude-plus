@@ -296,7 +296,7 @@ fn release_assets_hold_checksums_a_formula_and_an_installer_for_the_owner() {
     assert!(ruby.status.success(), "{}", text(&ruby.stderr));
     let installer = std::fs::read_to_string(dist.join("install.sh")).unwrap();
     assert!(installer.contains("github_owner=\"${CLAUDE_PLUS_GITHUB_OWNER:-ada}\"\n"));
-    assert!(!installer.contains("gdevxy"));
+    assert!(!installer.contains("@GITHUB_OWNER@"));
     let parsed = run(Command::new("sh").arg("-n").arg(dist.join("install.sh")));
     assert!(parsed.status.success(), "{}", text(&parsed.stderr));
     let listing = run(Command::new("tar")
