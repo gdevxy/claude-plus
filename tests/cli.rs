@@ -813,13 +813,27 @@ fn export_rejects_an_unknown_format() {
 fn a_reader_that_goes_away_ends_the_output_without_a_panic() {
     use std::os::unix::process::ExitStatusExt;
     let env = env();
-    let (reader, writer) = std::io::pipe().unwrap();
-    drop(reader);
-    let output = common::process(&env, &["doctor"])
-        .stdout(writer)
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.signal(), Some(libc::SIGPIPE));
-    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+    let ended_by_a_closed_pipe = |args: &[&str]| {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let output = common::process(&env, args)
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.signal(), Some(libc::SIGPIPE), "{args:?}");
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), "", "{args:?}");
+    };
+    struct StopOnDrop<'a>(&'a Env);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = cmd(self.0, &["daemon", "stop"]).output();
+        }
+    }
+    let _daemon = StopOnDrop(&env);
+    ended_by_a_closed_pipe(&["doctor"]);
+    ended_by_a_closed_pipe(&["daemon", "--ensure"]);
+    let health = claude_plus::api::client::Client::new(&env.plus.join("daemon.sock")).health();
+    ended_by_a_closed_pipe(&["daemon", "stop"]);
+    assert!(health.is_ok(), "daemon --ensure started no daemon");
 }

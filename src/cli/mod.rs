@@ -103,7 +103,14 @@ enum DaemonAction {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    if !matches!(cli.command, Command::Daemon { .. }) {
+    if !matches!(
+        cli.command,
+        Command::Daemon {
+            action: None,
+            ensure: false,
+            ..
+        }
+    ) {
         end_quietly_when_the_reader_goes_away();
     }
     let paths = Paths::from_env()?;
