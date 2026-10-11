@@ -32,7 +32,7 @@ class ClaudePlus < Formula
   def caveats
     <<~EOS
       Run claude-plus install to add the pane to Claude Code.
-      After an upgrade, new Claude Code sessions update the pane by themselves.
+      After an upgrade, the next Claude Code session updates the pane, and the sessions after it show the new one.
       Run claude-plus uninstall before brew uninstall claude-plus, or Claude Code keeps a mod whose binary is gone.
     EOS
   end
