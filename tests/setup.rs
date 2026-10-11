@@ -392,7 +392,7 @@ fn purge_refuses_a_directory_claude_plus_did_not_make() {
         .assert()
         .failure()
         .stderr(format!(
-            "claude-plus: refusing to purge {}: claude-plus did not create it, as it has no .claude-plus-data file\n",
+            "claude-plus: refusing to purge {}: claude-plus cannot tell it made it, as it has no .claude-plus-data file; a directory that holds only what claude-plus writes gets that file when the daemon starts (claude-plus daemon stop, then claude-plus daemon --ensure)\n",
             foreign.display()
         ));
     cmd(&env, &["uninstall", "--purge", "--yes"])
@@ -440,7 +440,7 @@ fn purge_keeps_files_claude_plus_did_not_write() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "✻ Deleted what claude-plus keeps in {} and left notes.txt, which it did not write\n",
+            "✻ Deleted what claude-plus keeps in {} and left notes.txt, which it cannot tell it wrote\n",
             env.plus.display()
         )));
     let mut left: Vec<_> = std::fs::read_dir(&env.plus)
@@ -500,4 +500,181 @@ fn uninstall_carries_on_when_claude_code_cannot_list_what_it_installed() {
             "Claude Code could not say what it has installed, so the plus mod may still be installed: run claude plugin uninstall plus@claude-plus and claude plugin marketplace remove claude-plus\n✻ Stopped the claude-plus daemon · pid ",
         ));
     assert!(!marketplace(&env).exists());
+}
+
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+fn foreign_dir(env: &Env) -> std::path::PathBuf {
+    let foreign = env.claude.parent().unwrap().join("documents");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("precious"), "keep").unwrap();
+    std::fs::write(foreign.join("daemon.log"), "my own log").unwrap();
+    foreign
+}
+
+#[test]
+fn a_foreign_directory_is_never_marked_so_purge_keeps_its_files() {
+    let env = env();
+    let foreign = foreign_dir(&env);
+    std::fs::write(foreign.join("data.db"), "not a claude-plus store").unwrap();
+    cmd(&env, &["reindex"])
+        .env("CLAUDE_PLUS_HOME", &foreign)
+        .assert()
+        .failure();
+    assert_eq!(names_in(&foreign), ["daemon.log", "data.db", "precious"]);
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("CLAUDE_PLUS_HOME", &foreign)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!(
+            "refusing to purge {}",
+            foreign.display()
+        )));
+    assert_eq!(names_in(&foreign), ["daemon.log", "data.db", "precious"]);
+    assert_eq!(
+        std::fs::read_to_string(foreign.join("data.db")).unwrap(),
+        "not a claude-plus store"
+    );
+    assert_eq!(
+        std::fs::read_to_string(foreign.join("daemon.log")).unwrap(),
+        "my own log"
+    );
+}
+
+#[test]
+fn a_foreign_sqlite_database_is_left_as_it_was() {
+    let env = env();
+    let foreign = foreign_dir(&env);
+    let db = foreign.join("data.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("CREATE TABLE notes (text TEXT); INSERT INTO notes VALUES ('mine');")
+        .unwrap();
+    cmd(&env, &["reindex"])
+        .env("CLAUDE_PLUS_HOME", &foreign)
+        .assert()
+        .failure()
+        .stderr(format!(
+            "claude-plus: {} is not a claude-plus database, so claude-plus leaves it alone; move it away, or set CLAUDE_PLUS_HOME to a directory of its own\n",
+            db.display()
+        ));
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(tables, ["notes"]);
+    assert!(!foreign.join(".claude-plus-data").exists());
+}
+
+#[test]
+fn a_planted_marker_lets_purge_delete_only_what_claude_plus_wrote_after_it() {
+    let env = env();
+    let foreign = foreign_dir(&env);
+    std::fs::write(foreign.join("data.db"), "not a claude-plus store").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(foreign.join(".claude-plus-data"), "planted").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(foreign.join("daemon.lock"), "").unwrap();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("CLAUDE_PLUS_HOME", &foreign)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "✻ Deleted what claude-plus keeps in {} and left daemon.log, data.db, precious, which it cannot tell it wrote\n",
+            foreign.display()
+        )));
+    assert_eq!(
+        names_in(&foreign),
+        [".claude-plus-data", "daemon.log", "data.db", "precious"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(foreign.join("daemon.log")).unwrap(),
+        "my own log"
+    );
+}
+
+#[test]
+fn a_data_dir_from_before_the_marker_is_adopted_when_the_daemon_starts() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["daemon", "--ensure"]).assert().success();
+    cmd(&env, &["daemon", "stop"]).assert().success();
+    let conn = rusqlite::Connection::open(env.plus.join("data.db")).unwrap();
+    conn.pragma_update(None, "application_id", 0).unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    drop(conn);
+    std::fs::remove_file(env.plus.join(".claude-plus-data")).unwrap();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "(claude-plus daemon stop, then claude-plus daemon --ensure)",
+        ));
+    cmd(&env, &["daemon", "--ensure"]).assert().success();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "✻ Deleted {}\n",
+            env.plus.display()
+        )));
+    assert!(!env.plus.exists());
+}
+
+#[test]
+fn a_data_dir_swapped_for_a_symlink_while_purge_asks_is_refused() {
+    use std::io::{Read, Write};
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    let victim = env.claude.parent().unwrap().join("victim");
+    cmd(&env, &["daemon", "--ensure"])
+        .env("CLAUDE_PLUS_HOME", &victim)
+        .assert()
+        .success();
+    cmd(&env, &["daemon", "stop"])
+        .env("CLAUDE_PLUS_HOME", &victim)
+        .assert()
+        .success();
+    let before = names_in(&victim);
+    let mut child = common::process(&env, &["uninstall", "--purge"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut asked = Vec::new();
+    while !String::from_utf8_lossy(&asked).ends_with("Continue? [y/N] ") {
+        let mut byte = [0u8; 1];
+        assert_eq!(stderr.read(&mut byte).unwrap(), 1, "no question asked");
+        asked.push(byte[0]);
+    }
+    std::fs::rename(&env.plus, env.claude.parent().unwrap().join("moved")).unwrap();
+    std::os::unix::fs::symlink(&victim, &env.plus).unwrap();
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let mut rest = String::new();
+    stderr.read_to_string(&mut rest).unwrap();
+    assert!(!child.wait().unwrap().success());
+    assert!(
+        rest.contains(&format!(
+            "refusing to purge {}: it is a symlink to {}",
+            env.plus.display(),
+            victim.display()
+        )),
+        "{rest}"
+    );
+    assert_eq!(names_in(&victim), before);
 }

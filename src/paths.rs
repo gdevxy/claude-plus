@@ -91,6 +91,7 @@ impl Paths {
     }
 
     pub fn ensure_data_dir(&self) -> Result<()> {
+        let existed = std::fs::symlink_metadata(&self.data_dir).is_ok();
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
@@ -109,10 +110,42 @@ impl Paths {
         builder
             .create(&self.data_dir)
             .with_context(|| format!("cannot create {}", self.data_dir.display()))?;
-        self.mark_data_dir()
+        if !existed || self.entries()?.is_empty() {
+            return self.mark_data_dir(&[]);
+        }
+        self.claim_data_dir()
     }
 
-    fn mark_data_dir(&self) -> Result<()> {
+    pub fn claim_data_dir(&self) -> Result<()> {
+        if self.marker().exists() {
+            return Ok(());
+        }
+        let entries = self.entries()?;
+        let only_ours = entries
+            .iter()
+            .all(|name| OWN_NAMES.contains(&name.as_str()));
+        let store_is_ours = std::fs::File::open(self.database())
+            .is_ok_and(|mut file| crate::store::is_claude_plus_database(&mut file));
+        if !only_ours || !store_is_ours {
+            return Ok(());
+        }
+        let adopted: Vec<&str> = entries
+            .iter()
+            .map(String::as_str)
+            .filter(|name| DATABASE_FILES.contains(name) || DAEMON_FILES.contains(name))
+            .collect();
+        self.mark_data_dir(&adopted)
+    }
+
+    fn entries(&self) -> Result<Vec<String>> {
+        std::fs::read_dir(&self.data_dir)
+            .with_context(|| format!("cannot read {}", self.data_dir.display()))?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<_>>()
+            .with_context(|| format!("cannot read {}", self.data_dir.display()))
+    }
+
+    fn mark_data_dir(&self, adopted: &[&str]) -> Result<()> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let opened = std::fs::OpenOptions::new()
@@ -120,9 +153,13 @@ impl Paths {
             .create_new(true)
             .mode(0o600)
             .open(self.marker());
+        let mut text = MARKER_TEXT.to_string();
+        for name in adopted {
+            text.push_str(&format!("{ADOPTED}{name}\n"));
+        }
         match opened {
             Ok(mut file) => file
-                .write_all(MARKER_TEXT.as_bytes())
+                .write_all(text.as_bytes())
                 .with_context(|| format!("cannot write {}", self.marker().display())),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
             Err(error) => {
@@ -132,7 +169,34 @@ impl Paths {
     }
 }
 
+pub fn adopted_in(marker: &str) -> impl Iterator<Item = &str> {
+    marker
+        .lines()
+        .filter_map(|line| line.strip_prefix(ADOPTED))
+        .filter(|name| DATABASE_FILES.contains(name) || DAEMON_FILES.contains(name))
+}
+
+const ADOPTED: &str = "written by an earlier claude-plus: ";
+
 pub const MARKER: &str = ".claude-plus-data";
+
+pub const DATABASE_FILES: &[&str] = &["data.db-wal", "data.db-shm", "data.db-journal"];
+pub const DAEMON_FILES: &[&str] = &["daemon.sock", "daemon.lock", "daemon.log", "daemon.log.1"];
+const OWN_NAMES: &[&str] = &[
+    MARKER,
+    "data.db",
+    "data.db-wal",
+    "data.db-shm",
+    "data.db-journal",
+    "daemon.sock",
+    "daemon.lock",
+    "daemon.log",
+    "daemon.log.1",
+    "marketplace",
+    "marketplace.lock",
+    "marketplace.new",
+    "marketplace.old",
+];
 const MARKER_TEXT: &str =
     "claude-plus keeps its data here; claude-plus uninstall --purge deletes what it wrote\n";
 
@@ -255,6 +319,33 @@ mod tests {
         std::fs::write(paths.marker(), "kept").unwrap();
         paths.ensure_data_dir().unwrap();
         assert_eq!(std::fs::read_to_string(paths.marker()).unwrap(), "kept");
+    }
+
+    #[test]
+    fn only_a_new_empty_or_proven_data_dir_is_marked() {
+        let temp = tempfile::tempdir().unwrap();
+        let at = |name: &str| Paths::resolve(temp.path(), None, Some(temp.path().join(name)));
+        let empty = at("empty");
+        std::fs::create_dir(&empty.data_dir).unwrap();
+        empty.ensure_data_dir().unwrap();
+        assert!(empty.marker().is_file());
+
+        let foreign = at("foreign");
+        std::fs::create_dir(&foreign.data_dir).unwrap();
+        std::fs::write(foreign.data_dir.join("daemon.log"), "theirs").unwrap();
+        foreign.ensure_data_dir().unwrap();
+        assert!(!foreign.marker().exists());
+        drop(crate::store::Store::open(&foreign.database()).unwrap());
+        foreign.claim_data_dir().unwrap();
+        assert!(foreign.marker().is_file());
+
+        let mixed = at("mixed");
+        std::fs::create_dir(&mixed.data_dir).unwrap();
+        std::fs::write(mixed.data_dir.join("precious"), "theirs").unwrap();
+        drop(crate::store::Store::open(&mixed.database()).unwrap());
+        mixed.ensure_data_dir().unwrap();
+        mixed.claim_data_dir().unwrap();
+        assert!(!mixed.marker().exists());
     }
 
     #[test]

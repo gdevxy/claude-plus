@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 
 use super::daemon::{ensured, stopped};
 use crate::daemon::control::{self, is_older};
-use crate::paths::{MARKER, Paths};
+use crate::paths::{DAEMON_FILES, DATABASE_FILES, MARKER, Paths, adopted_in};
 use crate::setup::bundle::{self, MARKETPLACE, PLUGIN_ID};
 use crate::setup::claude::{self, ClaudeCode, Outcome, Step};
 use crate::setup::{Found, install_steps, uninstall_steps};
@@ -217,42 +217,130 @@ fn said(outcome: &Outcome) -> String {
     }
 }
 
-const DATA_FILES: &[&str] = &[
-    "data.db",
-    "data.db-wal",
-    "data.db-shm",
-    "data.db-journal",
-    "daemon.sock",
-    "daemon.lock",
-    "daemon.log",
-    "daemon.log.1",
-];
-
 fn purge_data_dir(paths: &Paths) -> Result<Option<Vec<String>>> {
-    if !paths.marker().exists() {
-        return Ok(None);
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let data = &paths.data_dir;
+    let refuse = || purge_refusal(paths).map_or(Ok(()), |refusal| Err(anyhow::anyhow!(refusal)));
+    refuse()?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let dir = match rustix::fs::open(data, flags, Mode::empty()) {
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        opened => opened.with_context(|| format!("cannot open {}", data.display()))?,
+    };
+    let unchanged = is_same_dir(&dir, data);
+    refuse()?;
+    if !unchanged || !is_same_dir(&dir, data) {
+        bail!(
+            "refusing to purge {}: it was replaced while claude-plus ran",
+            data.display()
+        );
     }
-    for name in DATA_FILES {
-        let path = paths.data_dir.join(name);
-        match std::fs::remove_file(&path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                return Err(error).with_context(|| format!("cannot delete {}", path.display()));
-            }
-            _ => {}
+    let marked = born(&dir, MARKER);
+    let marker = read_marker(&dir);
+    let written_by_claude_plus = |name: &str| {
+        adopted_in(&marker).any(|adopted| adopted == name)
+            || marked.is_some_and(|marked| born(&dir, name).is_some_and(|at| at >= marked))
+    };
+    let database = present(&dir, "data.db");
+    let database_is_ours = database && holds_claude_plus_database(&dir);
+    let mut ours: Vec<&str> = Vec::new();
+    if database_is_ours {
+        ours.push("data.db");
+    }
+    for name in DATABASE_FILES {
+        if database_is_ours || (!database && written_by_claude_plus(name)) {
+            ours.push(name);
         }
     }
-    let mut left: Vec<String> = std::fs::read_dir(&paths.data_dir)
-        .with_context(|| format!("cannot read {}", paths.data_dir.display()))?
-        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-        .collect::<std::io::Result<_>>()?;
-    left.retain(|name| name != MARKER);
-    left.sort();
+    ours.extend(
+        DAEMON_FILES
+            .iter()
+            .filter(|name| written_by_claude_plus(name)),
+    );
+    for name in ours {
+        match rustix::fs::unlinkat(&dir, name, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot delete {}", data.join(name).display()));
+            }
+        }
+    }
+    let left = entries_but_marker(&dir)?;
     if left.is_empty() {
-        std::fs::remove_file(paths.marker())
-            .and_then(|()| std::fs::remove_dir(&paths.data_dir))
-            .with_context(|| format!("cannot delete {}", paths.data_dir.display()))?;
+        rustix::fs::unlinkat(&dir, MARKER, AtFlags::empty())
+            .map_err(std::io::Error::from)
+            .and_then(|()| std::fs::remove_dir(data))
+            .with_context(|| format!("cannot delete {}", data.display()))?;
     }
     Ok(Some(left))
+}
+
+fn is_same_dir(dir: &std::os::fd::OwnedFd, path: &Path) -> bool {
+    match (rustix::fs::fstat(dir), rustix::fs::lstat(path)) {
+        (Ok(opened), Ok(named)) => (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino),
+        _ => false,
+    }
+}
+
+fn present(dir: &std::os::fd::OwnedFd, name: &str) -> bool {
+    rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).is_ok()
+}
+
+fn read_marker(dir: &std::os::fd::OwnedFd) -> String {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let mut text = String::new();
+    if let Ok(fd) = rustix::fs::openat(dir, MARKER, flags, Mode::empty()) {
+        let _ = std::fs::File::from(fd)
+            .take(64 * 1024)
+            .read_to_string(&mut text);
+    }
+    text
+}
+
+fn holds_claude_plus_database(dir: &std::os::fd::OwnedFd) -> bool {
+    use rustix::fs::{FileType, Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let Ok(fd) = rustix::fs::openat(dir, "data.db", flags, Mode::empty()) else {
+        return false;
+    };
+    let regular = rustix::fs::fstat(&fd)
+        .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+    regular && crate::store::is_claude_plus_database(&mut std::fs::File::from(fd))
+}
+
+#[cfg(target_vendor = "apple")]
+fn born(dir: &std::os::fd::OwnedFd, name: &str) -> Option<(i64, i64)> {
+    let stat = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).ok()?;
+    Some((stat.st_birthtime, stat.st_birthtime_nsec))
+}
+
+#[cfg(target_os = "linux")]
+fn born(dir: &std::os::fd::OwnedFd, name: &str) -> Option<(i64, i64)> {
+    use rustix::fs::{AtFlags, StatxFlags};
+    let statx = rustix::fs::statx(dir, name, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::BTIME).ok()?;
+    StatxFlags::from_bits_retain(statx.stx_mask)
+        .contains(StatxFlags::BTIME)
+        .then_some((statx.stx_btime.tv_sec, i64::from(statx.stx_btime.tv_nsec)))
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+fn born(_dir: &std::os::fd::OwnedFd, _name: &str) -> Option<(i64, i64)> {
+    None
+}
+
+fn entries_but_marker(dir: &std::os::fd::OwnedFd) -> Result<Vec<String>> {
+    let mut left = Vec::new();
+    for entry in rustix::fs::Dir::read_from(dir)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if ![".", "..", MARKER].contains(&name.as_str()) {
+            left.push(name);
+        }
+    }
+    left.sort();
+    Ok(left)
 }
 
 fn purged(data_dir: &Path, left: &[String]) -> String {
@@ -260,7 +348,7 @@ fn purged(data_dir: &Path, left: &[String]) -> String {
         format!("✻ Deleted {}", data_dir.display())
     } else {
         format!(
-            "✻ Deleted what claude-plus keeps in {} and left {}, which it did not write",
+            "✻ Deleted what claude-plus keeps in {} and left {}, which it cannot tell it wrote",
             data_dir.display(),
             left.join(", ")
         )
@@ -310,7 +398,7 @@ fn purge_refusal(paths: &Paths) -> Option<String> {
     }
     if !paths.marker().is_file() {
         return refuse(format!(
-            "claude-plus did not create it, as it has no {MARKER} file"
+            "claude-plus cannot tell it made it, as it has no {MARKER} file; a directory that holds only what claude-plus writes gets that file when the daemon starts (claude-plus daemon stop, then claude-plus daemon --ensure)"
         ));
     }
     None
