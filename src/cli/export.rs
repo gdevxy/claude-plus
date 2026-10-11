@@ -17,8 +17,9 @@ pub enum Format {
 
 pub fn run(paths: &Paths, prices: &PriceTable, format: Format, days: Option<u32>) -> Result<()> {
     let (since, until) = window(days)?;
-    if super::transcripts_missing(paths) {
-        return Ok(());
+    if let Some(notice) = super::missing_transcripts(paths) {
+        eprintln!("{notice}");
+        return print(format, &[]);
     }
     let (store, report, reconciled) = super::import::incremental(paths, prices)?;
     for line in super::import::issue_lines(&report) {
@@ -31,9 +32,13 @@ pub fn run(paths: &Paths, prices: &PriceTable, format: Format, days: Option<u32>
         &store.sessions_spending_between(since, until)?,
         &Local,
     );
+    print(format, &rows)
+}
+
+fn print(format: Format, rows: &[export::ExportRow]) -> Result<()> {
     let text = match format {
-        Format::Json => format!("{}\n", export::json(&rows)?),
-        Format::Csv => export::csv(&rows),
+        Format::Json => format!("{}\n", export::json(rows)?),
+        Format::Csv => export::csv(rows),
     };
     std::io::stdout().lock().write_all(text.as_bytes())?;
     Ok(())

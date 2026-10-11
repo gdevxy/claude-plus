@@ -710,6 +710,28 @@ fn export_days_keeps_the_last_calendar_days() {
 }
 
 #[test]
+fn export_without_transcripts_prints_an_empty_export_and_the_notice_on_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    for (format, empty) in [
+        (
+            "csv",
+            format!("{}\n", claude_plus::history::export::CSV_HEADER),
+        ),
+        ("json", "{\"v\":1,\"rows\":[]}\n".to_string()),
+    ] {
+        Command::cargo_bin("claude-plus")
+            .unwrap()
+            .args(["export", "--format", format])
+            .env("CLAUDE_CONFIG_DIR", temp.path().join("nope"))
+            .env("CLAUDE_PLUS_HOME", temp.path().join("plus"))
+            .assert()
+            .success()
+            .stdout(empty)
+            .stderr(predicate::str::contains("No Claude Code transcripts found"));
+    }
+}
+
+#[test]
 fn export_rejects_an_unknown_format() {
     let env = env();
     cmd(&env, &["export", "--format", "xml"])

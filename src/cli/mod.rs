@@ -123,14 +123,20 @@ fn labeled(label: &str, value: &str) -> String {
 }
 
 fn transcripts_missing(paths: &Paths) -> bool {
-    let missing = !paths.projects_dir().exists();
-    if missing {
-        println!(
+    let notice = missing_transcripts(paths);
+    if let Some(notice) = &notice {
+        println!("{notice}");
+    }
+    notice.is_some()
+}
+
+fn missing_transcripts(paths: &Paths) -> Option<String> {
+    (!paths.projects_dir().exists()).then(|| {
+        format!(
             "No Claude Code transcripts found in {}. Run Claude Code once, then try again ✻",
             paths.projects_dir().display()
-        );
-    }
-    missing
+        )
+    })
 }
 
 fn running_daemon(paths: &Paths) -> Result<Option<Health>> {
