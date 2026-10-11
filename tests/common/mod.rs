@@ -44,6 +44,38 @@ pub fn env() -> Env {
 }
 
 impl Env {
+    pub fn write_claude_json(&self, body: &str) {
+        std::fs::write(self.claude.join(".claude.json"), body).unwrap();
+    }
+
+    pub fn write_transcript_today(&self, session: &str, model: &str) {
+        let at = chrono::Utc::now() + chrono::Duration::minutes(1);
+        let line = format!(
+            r#"{{"type":"assistant","sessionId":"{session}","timestamp":"{}","requestId":"req-{session}","message":{{"model":"{model}","content":[],"usage":{{"input_tokens":10,"output_tokens":1000}}}}}}"#,
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+        let dir = self.claude.join("projects").join("today");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{session}.jsonl")), line + "\n").unwrap();
+    }
+
+    pub fn seed_accounts(&self, accounts: &[(&str, &str)]) {
+        std::fs::create_dir_all(&self.plus).unwrap();
+        let mut store = claude_plus::store::Store::open(&self.plus.join("data.db")).unwrap();
+        let mut writer = store.writer().unwrap();
+        for (id, label) in accounts {
+            let row = claude_plus::store::AccountRow {
+                id: (*id).to_string(),
+                kind: claude_plus::store::AccountKind::Oauth,
+                label: (*label).to_string(),
+                organization_type: None,
+                billing_type: None,
+            };
+            writer.upsert_account(&row, 1_000).unwrap();
+        }
+        writer.commit().unwrap();
+    }
+
     pub fn claude_state(&self) -> PathBuf {
         self._temp.path().join("fake-claude")
     }

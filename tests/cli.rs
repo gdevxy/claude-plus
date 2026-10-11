@@ -862,3 +862,97 @@ fn a_local_import_records_the_claude_code_login_without_touching_it() {
     assert_eq!(open, 1);
     assert_eq!(std::fs::read_to_string(&login).unwrap(), body);
 }
+
+#[test]
+fn a_budget_is_set_shown_and_cleared_for_the_signed_in_account() {
+    let env = env();
+    env.write_claude_json(r#"{"oauthAccount":{"accountUuid":"work","organizationName":"Acme","organizationType":"claude_enterprise"}}"#);
+    env.write_transcript_today("s1", "claude-opus-5-5");
+    cmd(&env, &["import"]).assert().success();
+    cmd(&env, &["budget", "set", "700"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Budget for Acme · Enterprise set to $700.00 a month",
+        ));
+    cmd(&env, &["budget", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Acme · Enterprise (oauth:work)"))
+        .stdout(predicate::str::contains("$700.00 a month, resets in 28d"))
+        .stdout(predicate::str::contains("Claude Code here:"))
+        .stdout(predicate::str::contains("Pace:"));
+    cmd(&env, &["budget", "clear"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Budget for Acme · Enterprise cleared",
+        ));
+    cmd(&env, &["budget", "clear"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Acme · Enterprise has no budget"));
+}
+
+#[test]
+fn a_budget_must_be_a_positive_amount() {
+    let env = env();
+    for amount in ["0", "-5", "nan", "inf", "abc"] {
+        cmd(&env, &["budget", "set", amount, "--account", "api"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "a budget is a number of dollars above zero",
+            ));
+    }
+}
+
+#[test]
+fn an_ambiguous_label_lists_the_matches() {
+    let env = env();
+    env.seed_accounts(&[("oauth:a", "Work"), ("oauth:b", "work")]);
+    cmd(&env, &["budget", "set", "10", "--account", "WORK"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "\"WORK\" matches oauth:a (Work), oauth:b (work)",
+        ));
+}
+
+#[test]
+fn accounts_lists_and_renames() {
+    let env = env();
+    env.seed_accounts(&[("oauth:a", "Acme · Enterprise")]);
+    cmd(&env, &["accounts", "rename", "oauth:a", "Work"])
+        .assert()
+        .success();
+    cmd(&env, &["accounts"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Work"))
+        .stdout(predicate::str::contains("oauth:a"));
+}
+
+#[test]
+fn a_budget_can_be_set_for_an_account_not_seen_yet() {
+    let env = env();
+    cmd(&env, &["budget", "set", "50", "--account", "api"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Budget for API key set to $50.00 a month",
+        ));
+    cmd(&env, &["budget", "set", "50", "--account", "nobody"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no account called \"nobody\""));
+}
+
+#[test]
+fn without_any_account_the_budget_asks_for_one() {
+    let env = env();
+    cmd(&env, &["budget", "set", "50"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no account known yet"));
+}

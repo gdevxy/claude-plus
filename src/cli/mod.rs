@@ -1,3 +1,4 @@
+mod accounts;
 mod daemon;
 mod doctor;
 mod export;
@@ -76,6 +77,16 @@ enum Command {
         )]
         days: Option<u32>,
     },
+    #[command(about = "List the accounts claude-plus has seen, or rename one")]
+    Accounts {
+        #[command(subcommand)]
+        action: Option<AccountsAction>,
+    },
+    #[command(about = "Set, show or clear a monthly budget for an account")]
+    Budget {
+        #[command(subcommand)]
+        action: BudgetAction,
+    },
     #[command(
         about = "Check the setup and compare totals with Claude Code; claude-plus only reads"
     )]
@@ -101,6 +112,33 @@ enum Command {
         rescan_secs: u64,
         #[command(subcommand)]
         action: Option<DaemonAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountsAction {
+    #[command(about = "Give an account your own label")]
+    Rename { account: String, label: String },
+}
+
+#[derive(Subcommand)]
+enum BudgetAction {
+    #[command(about = "Set the monthly budget in USD, reset on the 1st at 00:00 UTC")]
+    Set {
+        #[arg(allow_hyphen_values = true)]
+        usd: String,
+        #[arg(long, help = "Account id or label [default: the current account]")]
+        account: Option<String>,
+    },
+    #[command(about = "Show the budget, this month's spend and the pace")]
+    Show {
+        #[arg(long, help = "Account id or label [default: the current account]")]
+        account: Option<String>,
+    },
+    #[command(about = "Remove the budget")]
+    Clear {
+        #[arg(long, help = "Account id or label [default: the current account]")]
+        account: Option<String>,
     },
 }
 
@@ -151,6 +189,8 @@ pub fn run() -> Result<ExitCode> {
         Command::Import => import::run(&paths, &prices),
         Command::Stats { days } => stats::run(&paths, &prices, days),
         Command::Export { format, days } => export::run(&paths, &prices, format, days),
+        Command::Accounts { action } => accounts::accounts(&paths, &prices, action),
+        Command::Budget { action } => accounts::budget(&paths, &prices, action),
         Command::Doctor => doctor::run(&paths, &prices),
         Command::Reindex => reindex::run(&paths, &prices),
         Command::Install { yes } => setup::install(&paths, yes),
