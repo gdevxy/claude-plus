@@ -218,12 +218,8 @@ pub fn pace(instance: &[LimitSample], now_ms: i64) -> Option<Pace> {
     let projected_pct = latest
         .resets_at_ms
         .map(|resets| latest.used_pct + per_ms * (resets - now_ms).max(0) as f64);
-    let full_at_ms = match projected_pct {
-        Some(projected) if projected >= 100.0 && per_ms > 0.0 => {
-            Some(now_ms + ((100.0 - latest.used_pct).max(0.0) / per_ms).round() as i64)
-        }
-        _ => None,
-    };
+    let full_at_ms =
+        projected_pct.and_then(|projected| full_at(latest.used_pct, projected, per_ms, now_ms));
     Some(Pace {
         pct_per_hour: per_ms * HOUR_MS,
         projected_pct,
@@ -271,13 +267,16 @@ pub fn monthly_pace(
     }
     let per_ms = used_pct / elapsed as f64;
     let projected = used_pct + per_ms * (resets_at_ms - now_ms).max(0) as f64;
-    let full_at_ms = (projected >= 100.0 && per_ms > 0.0)
-        .then(|| now_ms + ((100.0 - used_pct).max(0.0) / per_ms).round() as i64);
     Some(Pace {
         pct_per_hour: per_ms * HOUR_MS,
         projected_pct: Some(projected),
-        full_at_ms,
+        full_at_ms: full_at(used_pct, projected, per_ms, now_ms),
     })
+}
+
+fn full_at(used_pct: f64, projected_pct: f64, per_ms: f64, now_ms: i64) -> Option<i64> {
+    (used_pct < 100.0 && projected_pct > 100.0 && per_ms > 0.0)
+        .then(|| now_ms + ((100.0 - used_pct) / per_ms).round() as i64)
 }
 
 fn window_pace(instance: &[LimitSample], now_ms: i64) -> Option<Pace> {
@@ -866,6 +865,61 @@ mod tests {
         let shown = windows(&samples, &[], None, now, &[], Some("oauth:work"));
         let projected = shown[0].pace.as_ref().unwrap().projected_pct.unwrap();
         assert!((projected - 4.0 / 10.5 * 31.0).abs() < 1e-6, "{projected}");
+    }
+
+    #[test]
+    fn a_used_up_spend_limit_is_not_paced_to_fill_again() {
+        let at = |text: &str| {
+            DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let (oct_1, nov_1, oct_11) = (
+            at("2026-10-01T00:00:00Z"),
+            at("2026-11-01T00:00:00Z"),
+            at("2026-10-11T12:00:00Z"),
+        );
+        let over = monthly_pace(104.0, oct_1, nov_1, oct_11).unwrap();
+        assert!(over.projected_pct.unwrap() > 100.0);
+        assert_eq!(over.full_at_ms, None);
+        assert_eq!(
+            monthly_pace(100.0, oct_1, nov_1, oct_11)
+                .unwrap()
+                .full_at_ms,
+            None
+        );
+        let samples = vec![LimitSample {
+            ts_ms: oct_11 - 60_000,
+            session_id: "s1".into(),
+            account_id: Some("oauth:work".into()),
+            model: None,
+            window: SPEND_LIMIT.into(),
+            used_pct: 104.0,
+            resets_at_ms: Some(nov_1),
+        }];
+        let shown = windows(&samples, &[], None, oct_11, &[], Some("oauth:work"));
+        assert_eq!(shown[0].pace.as_ref().unwrap().full_at_ms, None);
+    }
+
+    #[test]
+    fn a_projection_of_exactly_a_hundred_does_not_warn() {
+        let start = 0;
+        let resets = 4 * 1024 * MINUTE;
+        let now = 2 * 1024 * MINUTE;
+        let pace = monthly_pace(50.0, start, resets, now).unwrap();
+        assert_eq!(pace.projected_pct, Some(100.0));
+        assert_eq!(pace.full_at_ms, None);
+    }
+
+    #[test]
+    fn a_full_five_hour_window_is_not_paced_to_fill_again() {
+        let instance = vec![
+            sample(30, "five_hour", 90.0, 300),
+            sample(60, "five_hour", 100.0, 300),
+        ];
+        let pace = pace(&instance, T0 + 60 * MINUTE).unwrap();
+        assert!(pace.projected_pct.unwrap() > 100.0);
+        assert_eq!(pace.full_at_ms, None);
     }
 
     #[test]
