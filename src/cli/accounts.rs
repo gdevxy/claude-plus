@@ -1,7 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use comfy_table::{Cell, CellAlignment, Table, presets::UTF8_FULL_CONDENSED};
 
-use super::format::{count, usd, usd_with};
+use super::format::{column_decimals, count, usd, usd_with};
 use super::{AccountsAction, BudgetAction};
 use crate::accounts::{Auth, auth_account};
 use crate::limits::{SPEND_LIMIT, month_start_utc, monthly_pace, next_month_start_utc};
@@ -11,8 +11,10 @@ use crate::scope::Scope;
 use crate::store::{AccountInfo, AccountRow, Store};
 
 const ALL_ACCOUNTS: &str = "All accounts";
-const HOUR_SECONDS: i64 = 3600;
-const DAY_SECONDS: i64 = 24 * HOUR_SECONDS;
+const MINUTE_MS: i64 = 60_000;
+const HOUR_MS: i64 = 60 * MINUTE_MS;
+const DAY_MS: i64 = 24 * HOUR_MS;
+const BUDGET_HINT: &str = "claude-plus budget set <usd> shows dollars";
 
 pub fn accounts(paths: &Paths, prices: &PriceTable, action: Option<AccountsAction>) -> Result<()> {
     match action {
@@ -23,26 +25,30 @@ pub fn accounts(paths: &Paths, prices: &PriceTable, action: Option<AccountsActio
 
 pub fn budget(paths: &Paths, prices: &PriceTable, action: BudgetAction) -> Result<()> {
     match action {
-        BudgetAction::Set { usd, account } => set(paths, &usd, account.as_deref()),
+        BudgetAction::Set { usd, account } => set(paths, prices, &usd, account.as_deref()),
         BudgetAction::Show { account } => show(paths, prices, account.as_deref()),
-        BudgetAction::Clear { account } => clear(paths, account.as_deref()),
+        BudgetAction::Clear { account } => clear(paths, prices, account.as_deref()),
     }
+}
+
+pub fn current(store: &Store) -> Result<Option<String>> {
+    Ok(store.latest_session_account()?.or(store.open_account()?))
 }
 
 pub fn resolve(store: &Store, given: Option<&str>) -> Result<String> {
     let Some(given) = given else {
-        return match store.latest_session_account()?.or(store.open_account()?) {
-            Some(id) => Ok(id),
-            None => bail!("no account known yet; pass --account, see claude-plus accounts"),
-        };
+        return current(store)?.ok_or_else(|| {
+            anyhow!("no account known yet; pass --account, see claude-plus accounts")
+        });
     };
     let accounts = store.accounts()?;
     if let Some(exact) = accounts.iter().find(|a| a.id == given) {
         return Ok(exact.id.clone());
     }
+    let wanted = given.to_lowercase();
     let matches: Vec<&AccountInfo> = accounts
         .iter()
-        .filter(|a| a.label.eq_ignore_ascii_case(given))
+        .filter(|a| a.label.to_lowercase() == wanted)
         .collect();
     match matches.as_slice() {
         [one] => Ok(one.id.clone()),
@@ -61,32 +67,39 @@ pub fn resolve(store: &Store, given: Option<&str>) -> Result<String> {
 }
 
 pub fn scope(store: &Store, given: Option<&str>) -> Result<(Scope, String)> {
-    if given == Some("all") {
-        return Ok((Scope::All, ALL_ACCOUNTS.to_string()));
-    }
-    let id = match resolve(store, given) {
-        Ok(id) => id,
-        Err(_) if given.is_none() => return Ok((Scope::All, ALL_ACCOUNTS.to_string())),
-        Err(error) => return Err(error),
+    let id = match given {
+        Some("all") => None,
+        Some(given) => Some(resolve(store, Some(given))?),
+        None => current(store)?,
     };
-    let label = store
-        .accounts()?
-        .into_iter()
-        .find(|account| account.id == id)
-        .map_or_else(|| id.clone(), |account| account.label);
-    Ok((Scope::Account(id), label))
+    match id {
+        Some(id) => {
+            let label = label_of(store, &id)?;
+            Ok((Scope::Account(id), label))
+        }
+        None => Ok((Scope::All, ALL_ACCOUNTS.to_string())),
+    }
+}
+
+pub fn described(store: &Store, id: &str) -> Result<String> {
+    Ok(format!("{} ({id})", label_of(store, id)?))
 }
 
 fn now_ms() -> Result<i64> {
     Ok(super::stats::now()?.timestamp_millis())
 }
 
-fn list(paths: &Paths, prices: &PriceTable) -> Result<()> {
+fn imported(paths: &Paths, prices: &PriceTable) -> Result<Store> {
     let (store, report, reconciled) = super::import::incremental(paths, prices)?;
     for line in super::import::issue_lines(&report) {
         eprintln!("{line}");
     }
     reconciled?;
+    Ok(store)
+}
+
+fn list(paths: &Paths, prices: &PriceTable) -> Result<()> {
+    let store = imported(paths, prices)?;
     let month_start = month_start_utc(now_ms()?) / 1000;
     let accounts = store.accounts()?;
     if accounts.is_empty() {
@@ -102,7 +115,12 @@ fn list(paths: &Paths, prices: &PriceTable) -> Result<()> {
         Cell::new("This month").set_alignment(CellAlignment::Right),
         Cell::new("Budget").set_alignment(CellAlignment::Right),
     ]);
-    for account in &accounts {
+    let spends = accounts
+        .iter()
+        .map(|account| store.account_spend_since(&account.id, month_start))
+        .collect::<Result<Vec<f64>>>()?;
+    let decimals = column_decimals(&spends);
+    for (account, spend) in accounts.iter().zip(spends) {
         let budget = store
             .budget(&account.id)?
             .map_or("-".to_string(), |b| usd_with(b.amount_usd, 2));
@@ -112,8 +130,7 @@ fn list(paths: &Paths, prices: &PriceTable) -> Result<()> {
             Cell::new(account.kind.as_str()),
             Cell::new(count(store.account_sessions_count(&account.id)?))
                 .set_alignment(CellAlignment::Right),
-            Cell::new(usd(store.account_spend_since(&account.id, month_start)?))
-                .set_alignment(CellAlignment::Right),
+            Cell::new(usd_with(spend, decimals)).set_alignment(CellAlignment::Right),
             Cell::new(budget).set_alignment(CellAlignment::Right),
         ]);
     }
@@ -175,9 +192,16 @@ fn label_of(store: &Store, id: &str) -> Result<String> {
         .unwrap_or_else(|| id.to_string()))
 }
 
-fn set(paths: &Paths, amount: &str, given: Option<&str>) -> Result<()> {
+fn writable(paths: &Paths, prices: &PriceTable, given: Option<&str>) -> Result<Store> {
+    if given.is_none() {
+        imported(paths, prices)?;
+    }
+    super::open_store(paths)
+}
+
+fn set(paths: &Paths, prices: &PriceTable, amount: &str, given: Option<&str>) -> Result<()> {
     let amount = parse_budget(amount)?;
-    let mut store = super::open_store(paths)?;
+    let mut store = writable(paths, prices, given)?;
     let id = resolve(&store, given)?;
     let known = store.account(&id)?;
     let now = now_ms()?;
@@ -201,8 +225,8 @@ fn set(paths: &Paths, amount: &str, given: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn clear(paths: &Paths, given: Option<&str>) -> Result<()> {
-    let mut store = super::open_store(paths)?;
+fn clear(paths: &Paths, prices: &PriceTable, given: Option<&str>) -> Result<()> {
+    let mut store = writable(paths, prices, given)?;
     let id = resolve(&store, given)?;
     let label = label_of(&store, &id)?;
     let mut writer = store.writer()?;
@@ -217,68 +241,243 @@ fn clear(paths: &Paths, given: Option<&str>) -> Result<()> {
 }
 
 fn show(paths: &Paths, prices: &PriceTable, given: Option<&str>) -> Result<()> {
-    let (store, report, reconciled) = super::import::incremental(paths, prices)?;
-    for line in super::import::issue_lines(&report) {
-        eprintln!("{line}");
-    }
-    reconciled?;
+    let store = imported(paths, prices)?;
     let id = resolve(&store, given)?;
-    let label = label_of(&store, &id)?;
-    println!("{}", super::labeled("Account:", &format!("{label} ({id})")));
-    let Some(budget) = store.budget(&id)? else {
-        println!("{}", super::labeled("Budget:", "none"));
-        return Ok(());
-    };
-    let now = now_ms()?;
-    let (month_start, reset) = (month_start_utc(now), next_month_start_utc(now));
-    let local = store.account_spend_since(&id, month_start / 1000)?;
-    println!(
-        "{}",
-        super::labeled(
-            "Budget:",
-            &format!(
-                "{} a month, resets in {}",
-                usd_with(budget.amount_usd, 2),
-                until(reset - now)
-            )
-        )
-    );
-    let reported = store
+    let now_ms = now_ms()?;
+    let month_start = month_start_utc(now_ms);
+    let reported_pct = store
         .limit_samples_since(month_start)?
         .into_iter()
         .filter(|s| s.window == SPEND_LIMIT && s.account_id.as_deref() == Some(id.as_str()))
         .max_by_key(|s| s.ts_ms)
         .map(|s| s.used_pct);
-    if let Some(pct) = reported {
-        println!(
-            "{}",
-            super::labeled(
-                "Reported:",
-                &format!(
-                    "{pct:.0}% used, about {}",
-                    usd_with(pct / 100.0 * budget.amount_usd, 2)
-                )
-            )
-        );
-    }
-    println!("{}", super::labeled("Claude Code here:", &usd(local)));
-    let used_pct = reported.unwrap_or(local / budget.amount_usd * 100.0);
-    let pace = match monthly_pace(used_pct, month_start, reset, now) {
-        Some(pace) => format!(
-            "on pace for {:.0}% by the reset",
-            pace.projected_pct.unwrap_or(used_pct)
-        ),
-        None => "needs a full day of this month".to_string(),
+    let facts = BudgetFacts {
+        account: described(&store, &id)?,
+        budget_usd: store.budget(&id)?.map(|budget| budget.amount_usd),
+        reported_pct,
+        local_usd: store.account_spend_since(&id, month_start / 1000)?,
+        now_ms,
     };
-    println!("{}", super::labeled("Pace:", &pace));
+    for line in facts.lines() {
+        println!("{line}");
+    }
     Ok(())
 }
 
-fn until(ms: i64) -> String {
-    let seconds = ms.max(0) / 1000;
-    if seconds >= DAY_SECONDS {
-        format!("{}d", seconds / DAY_SECONDS)
+struct BudgetFacts {
+    account: String,
+    budget_usd: Option<f64>,
+    reported_pct: Option<f64>,
+    local_usd: f64,
+    now_ms: i64,
+}
+
+impl BudgetFacts {
+    fn lines(&self) -> Vec<String> {
+        let mut lines = vec![super::labeled("Account:", &self.account)];
+        match self.budget_usd {
+            Some(amount) => self.with_budget(amount, &mut lines),
+            None => self.without_budget(&mut lines),
+        }
+        lines
+    }
+
+    fn with_budget(&self, amount: f64, lines: &mut Vec<String>) {
+        let reported_usd = self.reported_pct.map(|pct| pct / 100.0 * amount);
+        let values: Vec<f64> = [amount, self.local_usd]
+            .into_iter()
+            .chain(reported_usd)
+            .collect();
+        let decimals = column_decimals(&values);
+        let width = values
+            .iter()
+            .map(|value| usd_with(*value, decimals).len())
+            .max()
+            .unwrap_or(0);
+        let money = |value: f64| format!("{:>width$}", usd_with(value, decimals));
+        let resets_in = until(next_month_start_utc(self.now_ms) - self.now_ms);
+        lines.push(super::labeled(
+            "Budget:",
+            &format!("{} a month, resets in {resets_in}", money(amount)),
+        ));
+        if let (Some(pct), Some(usd)) = (self.reported_pct, reported_usd) {
+            lines.push(super::labeled(
+                "Reported:",
+                &format!("{} used, {} of the spend limit", money(usd), percent(pct)),
+            ));
+        }
+        lines.push(super::labeled(
+            "Local:",
+            &format!("{} spent this month on this machine", money(self.local_usd)),
+        ));
+        let used_pct = self.reported_pct.unwrap_or(self.local_usd / amount * 100.0);
+        lines.push(super::labeled("Pace:", &self.pace(used_pct)));
+    }
+
+    fn without_budget(&self, lines: &mut Vec<String>) {
+        lines.push(super::labeled("Budget:", "none"));
+        if let Some(pct) = self.reported_pct {
+            lines.push(super::labeled(
+                "Reported:",
+                &format!("{} of the spend limit used", percent(pct)),
+            ));
+        }
+        lines.push(super::labeled(
+            "Local:",
+            &format!("{} spent this month on this machine", usd(self.local_usd)),
+        ));
+        lines.push(super::labeled("", BUDGET_HINT));
+    }
+
+    fn pace(&self, used_pct: f64) -> String {
+        let pace = monthly_pace(
+            used_pct,
+            month_start_utc(self.now_ms),
+            next_month_start_utc(self.now_ms),
+            self.now_ms,
+        );
+        let Some(pace) = pace else {
+            return "shown after the first full day of the month".to_string();
+        };
+        let projected = pace.projected_pct.unwrap_or(used_pct);
+        if projected > 100.0 {
+            format!(
+                "on pace for {} by the reset, over the budget",
+                percent(projected)
+            )
+        } else {
+            format!("on pace for {} by the reset", percent(projected))
+        }
+    }
+}
+
+fn percent(value: f64) -> String {
+    if (value * 10.0).round() < 100.0 {
+        format!("{value:.1}%")
     } else {
-        format!("{}h", seconds / HOUR_SECONDS)
+        format!("{value:.0}%")
+    }
+}
+
+fn until(ms: i64) -> String {
+    match ms.max(0) {
+        ms if ms >= DAY_MS => format!("{}d", ms / DAY_MS),
+        ms if ms >= HOUR_MS => format!("{}h", ms / HOUR_MS),
+        ms if ms >= MINUTE_MS => format!("{}m", ms / MINUTE_MS),
+        _ => "under a minute".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(text: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    fn facts(budget_usd: Option<f64>, reported_pct: Option<f64>, now: &str) -> BudgetFacts {
+        BudgetFacts {
+            account: "Acme · Enterprise (oauth:work)".into(),
+            budget_usd,
+            reported_pct,
+            local_usd: 23.1,
+            now_ms: at(now),
+        }
+    }
+
+    const MID_MONTH: &str = "2026-10-21T12:00:00Z";
+
+    #[test]
+    fn the_reported_percent_is_turned_into_dollars_of_the_budget() {
+        assert_eq!(
+            facts(Some(700.0), Some(4.0), MID_MONTH).lines(),
+            [
+                "  Account:     Acme · Enterprise (oauth:work)",
+                "  Budget:      $700.00 a month, resets in 10d",
+                "  Reported:     $28.00 used, 4.0% of the spend limit",
+                "  Local:        $23.10 spent this month on this machine",
+                "  Pace:        on pace for 6.0% by the reset",
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_reported_percent_the_pace_follows_local_spend() {
+        let lines = facts(Some(700.0), None, MID_MONTH).lines();
+        assert_eq!(
+            lines[2],
+            "  Local:        $23.10 spent this month on this machine"
+        );
+        assert_eq!(lines[3], "  Pace:        on pace for 5.0% by the reset");
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn a_pace_over_the_budget_says_so() {
+        assert_eq!(
+            facts(Some(30.0), None, MID_MONTH).lines()[3],
+            "  Pace:        on pace for 116% by the reset, over the budget"
+        );
+    }
+
+    #[test]
+    fn the_pace_waits_for_a_full_day() {
+        let lines = facts(Some(700.0), None, "2026-10-01T12:00:00Z").lines();
+        assert_eq!(lines[1], "  Budget:      $700.00 a month, resets in 30d");
+        assert_eq!(
+            lines[3],
+            "  Pace:        shown after the first full day of the month"
+        );
+    }
+
+    #[test]
+    fn amounts_below_a_dollar_share_one_precision() {
+        let mut facts = facts(Some(0.5), None, MID_MONTH);
+        facts.local_usd = 0.1234;
+        let lines = facts.lines();
+        assert_eq!(lines[1], "  Budget:      $0.5000 a month, resets in 10d");
+        assert_eq!(
+            lines[2],
+            "  Local:       $0.1234 spent this month on this machine"
+        );
+    }
+
+    #[test]
+    fn without_a_budget_the_spend_and_a_hint_are_shown() {
+        assert_eq!(
+            facts(None, Some(0.4), MID_MONTH).lines(),
+            [
+                "  Account:     Acme · Enterprise (oauth:work)",
+                "  Budget:      none",
+                "  Reported:    0.4% of the spend limit used",
+                "  Local:       $23.10 spent this month on this machine",
+                "               claude-plus budget set <usd> shows dollars",
+            ]
+        );
+        assert_eq!(facts(None, None, MID_MONTH).lines().len(), 4);
+    }
+
+    #[test]
+    fn percents_keep_one_decimal_below_ten() {
+        assert_eq!(percent(0.4), "0.4%");
+        assert_eq!(percent(9.94), "9.9%");
+        assert_eq!(percent(9.96), "10%");
+        assert_eq!(percent(116.4), "116%");
+    }
+
+    #[test]
+    fn the_reset_is_counted_in_minutes_below_an_hour() {
+        assert_eq!(until(3 * DAY_MS + 5 * HOUR_MS), "3d");
+        assert_eq!(until(2 * HOUR_MS + 59 * MINUTE_MS), "2h");
+        assert_eq!(until(35 * MINUTE_MS + 30_000), "35m");
+        assert_eq!(until(59_000), "under a minute");
+        assert_eq!(until(-5), "under a minute");
+        assert_eq!(
+            facts(Some(700.0), None, "2026-10-31T23:25:00Z").lines()[1],
+            "  Budget:      $700.00 a month, resets in 35m"
+        );
     }
 }

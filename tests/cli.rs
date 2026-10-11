@@ -50,7 +50,7 @@ fn doctor_checks_setup() {
         .stdout(predicate::str::contains("4 transcript files"))
         .stdout(predicate::str::contains("1 unparsable line"))
         .stdout(predicate::str::contains("cleanupPeriodDays: 30 (default)"))
-        .stdout(predicate::str::contains("prices 2026-10-10"))
+        .stdout(predicate::str::contains("Anthropic's 2026-10-10"))
         .stdout(predicate::str::contains("Cross-check:"));
 }
 
@@ -137,13 +137,12 @@ fn doctor_output_is_exact() {
   Data dir:    {plus}
   Retention:   cleanupPeriodDays: 30 (default)
                Claude Code deletes older transcripts, claude-plus keeps its own copy
-  Price table: bundled prices 2026-10-10
   Daemon:      not running, start it with claude-plus daemon --ensure
   Claude Code: 2.1.296
   Mod:         not installed, run claude-plus install
   Account:     none seen yet
-  Login:       cannot read {claude}/.claude.json: No such file or directory (os error 2)
-  Prices:      Anthropic's
+  Login:       no .claude.json yet (never signed in)
+  Prices:      Anthropic's 2026-10-10
   Imported:    5 requests in 4 files · 1 unparsable line
   Cross-check: 1 session · transcripts $0.0012 · Claude Code $0.0123 · reconciled $0.0123
   Uncounted:   1 session with subagents has no Claude Code counter, its subagent output may be understated
@@ -367,13 +366,12 @@ fn doctor_header(env: &Env, transcript_files: u64, imported: &str) -> String {
   Data dir:    {plus}
   Retention:   cleanupPeriodDays: 30 (default)
                Claude Code deletes older transcripts, claude-plus keeps its own copy
-  Price table: bundled prices 2026-10-10
   Daemon:      not running, start it with claude-plus daemon --ensure
   Claude Code: 2.1.296
   Mod:         not installed, run claude-plus install
   Account:     none seen yet
-  Login:       cannot read {claude}/.claude.json: No such file or directory (os error 2)
-  Prices:      Anthropic's
+  Login:       no .claude.json yet (never signed in)
+  Prices:      Anthropic's 2026-10-10
   Imported:    {imported}
 ",
         claude = env.claude.display(),
@@ -462,13 +460,12 @@ fn doctor_on_a_fresh_home_creates_nothing() {
   Data dir:    {plus}
   Retention:   cleanupPeriodDays: 30 (default)
                Claude Code deletes older transcripts, claude-plus keeps its own copy
-  Price table: bundled prices 2026-10-10
   Daemon:      not running, start it with claude-plus daemon --ensure
   Claude Code: 2.1.296
   Mod:         not installed, run claude-plus install
   Account:     none seen yet
-  Login:       cannot read {claude}/.claude.json: No such file or directory (os error 2)
-  Prices:      Anthropic's
+  Login:       no .claude.json yet (never signed in)
+  Prices:      Anthropic's 2026-10-10
   Database:    not created yet, run claude-plus import
 ",
         claude = env.claude.display(),
@@ -873,35 +870,154 @@ fn a_local_import_records_the_claude_code_login_without_touching_it() {
     assert_eq!(std::fs::read_to_string(&login).unwrap(), body);
 }
 
+const ME: &str = r#"{"oauthAccount":{"accountUuid":"me","organizationName":"Me","organizationType":"claude_max"}}"#;
+const WORK: &str = r#"{"oauthAccount":{"accountUuid":"work","organizationName":"Acme","organizationType":"claude_enterprise"}}"#;
+const MID_MONTH: &str = "2026-10-21T12:00:00Z";
+
+fn at(env: &Env, args: &[&str], now: &str) -> String {
+    stdout_of_with(env, args, &[("CLAUDE_PLUS_NOW", now)])
+}
+
+fn signed_in_with_spend(env: &Env) {
+    env.write_claude_json(WORK);
+    at(env, &["import"], "2026-10-21T10:00:00Z");
+    env.write_transcript_at("s1", "claude-opus-5-5", "2026-10-21T11:00:00Z", 1_155_000);
+}
+
+fn two_logins(env: &Env) {
+    env.write_claude_json(ME);
+    at(env, &["import"], "2026-10-21T08:00:00Z");
+    env.write_transcript_at("mine", "claude-sonnet-5-5", "2026-10-21T09:00:00Z", 45_000);
+    env.write_claude_json(WORK);
+    at(env, &["import"], "2026-10-21T10:00:00Z");
+    env.write_transcript_at("work", "claude-opus-5-5", "2026-10-21T11:00:00Z", 1_155_000);
+}
+
 #[test]
 fn a_budget_is_set_shown_and_cleared_for_the_signed_in_account() {
     let env = env();
-    env.write_claude_json(r#"{"oauthAccount":{"accountUuid":"work","organizationName":"Acme","organizationType":"claude_enterprise"}}"#);
-    env.write_transcript_today("s1", "claude-opus-5-5");
-    cmd(&env, &["import"]).assert().success();
-    cmd(&env, &["budget", "set", "700"])
+    signed_in_with_spend(&env);
+    assert_eq!(
+        at(&env, &["budget", "set", "700"], MID_MONTH),
+        "Budget for Acme · Enterprise set to $700.00 a month, reset on the 1st at 00:00 UTC\n"
+    );
+    assert_eq!(
+        at(&env, &["budget", "show"], MID_MONTH),
+        "  Account:     Acme · Enterprise (oauth:work)
+  Budget:      $700.00 a month, resets in 10d
+  Local:        $23.10 spent this month on this machine
+  Pace:        on pace for 5.0% by the reset
+"
+    );
+    assert_eq!(
+        at(&env, &["budget", "clear"], MID_MONTH),
+        "Budget for Acme · Enterprise cleared\n"
+    );
+    assert_eq!(
+        at(&env, &["budget", "clear"], MID_MONTH),
+        "Acme · Enterprise has no budget\n"
+    );
+}
+
+#[test]
+fn budget_show_derives_dollars_from_the_reported_percent() {
+    let env = env();
+    signed_in_with_spend(&env);
+    at(&env, &["budget", "set", "700"], MID_MONTH);
+    env.seed_spend_limit("oauth:work", 4.0, "2026-10-21T11:30:00Z");
+    assert_eq!(
+        at(&env, &["budget", "show"], MID_MONTH),
+        "  Account:     Acme · Enterprise (oauth:work)
+  Budget:      $700.00 a month, resets in 10d
+  Reported:     $28.00 used, 4.0% of the spend limit
+  Local:        $23.10 spent this month on this machine
+  Pace:        on pace for 6.0% by the reset
+"
+    );
+}
+
+#[test]
+fn budget_show_says_when_the_pace_goes_over_the_budget() {
+    let env = env();
+    signed_in_with_spend(&env);
+    at(&env, &["budget", "set", "30"], MID_MONTH);
+    assert_eq!(
+        at(&env, &["budget", "show"], MID_MONTH),
+        "  Account:     Acme · Enterprise (oauth:work)
+  Budget:      $30.00 a month, resets in 10d
+  Local:       $23.10 spent this month on this machine
+  Pace:        on pace for 116% by the reset, over the budget
+"
+    );
+}
+
+#[test]
+fn budget_show_without_a_budget_still_shows_the_spend() {
+    let env = env();
+    signed_in_with_spend(&env);
+    assert_eq!(
+        at(&env, &["budget", "show"], MID_MONTH),
+        "  Account:     Acme · Enterprise (oauth:work)
+  Budget:      none
+  Local:       $23.10 spent this month on this machine
+               claude-plus budget set <usd> shows dollars
+"
+    );
+    env.seed_spend_limit("oauth:work", 4.0, "2026-10-21T11:30:00Z");
+    assert_eq!(
+        at(&env, &["budget", "show"], MID_MONTH),
+        "  Account:     Acme · Enterprise (oauth:work)
+  Budget:      none
+  Reported:    4.0% of the spend limit used
+  Local:       $23.10 spent this month on this machine
+               claude-plus budget set <usd> shows dollars
+"
+    );
+}
+
+#[test]
+fn budget_set_and_clear_follow_a_login_switch() {
+    let env = env();
+    env.write_claude_json(ME);
+    at(&env, &["import"], "2026-10-21T08:00:00Z");
+    env.write_claude_json(WORK);
+    assert_eq!(
+        at(&env, &["budget", "set", "10"], MID_MONTH),
+        "Budget for Acme · Enterprise set to $10.00 a month, reset on the 1st at 00:00 UTC\n"
+    );
+    env.write_claude_json(ME);
+    assert_eq!(
+        at(&env, &["budget", "clear"], "2026-10-21T13:00:00Z"),
+        "Me · Max has no budget\n"
+    );
+}
+
+#[test]
+fn a_label_matches_regardless_of_case_beyond_ascii() {
+    let env = env();
+    env.seed_accounts(&[("oauth:a", "équipe")]);
+    cmd(&env, &["budget", "set", "10", "--account", "ÉQUIPE"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Budget for Acme · Enterprise set to $700.00 a month",
-        ));
-    cmd(&env, &["budget", "show"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Acme · Enterprise (oauth:work)"))
-        .stdout(predicate::str::contains("$700.00 a month, resets in 28d"))
-        .stdout(predicate::str::contains("Claude Code here:"))
-        .stdout(predicate::str::contains("Pace:"));
-    cmd(&env, &["budget", "clear"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Budget for Acme · Enterprise cleared",
-        ));
-    cmd(&env, &["budget", "clear"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Acme · Enterprise has no budget"));
+        .stdout(predicate::str::contains("Budget for équipe set"));
+}
+
+#[test]
+fn accounts_output_is_exact() {
+    let env = env();
+    two_logins(&env);
+    at(&env, &["budget", "set", "700"], MID_MONTH);
+    assert_eq!(
+        at(&env, &["accounts"], MID_MONTH),
+        "\
+┌───────────────────┬────────────┬───────┬──────────┬────────────┬─────────┐
+│ Account           ┆ Id         ┆ Kind  ┆ Sessions ┆ This month ┆  Budget │
+╞═══════════════════╪════════════╪═══════╪══════════╪════════════╪═════════╡
+│ Me · Max          ┆ oauth:me   ┆ oauth ┆        1 ┆      $0.45 ┆       - │
+│ Acme · Enterprise ┆ oauth:work ┆ oauth ┆        1 ┆     $23.10 ┆ $700.00 │
+└───────────────────┴────────────┴───────┴──────────┴────────────┴─────────┘
+"
+    );
 }
 
 #[test]
@@ -970,62 +1086,68 @@ fn without_any_account_the_budget_asks_for_one() {
 #[test]
 fn stats_count_only_the_current_account_unless_all_is_asked() {
     let env = env();
-    env.write_claude_json(
-        r#"{"oauthAccount":{"accountUuid":"me","organizationName":"Me","organizationType":"claude_max"}}"#,
-    );
-    env.write_transcript_today("mine", "claude-opus-5-5");
-    cmd(&env, &["import"]).assert().success();
-    env.write_claude_json(
-        r#"{"oauthAccount":{"accountUuid":"work","organizationName":"Acme","organizationType":"claude_enterprise"}}"#,
-    );
-    env.write_transcript_today("work", "claude-opus-5-5");
-    cmd(&env, &["import"]).assert().success();
-    assert!(stdout_of(&env, &["stats", "--days", "1"]).contains("Acme · Enterprise"));
+    two_logins(&env);
+    let current = at(&env, &["stats", "--days", "1"], MID_MONTH);
     assert!(
-        stdout_of(&env, &["stats", "--days", "1", "--account", "all"]).contains("All accounts")
+        current.starts_with("Account: Acme · Enterprise\n"),
+        "{current}"
     );
+    assert!(current.contains("claude-opus-5-5"), "{current}");
+    assert!(!current.contains("claude-sonnet-5-5"), "{current}");
+    assert!(!current.contains("$0.45"), "{current}");
+    let all = at(
+        &env,
+        &["stats", "--days", "1", "--account", "all"],
+        MID_MONTH,
+    );
+    assert!(all.starts_with("Account: All accounts\n"), "{all}");
     assert!(
-        stdout_of(&env, &["stats", "--days", "1", "--account", "oauth:me"]).contains("Me · Max")
+        all.contains("claude-opus-5-5") && all.contains("claude-sonnet-5-5"),
+        "{all}"
     );
+    let mine = at(
+        &env,
+        &["stats", "--days", "1", "--account", "oauth:me"],
+        MID_MONTH,
+    );
+    assert!(mine.starts_with("Account: Me · Max\n"), "{mine}");
+    assert!(mine.contains("claude-sonnet-5-5"), "{mine}");
+    assert!(!mine.contains("claude-opus-5-5"), "{mine}");
 }
 
 #[test]
 fn doctor_reports_the_account_login_and_prices() {
     let env = env();
-    env.write_claude_json(
-        r#"{"oauthAccount":{"accountUuid":"work","organizationName":"Acme","organizationType":"claude_enterprise"}}"#,
-    );
-    env.write_transcript_today("work", "claude-opus-5-5");
-    cmd(&env, &["import"]).assert().success();
+    signed_in_with_spend(&env);
+    at(&env, &["import"], MID_MONTH);
     let out = stdout_of(&env, &["doctor"]);
     assert!(
-        out.contains("Account:     Acme · Enterprise (oauth:work)"),
+        out.contains("  Account:     Acme · Enterprise (oauth:work)\n  Login:       signed in\n  Prices:      Anthropic's 2026-10-10\n"),
         "{out}"
     );
-    assert!(out.contains("Login:       signed in"), "{out}");
-    assert!(out.contains("Prices:      Anthropic's\n"), "{out}");
+    std::fs::write(
+        env.plus.join("prices.toml"),
+        "[models.claude-opus-5-5]\ninput = 1\noutput = 1\ncache_read = 0.1\n",
+    )
+    .unwrap();
+    let out = stdout_of(&env, &["doctor"]);
+    assert!(
+        out.contains("  Prices:      Anthropic's 2026-10-10, with your prices.toml\n"),
+        "{out}"
+    );
     env.write_claude_json("{broken");
-    assert!(stdout_of(&env, &["doctor"]).contains("Login:       cannot read"));
+    let out = stdout_of(&env, &["doctor"]);
+    assert!(out.contains("  Login:       cannot read "), "{out}");
 }
 
 #[test]
 fn export_keeps_only_the_asked_account() {
     let env = env();
-    env.write_claude_json(
-        r#"{"oauthAccount":{"accountUuid":"me","organizationName":"Me","organizationType":"claude_max"}}"#,
-    );
-    env.write_transcript_today("mine", "claude-opus-5-5");
-    cmd(&env, &["import"]).assert().success();
-    env.write_claude_json(
-        r#"{"oauthAccount":{"accountUuid":"work","organizationName":"Acme","organizationType":"claude_enterprise"}}"#,
-    );
-    env.write_transcript_today("work", "claude-opus-5-5");
-    cmd(&env, &["import"]).assert().success();
+    two_logins(&env);
     let export = |extra: &[&str]| {
         let mut args = vec!["export", "--format", "csv"];
         args.extend_from_slice(extra);
-        let now = chrono::Utc::now().to_rfc3339();
-        stdout_of_with(&env, &args, &[("CLAUDE_PLUS_NOW", now.as_str())])
+        at(&env, &args, MID_MONTH)
     };
     let current = export(&[]);
     assert!(

@@ -14,7 +14,7 @@ use crate::setup::bundle::{self, PLUGIN_ID};
 use crate::setup::claude::{self, ClaudeCode, Plugin};
 use crate::store::Store;
 
-pub fn run(paths: &Paths, prices: &PriceTable, user_prices: &UserPrices) -> Result<()> {
+pub fn run(paths: &Paths, user_prices: &UserPrices) -> Result<()> {
     let files = discover(&paths.projects_dir())?;
     println!("✻ claude-plus doctor");
     println!(
@@ -37,13 +37,6 @@ pub fn run(paths: &Paths, prices: &PriceTable, user_prices: &UserPrices) -> Resu
     if let Some(hint) = hint {
         println!("{}", labeled("", hint));
     }
-    println!(
-        "{}",
-        labeled(
-            "Price table:",
-            &format!("bundled prices {}", prices.version())
-        )
-    );
     let (line, status) = daemon(paths);
     println!("{}", labeled("Daemon:", &line));
     let (claude_code, plus) = setup(&ClaudeCode::default());
@@ -51,7 +44,13 @@ pub fn run(paths: &Paths, prices: &PriceTable, user_prices: &UserPrices) -> Resu
     println!("{}", labeled("Mod:", &plus));
     println!("{}", labeled("Account:", &account_line(paths)));
     println!("{}", labeled("Login:", &login_line(&paths.claude_json)));
-    println!("{}", labeled("Prices:", &prices_line(user_prices)));
+    println!(
+        "{}",
+        labeled(
+            "Prices:",
+            &prices_line(PriceTable::bundled().version(), user_prices)
+        )
+    );
 
     match readable_store(paths)? {
         Some(store) => print_database(&store, &status),
@@ -60,28 +59,20 @@ pub fn run(paths: &Paths, prices: &PriceTable, user_prices: &UserPrices) -> Resu
 }
 
 fn account_line(paths: &Paths) -> String {
-    let current = Store::open_read_only(&paths.database())
+    Store::open_read_only(&paths.database())
         .ok()
         .and_then(|store| {
-            let id = store
-                .latest_session_account()
-                .ok()?
-                .or(store.open_account().ok()?)?;
-            let label = store
-                .accounts()
-                .ok()?
-                .into_iter()
-                .find(|account| account.id == id)
-                .map_or_else(|| id.clone(), |account| account.label);
-            Some(format!("{label} ({id})"))
-        });
-    current.unwrap_or_else(|| "none seen yet".into())
+            let id = super::accounts::current(&store).ok()??;
+            super::accounts::described(&store, &id).ok()
+        })
+        .unwrap_or_else(|| "none seen yet".into())
 }
 
 fn login_line(claude_json: &Path) -> String {
     match read_login(claude_json) {
         Ok(Login::SignedIn(_)) => "signed in".into(),
         Ok(Login::SignedOut) => "signed out".into(),
+        Err(error) if is_not_found(&error) => "no .claude.json yet (never signed in)".into(),
         Err(error) => format!(
             "cannot read {}: {}",
             claude_json.display(),
@@ -90,11 +81,19 @@ fn login_line(claude_json: &Path) -> String {
     }
 }
 
-fn prices_line(user_prices: &UserPrices) -> String {
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn prices_line(bundled_version: &str, user_prices: &UserPrices) -> String {
+    let anthropic = format!("Anthropic's {bundled_version}");
     match user_prices {
-        UserPrices::Absent => "Anthropic's".into(),
-        UserPrices::Loaded => "Anthropic's, with your prices.toml".into(),
-        UserPrices::Invalid(message) => format!("Anthropic's; {message}"),
+        UserPrices::Absent => anthropic,
+        UserPrices::Loaded => format!("{anthropic}, with your prices.toml"),
+        UserPrices::Invalid(message) => format!("{anthropic}; {message}"),
     }
 }
 
@@ -364,24 +363,28 @@ mod tests {
 
     #[test]
     fn prices_and_login_lines_say_what_is_used() {
-        assert_eq!(prices_line(&UserPrices::Absent), "Anthropic's");
         assert_eq!(
-            prices_line(&UserPrices::Loaded),
-            "Anthropic's, with your prices.toml"
+            prices_line("2026-10-10", &UserPrices::Absent),
+            "Anthropic's 2026-10-10"
         );
         assert_eq!(
-            prices_line(&UserPrices::Invalid("bad".into())),
-            "Anthropic's; bad"
+            prices_line("2026-10-10", &UserPrices::Loaded),
+            "Anthropic's 2026-10-10, with your prices.toml"
+        );
+        assert_eq!(
+            prices_line("2026-10-10", &UserPrices::Invalid("bad".into())),
+            "Anthropic's 2026-10-10; bad"
         );
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".claude.json");
-        assert!(login_line(&file).starts_with("cannot read"));
+        assert_eq!(login_line(&file), "no .claude.json yet (never signed in)");
         std::fs::write(&file, "{}").unwrap();
         assert_eq!(login_line(&file), "signed out");
         std::fs::write(&file, r#"{"oauthAccount":{"accountUuid":"w"}}"#).unwrap();
         assert_eq!(login_line(&file), "signed in");
         std::fs::write(&file, "{broken").unwrap();
         assert!(login_line(&file).starts_with("cannot read"));
+        assert!(login_line(dir.path()).starts_with("cannot read"));
     }
 
     #[test]

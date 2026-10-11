@@ -205,7 +205,7 @@ pub fn run() -> Result<ExitCode> {
         } => export::run(&paths, &prices, format, days, account.as_deref()),
         Command::Accounts { action } => accounts::accounts(&paths, &prices, action),
         Command::Budget { action } => accounts::budget(&paths, &prices, action),
-        Command::Doctor => doctor::run(&paths, &prices, &user_prices),
+        Command::Doctor => doctor::run(&paths, &user_prices),
         Command::Reindex => reindex::run(&paths, &prices),
         Command::Install { yes } => setup::install(&paths, yes),
         Command::Uninstall { purge, yes } => setup::uninstall(&paths, purge, yes),

@@ -48,15 +48,33 @@ impl Env {
         std::fs::write(self.claude.join(".claude.json"), body).unwrap();
     }
 
-    pub fn write_transcript_today(&self, session: &str, model: &str) {
-        let at = chrono::Utc::now() + chrono::Duration::minutes(1);
+    pub fn write_transcript_at(&self, session: &str, model: &str, at: &str, output_tokens: u64) {
         let line = format!(
-            r#"{{"type":"assistant","sessionId":"{session}","timestamp":"{}","requestId":"req-{session}","message":{{"model":"{model}","content":[],"usage":{{"input_tokens":10,"output_tokens":1000}}}}}}"#,
-            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            r#"{{"type":"assistant","sessionId":"{session}","timestamp":"{at}","requestId":"req-{session}","message":{{"model":"{model}","content":[],"usage":{{"input_tokens":0,"output_tokens":{output_tokens}}}}}}}"#
         );
         let dir = self.claude.join("projects").join("today");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{session}.jsonl")), line + "\n").unwrap();
+    }
+
+    pub fn seed_spend_limit(&self, account: &str, used_pct: f64, at: &str) {
+        let ts_ms = chrono::DateTime::parse_from_rfc3339(at)
+            .unwrap()
+            .timestamp_millis();
+        let mut store = claude_plus::store::Store::open(&self.plus.join("data.db")).unwrap();
+        let mut writer = store.writer().unwrap();
+        writer
+            .limit_sample(&claude_plus::store::LimitSample {
+                ts_ms,
+                session_id: "seeded".into(),
+                account_id: Some(account.into()),
+                model: None,
+                window: "spend_limit".into(),
+                used_pct,
+                resets_at_ms: None,
+            })
+            .unwrap();
+        writer.commit().unwrap();
     }
 
     pub fn seed_accounts(&self, accounts: &[(&str, &str)]) {
