@@ -1,3 +1,4 @@
+import { glyphRows } from '../hooks/chart'
 import type { Line } from '../hooks/state'
 
 export const ONE_ROW_KEYS = [/^cache-note$/, /^cache-rewarm$/, /^context-empty$/, /^unpriced$/, /^limits-learning/, /^limit-.*-detail$/, /^daemon-fix$/]
@@ -31,6 +32,7 @@ export function wrapped(text: string, width: number): string[] {
 }
 
 export function rowsOf(line: Line, inner: number): string[] {
+  if (line.chart !== undefined) return glyphRows(line.chart)
   const text = textOf(line)
   if (line.why !== undefined) return [`${truncated(text, inner - 1).padEnd(inner - 1)}?`]
   const indent = ' '.repeat(line.indent ?? 0)
@@ -85,6 +87,7 @@ export function paintTree(node: Drawn, width: number): string[] {
     return props.wrap === 'wrap' ? wrapped(text, outer) : [truncated(text, outer)]
   }
   if (node.type === 'Button') return [shownText(node)]
+  if (node.type === 'Raster') return rasterRows(String(props.cells), cells(props.columns), cells(props.rows))
   if (node.type !== 'Box') throw new Error(`cannot paint a ${node.type}`)
   const left = cells(props.paddingX) + cells(props.paddingLeft)
   const inner = outer - left - cells(props.paddingX)
@@ -104,4 +107,17 @@ function across(children: Drawn[], width: number, spread: boolean, gap: number):
   const rows = paintTree(first, width - right.length)
   const [top = '', ...below] = rows
   return [spread ? `${top.padEnd(width - right.length)}${right}` : `${top}${right}`, ...below]
+}
+
+export function decoded(cells: string): number[] {
+  const bytes = Uint8Array.from(atob(cells), char => char.charCodeAt(0))
+  const view = new DataView(bytes.buffer)
+  return Array.from({ length: Math.floor(bytes.length / 4) }, (_, index) => view.getUint32(index * 4, true))
+}
+
+export function rasterRows(cells: string, columns: number, rows: number): string[] {
+  const words = decoded(cells)
+  return Array.from({ length: rows }, (_, row) =>
+    Array.from({ length: columns }, (_, column) => String.fromCharCode(words[(row * columns + column) * 3] ?? 32)).join(''),
+  )
 }

@@ -1,6 +1,7 @@
 import type { ThemeKey, TurnUsage } from 'claude-code'
 
 import type { Daemon, DaemonStatus, LimitWindow, Local, Motion, Snapshot, Step } from '../types'
+import type { Grid } from './chart'
 import {
   bar,
   countdown,
@@ -33,7 +34,7 @@ export const RESET_TOLERANCE_MS = 60_000
 export const PAIRS_NEEDED = 20
 
 export type Segment = { text: string; color?: ThemeKey; dim?: true; bold?: true }
-export type Line = { key: string; segments: Segment[]; why?: string; toggle?: string; wrap?: true; indent?: number }
+export type Line = { key: string; segments: Segment[]; why?: string; toggle?: string; wrap?: true; indent?: number; chart?: Grid }
 
 export type ScreenInput = {
   width: number
@@ -285,7 +286,7 @@ export function gap(index: number): Line {
   return { key: `gap-${index}`, segments: [{ text: ' ' }] }
 }
 
-function fitting(width: number, ...choices: string[]): string {
+export function fitting(width: number, ...choices: string[]): string {
   return choices.find(choice => choice.length <= width) ?? choices[choices.length - 1] ?? ''
 }
 
