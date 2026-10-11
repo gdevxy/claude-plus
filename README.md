@@ -1,7 +1,7 @@
 # claude-plus
 
 Token, cache and cost visibility for Claude Code.
-claude-plus draws a live pane beside the conversation with what each session costs, what fills its context, when its cache goes cold, how fast it uses your subscription windows, and tips that save tokens.
+claude-plus draws a live pane beside the conversation with what each session costs, what fills its context, when its cache goes cold, how fast it uses your plan's limits, from a subscription's 5h and 7d windows to an enterprise monthly spend limit, and tips that save tokens.
 A local daemon reads your Claude Code transcripts and keeps their history; nothing leaves your machine.
 
 ![The live view of the claude-plus pane docked beside a Claude Code conversation](docs/assets/live.png)
@@ -48,6 +48,8 @@ The pane has four views, and the keys 1 to 4 switch between them.
 ### 1. Live
 
 The current session at a glance: what it costs, how long the cache stays warm, and how fast you use your 5h and 7d subscription windows.
+The account the session bills to is named under the model.
+An enterprise spend limit shows in dollars once you set a budget.
 Next prompt compares what your next message would cost on each model, with the cache warm and after it expires, so you know what a model switch really costs.
 
 ![Live view: cost, cache countdown, next prompt price per model and plan limits](docs/assets/live.png)
@@ -63,6 +65,7 @@ It lists the largest items and the skills, tools and memory files you configured
 
 Cost per day and model, cache hit ratio, what the cache saved you, and your top projects and sessions.
 `r` cycles the range between 24h, 7d, 30d and 90d, and `g` switches between cost and tokens.
+`a` switches between the current account, your other accounts and all of them.
 
 ![History view: cost by day, cache hit ratio and top projects](docs/assets/history.png)
 
@@ -79,6 +82,28 @@ claude-plus shows a toast when the cache is about to go cold, when the 5h limit 
 Turn them off with the `alerts` option of the mod.
 The `chime` option, off by default, also plays a soft chime with the cache alert.
 Both options are set in Claude Code's plugin settings for `plus`.
+
+## Accounts and budgets
+
+claude-plus keeps each account apart: logging out of a company account and into a private one never mixes their limits, History or tips.
+It learns which account is signed in from Claude Code's `.claude.json`, which it only reads.
+An API key, a gateway (`ANTHROPIC_BASE_URL`) or Bedrock, Vertex or Foundry each count as their own account.
+Sessions from before the upgrade show as Unknown under All accounts.
+
+`claude-plus budget set 700` sets a monthly budget for the current account, reset on the 1st at 00:00 UTC.
+With a reported spend limit it turns the percent into dollars.
+Without one it is measured against what Claude Code on this machine spent.
+The pane warns once per period when the pace would run out before the reset, and again at 90% used.
+
+Prices default to Anthropic's own.
+An optional `~/.claude-plus/prices.toml` (or `$CLAUDE_PLUS_HOME/prices.toml`) overrides them, and it needs only the models whose prices differ, for example:
+
+```toml
+[models.claude-opus-5-5]
+input = 3
+output = 15
+cache_read = 0.15
+```
 
 ## Upgrade
 
@@ -108,8 +133,10 @@ Run `claude-plus uninstall` before you remove the binary with `brew uninstall cl
 |---|---|
 | `claude-plus install` | Add the pane to Claude Code and start the daemon. |
 | `claude-plus uninstall [--purge]` | Remove the pane and stop the daemon, and with `--purge` delete the data. |
-| `claude-plus stats [--days N]` | Print daily cost per model. |
-| `claude-plus export --format json\|csv` | Print stored usage per day, project, account and model. |
+| `claude-plus stats [--days N] [--account <account>]` | Print daily cost per model. |
+| `claude-plus export --format json\|csv [--account <account>]` | Print stored usage per day, project, account and model. |
+| `claude-plus accounts [rename <account> <label>]` | List the accounts claude-plus knows with this month's spend, or rename one. |
+| `claude-plus budget set <usd> \| show \| clear [--account <account>]` | Set, show or clear the monthly budget of an account. |
 | `claude-plus doctor` | Check the binary, daemon, mod, Claude Code version and transcript retention. |
 | `claude-plus import` | Read new transcripts into the store, with progress. |
 | `claude-plus reindex` | Rebuild derived tables from stored records. |
