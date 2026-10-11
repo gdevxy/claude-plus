@@ -426,6 +426,17 @@ fn purge_refuses_a_symlinked_data_dir() {
             link.display(),
             env.plus.display()
         ));
+    let mut slashed = link.clone().into_os_string();
+    slashed.push("/");
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("CLAUDE_PLUS_HOME", &slashed)
+        .assert()
+        .failure()
+        .stderr(format!(
+            "claude-plus: refusing to purge {}: it is a symlink to {}; set CLAUDE_PLUS_HOME to that directory to purge it\n",
+            link.display(),
+            env.plus.display()
+        ));
     assert_eq!(env.claude_calls().len(), before);
     assert!(env.plus.join("data.db").exists());
 }

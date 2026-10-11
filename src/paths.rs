@@ -13,10 +13,11 @@ pub struct Paths {
 
 impl Paths {
     pub fn from_env() -> Result<Self> {
-        Self::from_vars(|name| std::env::var_os(name))
+        let cwd = std::env::current_dir().ok();
+        Self::from_vars(|name| std::env::var_os(name), cwd.as_deref())
     }
 
-    pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
+    pub fn from_vars(var: impl Fn(&str) -> Option<OsString>, cwd: Option<&Path>) -> Result<Self> {
         let path = |name| -> Result<Option<PathBuf>> {
             let Some(path) = var(name)
                 .filter(|value| !value.is_empty())
@@ -24,10 +25,14 @@ impl Paths {
             else {
                 return Ok(None);
             };
+            let path = match cwd {
+                Some(cwd) if !path.is_absolute() && name == "CLAUDE_CONFIG_DIR" => cwd.join(path),
+                _ => path,
+            };
             if !path.is_absolute() {
                 bail!("{name} must be an absolute path, not {}", path.display());
             }
-            Ok(Some(path))
+            Ok(Some(path.components().collect()))
         };
         let home = path("HOME")?.context("HOME is not set")?;
         Ok(Self::resolve(
@@ -266,11 +271,14 @@ mod tests {
 
     #[test]
     fn from_vars_reads_home_and_overrides() {
-        let paths = Paths::from_vars(vars(&[
-            ("HOME", "/home/ada"),
-            ("CLAUDE_CONFIG_DIR", "/cfg"),
-            ("CLAUDE_PLUS_HOME", "/plus"),
-        ]))
+        let paths = Paths::from_vars(
+            vars(&[
+                ("HOME", "/home/ada"),
+                ("CLAUDE_CONFIG_DIR", "/cfg"),
+                ("CLAUDE_PLUS_HOME", "/plus"),
+            ]),
+            None,
+        )
         .unwrap();
         assert_eq!(
             (paths.claude_dir, paths.data_dir),
@@ -280,27 +288,55 @@ mod tests {
 
     #[test]
     fn empty_overrides_count_as_unset() {
-        let paths = Paths::from_vars(vars(&[
-            ("HOME", "/home/ada"),
-            ("CLAUDE_CONFIG_DIR", ""),
-            ("CLAUDE_PLUS_HOME", ""),
-        ]))
+        let paths = Paths::from_vars(
+            vars(&[
+                ("HOME", "/home/ada"),
+                ("CLAUDE_CONFIG_DIR", ""),
+                ("CLAUDE_PLUS_HOME", ""),
+            ]),
+            None,
+        )
         .unwrap();
         assert_eq!(paths, Paths::resolve(Path::new("/home/ada"), None, None));
     }
 
     #[test]
-    fn a_relative_override_or_home_is_an_error() {
-        for name in ["HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_PLUS_HOME"] {
+    fn a_relative_home_or_data_dir_is_an_error() {
+        for name in ["HOME", "CLAUDE_PLUS_HOME"] {
             let mut pairs = vec![("HOME", "/home/ada")];
             pairs.retain(|(key, _)| *key != name);
             pairs.push((name, "."));
-            let error = Paths::from_vars(vars(&pairs)).unwrap_err();
+            let error = Paths::from_vars(vars(&pairs), Some(Path::new("/work"))).unwrap_err();
             assert_eq!(
                 error.to_string(),
                 format!("{name} must be an absolute path, not .")
             );
         }
+    }
+
+    #[test]
+    fn a_relative_claude_config_dir_is_taken_from_the_working_directory_as_claude_code_does() {
+        let pairs = [("HOME", "/home/ada"), ("CLAUDE_CONFIG_DIR", "cfg")];
+        let paths = Paths::from_vars(vars(&pairs), Some(Path::new("/work"))).unwrap();
+        assert_eq!(paths.claude_dir, PathBuf::from("/work/cfg"));
+        let error = Paths::from_vars(vars(&pairs), None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "CLAUDE_CONFIG_DIR must be an absolute path, not cfg"
+        );
+    }
+
+    #[test]
+    fn trailing_separators_are_dropped() {
+        let paths = Paths::from_vars(
+            vars(&[("HOME", "/home/ada/"), ("CLAUDE_PLUS_HOME", "/plus//")]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (paths.home, paths.data_dir),
+            (PathBuf::from("/home/ada"), PathBuf::from("/plus"))
+        );
     }
 
     #[test]
@@ -353,14 +389,15 @@ mod tests {
     #[test]
     fn missing_or_empty_home_is_an_error() {
         for pairs in [&[][..], &[("HOME", "")][..]] {
-            let error = Paths::from_vars(vars(pairs)).unwrap_err();
+            let error = Paths::from_vars(vars(pairs), None).unwrap_err();
             assert_eq!(error.to_string(), "HOME is not set");
         }
     }
 
     #[test]
     fn from_env_uses_the_process_environment() {
-        let expected = Paths::from_vars(|name| std::env::var_os(name)).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let expected = Paths::from_vars(|name| std::env::var_os(name), Some(&cwd)).unwrap();
         assert_eq!(Paths::from_env().unwrap(), expected);
     }
 
