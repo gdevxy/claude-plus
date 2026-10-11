@@ -1,9 +1,8 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Loading, MemoryDir, Roots, Scan, Scope, Source, SourceKind, display, is_markdown, read_text,
-    sorted_entries,
+    Loading, MemoryDir, Roots, Scan, Scope, Seen, Source, SourceKind, display, is_markdown,
+    read_text, sorted_entries,
 };
 
 pub const MEMORY_INDEX: &str = "MEMORY.md";
@@ -21,10 +20,9 @@ const SKIPPED_DIRS: &[&str] = &[
 ];
 const NESTED_NAMES: &[&str] = &["CLAUDE.md", "CLAUDE.local.md"];
 
-pub fn claude_md(roots: &Roots, sources: &mut Vec<Source>) {
-    let mut seen = HashSet::new();
+pub fn claude_md(roots: &Roots, seen: &mut Seen, sources: &mut Vec<Source>) {
     let mut add = |scope: Scope, name: String, path: &Path, loading: Loading| {
-        if !seen.insert(identity(path)) {
+        if !seen.first(path) {
             return;
         }
         if let Some(text) = read_text(path) {
@@ -86,7 +84,7 @@ pub fn claude_md(roots: &Roots, sources: &mut Vec<Source>) {
     }
 }
 
-pub fn memory(roots: &Roots, scan: &mut Scan) {
+pub fn memory(roots: &Roots, seen: &mut Seen, scan: &mut Scan) {
     let projects = roots.claude_dir.join("projects");
     for project_dir in sorted_entries(&projects) {
         let dir = project_dir.join("memory");
@@ -114,6 +112,9 @@ pub fn memory(roots: &Roots, scan: &mut Scan) {
     };
     let dir = projects.join(project_key(project)).join("memory");
     for file in sorted_entries(&dir).into_iter().filter(|p| is_markdown(p)) {
+        if !seen.first(&file) {
+            continue;
+        }
         let Some(text) = read_text(&file) else {
             continue;
         };
@@ -199,10 +200,6 @@ fn relative(path: &Path, base: &Path, depth: usize) -> String {
     format!("{}{inner}", "../".repeat(depth))
 }
 
-fn identity(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
 fn name_of(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -238,7 +235,11 @@ mod tests {
         home.write("work/app/.git/CLAUDE.md", "skipped");
         home.write("work/app/a/b/c/d/e/f/CLAUDE.md", "too deep");
         let mut sources = Vec::new();
-        claude_md(&home.roots(Some("work/app")), &mut sources);
+        claude_md(
+            &home.roots(Some("work/app")),
+            &mut Seen::default(),
+            &mut sources,
+        );
         let found = rows(&home, &sources);
         let expected = vec![
             (Scope::User, "CLAUDE.md", Loading::Always, 10),
@@ -263,7 +264,11 @@ mod tests {
         home.write("home/.claude/CLAUDE.md", "user rules");
         home.write("home/work/CLAUDE.md", "project");
         let mut sources = Vec::new();
-        claude_md(&home.roots(Some("home/work")), &mut sources);
+        claude_md(
+            &home.roots(Some("home/work")),
+            &mut Seen::default(),
+            &mut sources,
+        );
         assert_eq!(
             rows(&home, &sources),
             vec![
@@ -294,7 +299,11 @@ mod tests {
         );
         home.write("home/.claude/projects/-empty/memory/.keep", "");
         let mut scan = Scan::default();
-        memory(&home.roots(Some("work/app")), &mut scan);
+        memory(
+            &home.roots(Some("work/app")),
+            &mut Seen::default(),
+            &mut scan,
+        );
         assert_eq!(
             rows(&home, &scan.sources),
             vec![

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    Loading, Roots, Scope, Settings, Source, SourceKind, display, frontmatter, is_markdown,
+    Loading, Roots, Scope, Seen, Settings, Source, SourceKind, display, frontmatter, is_markdown,
     read_json, read_text, sorted_entries,
 };
 
@@ -47,10 +47,13 @@ pub fn plugins(roots: &Roots, settings: &Settings, sources: &mut Vec<Source>) ->
     enabled
 }
 
-pub fn skills(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
+pub fn skills(roots: &Roots, plugins: &[Plugin], seen: &mut Seen, sources: &mut Vec<Source>) {
     let mut add = |scope: Scope, dir: &Path, plugin: Option<&str>| {
         for skill_dir in sorted_entries(dir) {
             let file = skill_dir.join("SKILL.md");
+            if !file.is_file() || !seen.first(&file) {
+                continue;
+            }
             let Some(text) = read_text(&file) else {
                 continue;
             };
@@ -96,9 +99,9 @@ pub fn skills(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
     }
 }
 
-pub fn agents(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
+pub fn agents(roots: &Roots, plugins: &[Plugin], seen: &mut Seen, sources: &mut Vec<Source>) {
     for (scope, dir, plugin) in definition_dirs(roots, plugins, "agents") {
-        for file in sorted_entries(&dir).into_iter().filter(|p| is_markdown(p)) {
+        for file in definitions(&dir, seen) {
             let Some(text) = read_text(&file) else {
                 continue;
             };
@@ -123,10 +126,11 @@ pub fn output_styles(
     roots: &Roots,
     plugins: &[Plugin],
     settings: &Settings,
+    seen: &mut Seen,
     sources: &mut Vec<Source>,
 ) {
     for (scope, dir, plugin) in definition_dirs(roots, plugins, "output-styles") {
-        for file in sorted_entries(&dir).into_iter().filter(|p| is_markdown(p)) {
+        for file in definitions(&dir, seen) {
             let Some(text) = read_text(&file) else {
                 continue;
             };
@@ -152,6 +156,13 @@ pub fn output_styles(
             });
         }
     }
+}
+
+fn definitions(dir: &Path, seen: &mut Seen) -> Vec<PathBuf> {
+    sorted_entries(dir)
+        .into_iter()
+        .filter(|path| is_markdown(path) && seen.first(path))
+        .collect()
 }
 
 fn definition_dirs(

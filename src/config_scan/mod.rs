@@ -3,6 +3,7 @@ mod frontmatter;
 mod instructions;
 mod mcp;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -79,15 +80,26 @@ pub struct Scan {
 
 pub fn scan(roots: &Roots) -> Scan {
     let mut scan = Scan::default();
-    instructions::claude_md(roots, &mut scan.sources);
-    instructions::memory(roots, &mut scan);
+    let mut seen = Seen::default();
+    instructions::claude_md(roots, &mut seen, &mut scan.sources);
+    instructions::memory(roots, &mut seen, &mut scan);
     let settings = Settings::read(roots);
     let plugins = extensions::plugins(roots, &settings, &mut scan.sources);
-    extensions::skills(roots, &plugins, &mut scan.sources);
-    extensions::agents(roots, &plugins, &mut scan.sources);
-    extensions::output_styles(roots, &plugins, &settings, &mut scan.sources);
+    extensions::skills(roots, &plugins, &mut seen, &mut scan.sources);
+    extensions::agents(roots, &plugins, &mut seen, &mut scan.sources);
+    extensions::output_styles(roots, &plugins, &settings, &mut seen, &mut scan.sources);
     mcp::servers(roots, &plugins, &mut scan.sources);
     scan
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Seen(HashSet<PathBuf>);
+
+impl Seen {
+    pub fn first(&mut self, path: &Path) -> bool {
+        self.0
+            .insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -267,6 +279,40 @@ mod tests {
                 (SourceKind::Skill, "tidy")
             ]
         );
+    }
+
+    #[test]
+    fn a_project_at_the_home_directory_counts_every_source_once() {
+        let home = Home::new();
+        home.write("home/.claude/CLAUDE.md", "rules");
+        home.write("home/.claude/rules/style.md", "be terse");
+        home.write(
+            "home/.claude/skills/tidy/SKILL.md",
+            "---\nname: tidy\ndescription: Tidy up\n---\nbody",
+        );
+        home.write(
+            "home/.claude/agents/reviewer.md",
+            "---\nname: reviewer\ndescription: Reviews\n---\n",
+        );
+        home.write("home/.claude/output-styles/terse.md", "Be terse.");
+        let found = scan(&home.roots(Some("home")));
+        let mut names: Vec<(SourceKind, &str)> = found
+            .sources
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                (SourceKind::ClaudeMd, "CLAUDE.md"),
+                (SourceKind::ClaudeMd, "rules/style.md"),
+                (SourceKind::Skill, "tidy"),
+                (SourceKind::Agent, "reviewer"),
+                (SourceKind::OutputStyle, "terse"),
+            ]
+        );
+        assert!(found.sources.iter().all(|s| s.scope == Scope::User));
     }
 
     #[test]
