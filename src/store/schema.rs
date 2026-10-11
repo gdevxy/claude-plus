@@ -179,6 +179,38 @@ ALTER TABLE attachments ADD COLUMN removed_names TEXT NOT NULL DEFAULT '[]';
 CREATE INDEX prompts_by_session ON prompts(session_id, ts);
 INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM attachments);
 "#,
+    r#"
+CREATE TABLE accounts (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    label_is_custom INTEGER NOT NULL DEFAULT 0,
+    organization_type TEXT,
+    billing_type TEXT,
+    first_seen_ms INTEGER NOT NULL
+);
+CREATE TABLE account_periods (
+    id INTEGER PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    from_ms INTEGER NOT NULL,
+    to_ms INTEGER
+);
+CREATE INDEX account_periods_by_time ON account_periods(from_ms);
+CREATE TABLE session_accounts (
+    session_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    source TEXT NOT NULL
+);
+CREATE INDEX session_accounts_by_account ON session_accounts(account_id);
+CREATE TABLE budgets (
+    account_id TEXT PRIMARY KEY,
+    amount_usd REAL NOT NULL,
+    period TEXT NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+ALTER TABLE limit_samples ADD COLUMN account_id TEXT;
+CREATE INDEX limit_samples_by_account ON limit_samples(account_id, window, ts_ms);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {

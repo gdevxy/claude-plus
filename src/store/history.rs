@@ -75,7 +75,7 @@ const SESSIONS_SPENDING_BETWEEN: &str = "SELECT id, project, cwd, title FROM ses
      ORDER BY id";
 
 const LIMIT_SAMPLES_BETWEEN: &str =
-    "SELECT ts_ms, session_id, model, window, used_pct, resets_at_ms
+    "SELECT ts_ms, session_id, account_id, model, window, used_pct, resets_at_ms
      FROM limit_samples WHERE window = ?1 AND ts_ms >= ?2 AND ts_ms < ?3 ORDER BY ts_ms, id";
 
 fn compactions_sql() -> String {
@@ -179,10 +179,11 @@ impl Store {
             Ok(LimitSample {
                 ts_ms: r.get(0)?,
                 session_id: r.get(1)?,
-                model: r.get(2)?,
-                window: r.get(3)?,
-                used_pct: r.get(4)?,
-                resets_at_ms: r.get(5)?,
+                account_id: r.get(2)?,
+                model: r.get(3)?,
+                window: r.get(4)?,
+                used_pct: r.get(5)?,
+                resets_at_ms: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -248,6 +249,7 @@ mod tests {
             w.limit_sample(&LimitSample {
                 ts_ms,
                 session_id: "s1".into(),
+                account_id: None,
                 model: None,
                 window: window.into(),
                 used_pct,

@@ -156,6 +156,7 @@ pub(super) fn fixture() -> Store {
         w.limit_sample(&LimitSample {
             ts_ms: utc(at) * 1000,
             session_id: "s1".into(),
+            account_id: None,
             model: Some(OPUS.into()),
             window: FIVE_HOUR.into(),
             used_pct,

@@ -4,13 +4,14 @@ use rusqlite::{OptionalExtension, params};
 use super::{Store, Writer};
 
 pub const RESETS_AT_TOLERANCE_MS: i64 = 60_000;
-const SPEND_SINCE: &str = "SELECT ts, model, cost_usd FROM requests
+const SPEND_SINCE: &str = "SELECT ts, session_id, model, cost_usd FROM requests
      WHERE ts >= (?1 + 999) / 1000 AND cost_usd IS NOT NULL ORDER BY ts";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LimitSample {
     pub ts_ms: i64,
     pub session_id: String,
+    pub account_id: Option<String>,
     pub model: Option<String>,
     pub window: String,
     pub used_pct: f64,
@@ -20,6 +21,7 @@ pub struct LimitSample {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpendPoint {
     pub ts_ms: i64,
+    pub session_id: String,
     pub model: String,
     pub cost_usd: f64,
 }
@@ -27,6 +29,7 @@ pub struct SpendPoint {
 impl LimitSample {
     pub fn repeats(&self, other: &LimitSample) -> bool {
         self.window == other.window
+            && self.account_id == other.account_id
             && self.used_pct == other.used_pct
             && match (self.resets_at_ms, other.resets_at_ms) {
                 (Some(a), Some(b)) => (a - b).abs() <= RESETS_AT_TOLERANCE_MS,
@@ -41,22 +44,23 @@ impl Writer<'_> {
         let previous = self
             .tx
             .prepare_cached(
-                "SELECT ts_ms, session_id, model, window, used_pct, resets_at_ms FROM limit_samples
-                 WHERE window = ?1 AND ts_ms <= ?2 ORDER BY ts_ms DESC, id DESC LIMIT 1",
+                "SELECT ts_ms, session_id, account_id, model, window, used_pct, resets_at_ms FROM limit_samples
+                 WHERE window = ?1 AND account_id IS ?3 AND ts_ms <= ?2 ORDER BY ts_ms DESC, id DESC LIMIT 1",
             )?
-            .query_row(params![sample.window, sample.ts_ms], read_sample)
+            .query_row(params![sample.window, sample.ts_ms, sample.account_id], read_sample)
             .optional()?;
         if previous.is_some_and(|previous| previous.repeats(sample)) {
             return Ok(false);
         }
         self.tx
             .prepare_cached(
-                "INSERT INTO limit_samples (ts_ms, session_id, model, window, used_pct, resets_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO limit_samples (ts_ms, session_id, account_id, model, window, used_pct, resets_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?
             .execute(params![
                 sample.ts_ms,
                 sample.session_id,
+                sample.account_id,
                 sample.model,
                 sample.window,
                 sample.used_pct,
@@ -76,8 +80,8 @@ impl Writer<'_> {
 impl Store {
     pub fn limit_samples_since(&self, since_ms: i64) -> Result<Vec<LimitSample>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT ts_ms, session_id, model, window, used_pct, resets_at_ms FROM limit_samples
-             WHERE ts_ms >= ?1 ORDER BY window, ts_ms, id",
+            "SELECT ts_ms, session_id, account_id, model, window, used_pct, resets_at_ms FROM limit_samples
+             WHERE ts_ms >= ?1 ORDER BY account_id, window, ts_ms, id",
         )?;
         let rows = statement.query_map([since_ms], read_sample)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -88,8 +92,9 @@ impl Store {
         let rows = statement.query_map([since_ms], |r| {
             Ok(SpendPoint {
                 ts_ms: r.get::<_, i64>(0)? * 1000,
-                model: r.get(1)?,
-                cost_usd: r.get(2)?,
+                session_id: r.get(1)?,
+                model: r.get(2)?,
+                cost_usd: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -108,10 +113,11 @@ fn read_sample(r: &rusqlite::Row) -> rusqlite::Result<LimitSample> {
     Ok(LimitSample {
         ts_ms: r.get(0)?,
         session_id: r.get(1)?,
-        model: r.get(2)?,
-        window: r.get(3)?,
-        used_pct: r.get(4)?,
-        resets_at_ms: r.get(5)?,
+        account_id: r.get(2)?,
+        model: r.get(3)?,
+        window: r.get(4)?,
+        used_pct: r.get(5)?,
+        resets_at_ms: r.get(6)?,
     })
 }
 #[cfg(test)]
@@ -124,6 +130,7 @@ mod tests {
         LimitSample {
             ts_ms,
             session_id: "s1".into(),
+            account_id: None,
             model: Some("claude-opus-5-5".into()),
             window: window.into(),
             used_pct,
@@ -179,6 +186,22 @@ mod tests {
                 (6_000, "spend_limit".into())
             ]
         );
+    }
+
+    #[test]
+    fn the_same_reading_from_another_account_is_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let mine = sample(1_000, "five_hour", 10.0, Some(9_000_000));
+        let theirs = LimitSample {
+            account_id: Some("oauth:b".into()),
+            ts_ms: 2_000,
+            ..mine.clone()
+        };
+        assert!(w.limit_sample(&mine).unwrap());
+        assert!(w.limit_sample(&theirs).unwrap());
+        w.commit().unwrap();
+        assert_eq!(store.limit_samples_since(0).unwrap().len(), 2);
     }
 
     #[test]

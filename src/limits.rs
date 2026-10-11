@@ -64,6 +64,7 @@ pub fn samples_from_measure(session_id: &str, ts_ms: i64, data: &Value) -> Vec<L
             Some(LimitSample {
                 ts_ms,
                 session_id: session_id.to_string(),
+                account_id: None,
                 model: model.clone(),
                 window: limit.get("kind")?.as_str()?.to_string(),
                 used_pct: limit.get("percentUsed")?.as_f64()?,
@@ -276,6 +277,7 @@ mod tests {
         LimitSample {
             ts_ms: T0 + minute * MINUTE,
             session_id: "s1".into(),
+            account_id: None,
             model: Some("claude-opus-5-5".into()),
             window: window.into(),
             used_pct,
@@ -286,6 +288,7 @@ mod tests {
     fn spend(minute: i64, model: &str, cost_usd: f64) -> SpendPoint {
         SpendPoint {
             ts_ms: T0 + minute * MINUTE,
+            session_id: "s1".into(),
             model: model.into(),
             cost_usd,
         }
@@ -312,6 +315,7 @@ mod tests {
                 LimitSample {
                     ts_ms: 42,
                     session_id: "s1".into(),
+                    account_id: None,
                     model: Some("claude-opus-5-5".into()),
                     window: "five_hour".into(),
                     used_pct: 54.5,
@@ -320,6 +324,7 @@ mod tests {
                 LimitSample {
                     ts_ms: 42,
                     session_id: "s1".into(),
+                    account_id: None,
                     model: Some("claude-opus-5-5".into()),
                     window: "spend_limit".into(),
                     used_pct: 3.0,
