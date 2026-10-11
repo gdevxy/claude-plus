@@ -122,7 +122,14 @@ impl Fixture {
             gap_ms,
             ttl_ms: FIVE_MINUTES_MS,
             kinds: kinds.iter().map(|k| k.to_string()).collect(),
+            mcp_changed: false,
         });
+    }
+
+    pub fn mcp_changed(&mut self) {
+        if let Some(last) = self.rebuilds.last_mut() {
+            last.mcp_changed = true;
+        }
     }
 
     pub fn prompt(&mut self, session: &str, ts: i64) {

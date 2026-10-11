@@ -73,6 +73,7 @@ pub struct Rebuilt {
     pub gap_ms: i64,
     pub ttl_ms: i64,
     pub kinds: Vec<String>,
+    pub mcp_changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

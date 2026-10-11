@@ -5,6 +5,7 @@ use anyhow::Result;
 use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 
+use super::cache::mcp_changes;
 use super::usage::LARGE_RESULT_CHARS;
 use super::words::{count, money};
 use super::{
@@ -17,7 +18,7 @@ use crate::context_model::{self, Uses, breakdown, items};
 use crate::history::{Range, Rates, calendar};
 use crate::limits;
 use crate::pricing::PriceTable;
-use crate::store::{CompactionPoint, SpentAdjustment, SpentRequest, Store};
+use crate::store::{CompactionPoint, PrefixChange, SpentAdjustment, SpentRequest, Store};
 use crate::timeline::{Thread, Timeline};
 
 pub const MONTH_DAYS: i64 = 30;
@@ -277,13 +278,19 @@ fn rebuilds(
                 .filter(|r| r.session_id == session)
                 .map(|r| r.point.clone()),
         );
-        let kinds = store.prefix_kinds_between(session, from, until)?;
+        let announced = store.prefix_kinds_between(session, i64::MIN, until)?;
+        let changed = mcp_changes(&announced);
+        let kinds: Vec<(&PrefixChange, bool)> = announced
+            .iter()
+            .zip(changed)
+            .filter(|(k, _)| k.ts >= from)
+            .collect();
         let compacted = store.compactions_between(session, from, until)?;
         let timeline = Timeline::build(&points, &[]);
         let main = timeline.main();
         let (ttl, _) = cache_model::ttl_of(&Thread::Main, &main, false);
-        let changes: Vec<i64> = kinds.iter().map(|k| k.ts).collect();
-        let compacted_ts: Vec<i64> = compacted.iter().map(|c| c.ts).collect();
+        let changes: Vec<i64> = kinds.iter().map(|(k, _)| k.ts).collect();
+        let compacted_ts: Vec<i64> = compacted.iter().filter(|c| c.main).map(|c| c.ts).collect();
         let found = cache_model::rebuilds(
             &main,
             ttl,
@@ -301,16 +308,17 @@ fn rebuilds(
                 .rev()
                 .find(|o| o.ts_ms < rebuild.ts_ms)
                 .map_or(rebuild.ts_ms, |o| o.ts_ms);
-            let between: BTreeSet<String> = kinds
+            let between: Vec<&(&PrefixChange, bool)> = kinds
                 .iter()
-                .filter(|k| before < k.ts * 1000 && k.ts * 1000 <= rebuild.ts_ms)
-                .map(|k| k.kind.clone())
+                .filter(|(k, _)| before < k.ts * 1000 && k.ts * 1000 <= rebuild.ts_ms)
                 .collect();
+            let names: BTreeSet<String> = between.iter().map(|(k, _)| k.kind.clone()).collect();
             rebuilt.push(Rebuilt {
                 session_id: session.to_string(),
                 gap_ms: rebuild.ts_ms - before,
                 ttl_ms: ttl.millis(),
-                kinds: between.into_iter().collect(),
+                kinds: names.into_iter().collect(),
+                mcp_changed: between.iter().any(|(_, changed)| *changed),
                 rebuild,
             });
         }
@@ -352,7 +360,7 @@ mod tests {
     use super::*;
     use crate::config_scan::Roots;
     use crate::insights::RuleId;
-    use crate::store::{PromptRow, RequestPoint, RequestRow, SessionRow};
+    use crate::store::{AttachmentRow, PromptRow, RequestPoint, RequestRow, SessionRow};
     use crate::transcript::TokenCounts;
 
     const OPUS: &str = "claude-opus-5-5";
@@ -602,5 +610,76 @@ mod tests {
         assert!((recap.cost_usd - (paid + 0.84)).abs() < 1e-9);
         assert_eq!(recap.win.as_deref(), Some("cache hits saved you $0.38"));
         assert_eq!(report.wins.hit_streak_days, 0);
+    }
+
+    fn rebuilt_after(announcements: &[(&str, &str, &[&str])]) -> Rebuilt {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        for (key, request) in [
+            ("r1", spent("2026-10-10T10:00:00Z", 0, 100_000)),
+            ("r2", spent("2026-10-10T10:02:00Z", 0, 100_000)),
+        ] {
+            w.request(&RequestRow {
+                key: key.into(),
+                session_id: request.session_id,
+                ts: request.point.ts,
+                sent_ts: None,
+                model: request.point.model,
+                tokens: request.point.tokens,
+                cost_usd: request.cost_usd,
+                is_sidechain: false,
+                agent_id: None,
+                skill: None,
+                mcp_server: None,
+                effort: None,
+            })
+            .unwrap();
+        }
+        let main = w.file("/p/-p/s1.jsonl", 0, 0).unwrap();
+        let agent = w.file("/p/-p/s1/subagents/agent-a.jsonl", 0, 0).unwrap();
+        for (line_no, (at, file, names)) in [("2026-10-10T09:59:00Z", "main", &["mcp__a__x"][..])]
+            .into_iter()
+            .chain(announcements.iter().copied())
+            .enumerate()
+        {
+            w.attachment(&AttachmentRow {
+                file_id: if file == "main" { main } else { agent },
+                line_no: line_no as u64,
+                session_id: "s1".into(),
+                ts: Some(utc(at)),
+                kind: "deferred_tools_delta".into(),
+                chars: 10,
+                names: names.iter().map(|n| n.to_string()).collect(),
+                removed: vec![],
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        let since = utc("2026-10-01T00:00:00Z");
+        let until = utc("2026-10-11T00:00:00Z");
+        let requests = store.requests_between(since, until).unwrap();
+        let (mut found, _) = rebuilds(
+            &store,
+            &PriceTable::bundled(),
+            &requests,
+            since,
+            until,
+            until * 1000,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        found.remove(0)
+    }
+
+    #[test]
+    fn a_bust_is_an_mcp_change_only_when_the_main_thread_announced_new_tools_between_requests() {
+        let again = rebuilt_after(&[("2026-10-10T10:01:00Z", "main", &["mcp__a__x"])]);
+        assert_eq!(again.kinds, ["deferred_tools_delta"]);
+        assert!(!again.mcp_changed);
+        let subagent = rebuilt_after(&[("2026-10-10T10:01:00Z", "agent", &["mcp__b__y"])]);
+        assert!(subagent.kinds.is_empty());
+        assert_eq!(subagent.rebuild.cause, cache_model::RebuildCause::Unknown);
+        let added = rebuilt_after(&[("2026-10-10T10:01:00Z", "main", &["mcp__b__y"])]);
+        assert!(added.mcp_changed);
     }
 }

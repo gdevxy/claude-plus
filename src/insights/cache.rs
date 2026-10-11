@@ -1,14 +1,44 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::words::{count, duration, money, tokens};
-use super::{Confidence, Draft, Finding, InsightContext, Rebuilt, Rule, RuleId, median};
+use super::{
+    Confidence, Draft, Finding, InsightContext, MIN_WEEKLY_USD, Rebuilt, Rule, RuleId,
+    WEEKS_IN_WINDOW, median,
+};
 use crate::cache_model::RebuildCause;
+use crate::store::PrefixChange;
 
-pub const MCP_KINDS: &[&str] = &[
-    "mcp_instructions_delta",
-    "deferred_tools_record",
-    "deferred_tools_delta",
+pub const SETUP_KINDS: &[&str] = &[
+    "skill_listing",
+    "instructions",
+    "nested_memory",
+    "agent_listing_delta",
 ];
+pub const MCP_TOOL_PREFIX: &str = "mcp__";
+
+pub fn mcp_changes(changes: &[PrefixChange]) -> Vec<bool> {
+    let mut tools: BTreeSet<&str> = BTreeSet::new();
+    let mut servers: BTreeSet<&str> = BTreeSet::new();
+    changes
+        .iter()
+        .map(|change| {
+            let (known, only_mcp) = match change.kind.as_str() {
+                "deferred_tools_delta" => (&mut tools, true),
+                "mcp_instructions_delta" => (&mut servers, false),
+                _ => return false,
+            };
+            let counted = |name: &&String| !only_mcp || name.starts_with(MCP_TOOL_PREFIX);
+            let mut changed = false;
+            for name in change.names.iter().filter(counted) {
+                changed |= known.insert(name);
+            }
+            for name in change.removed.iter().filter(counted) {
+                changed |= known.remove(name.as_str());
+            }
+            changed
+        })
+        .collect()
+}
 
 pub struct IdleRebuilds;
 
@@ -58,36 +88,42 @@ impl Rule for IdleRebuilds {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Bust {
     ModelSwitch,
-    McpReconnect,
+    McpChange,
     SetupChange,
+    NoKnownCause,
 }
 
 impl Bust {
     fn of(rebuilt: &Rebuilt) -> Option<Self> {
+        let setup = rebuilt
+            .kinds
+            .iter()
+            .any(|k| SETUP_KINDS.contains(&k.as_str()));
         match rebuilt.rebuild.cause {
             RebuildCause::ModelSwitch => Some(Bust::ModelSwitch),
-            RebuildCause::PrefixChanged
-                if rebuilt
-                    .kinds
-                    .iter()
-                    .any(|k| MCP_KINDS.contains(&k.as_str())) =>
-            {
-                Some(Bust::McpReconnect)
-            }
-            RebuildCause::PrefixChanged => Some(Bust::SetupChange),
-            RebuildCause::Idle | RebuildCause::Unknown => None,
+            RebuildCause::PrefixChanged if rebuilt.mcp_changed => Some(Bust::McpChange),
+            RebuildCause::PrefixChanged if setup => Some(Bust::SetupChange),
+            RebuildCause::PrefixChanged | RebuildCause::Unknown => Some(Bust::NoKnownCause),
+            RebuildCause::Idle => None,
         }
     }
 
     fn line(self, times: u64, usd: f64) -> String {
         let what = match self {
             Bust::ModelSwitch => count(times, "model switch", "model switches"),
-            Bust::McpReconnect => count(times, "MCP reconnect", "MCP reconnects"),
+            Bust::McpChange => count(times, "MCP tool change", "MCP tool changes"),
             Bust::SetupChange => count(
                 times,
                 "change to CLAUDE.md, skills or agents",
                 "changes to CLAUDE.md, skills or agents",
             ),
+            Bust::NoKnownCause => {
+                return format!(
+                    "{} mid-session with no cause in the transcripts, {}",
+                    count(times, "rewrite", "rewrites"),
+                    money(usd)
+                );
+            }
         };
         format!("{what} mid-session, {}", money(usd))
     }
@@ -97,8 +133,11 @@ impl Bust {
             Bust::ModelSwitch => {
                 "pick the model when a session starts rather than switching midway"
             }
-            Bust::McpReconnect => "keep MCP servers connected for the whole session",
+            Bust::McpChange => "keep MCP servers connected for the whole session",
             Bust::SetupChange => "edit CLAUDE.md, skills and agents between sessions",
+            Bust::NoKnownCause => {
+                "watch for warm caches rewritten mid-session, the transcripts show no cause"
+            }
         }
     }
 }
@@ -115,26 +154,45 @@ impl Rule for CacheBusts {
                 entry.1 += rebuilt.rebuild.extra_usd.unwrap_or(0.0);
             }
         }
-        let Some((&top, _)) = busts
-            .iter()
-            .max_by(|a, b| a.1.1.total_cmp(&b.1.1).then_with(|| b.0.cmp(a.0)))
-        else {
-            return Vec::new();
-        };
         let mut ordered: Vec<(Bust, (u64, f64))> = busts.into_iter().collect();
         ordered.sort_by(|a, b| b.1.1.total_cmp(&a.1.1).then_with(|| a.0.cmp(&b.0)));
-        let usd = ordered.iter().map(|(_, (_, usd))| usd).sum();
+        let evidence = ordered
+            .iter()
+            .map(|(bust, (times, usd))| bust.line(*times, *usd))
+            .collect();
+        let known: Vec<&(Bust, (u64, f64))> = ordered
+            .iter()
+            .filter(|(bust, _)| *bust != Bust::NoKnownCause)
+            .collect();
+        let Some((top, _)) = known.first() else {
+            let unexplained: f64 = ordered.iter().map(|(_, (_, usd))| usd).sum();
+            if unexplained / WEEKS_IN_WINDOW < MIN_WEEKLY_USD {
+                return Vec::new();
+            }
+            return vec![
+                Draft {
+                    rule: RuleId::CacheBusts,
+                    tip: Bust::NoKnownCause.tip().into(),
+                    evidence,
+                    confidence: Confidence::Low,
+                    how: "Counts main-thread requests in the last 14 days that rewrote a warm cache \
+                          although the model, the MCP tools, CLAUDE.md, skills and agents stayed the same between them. \
+                          The transcripts do not say why, so no saving is claimed."
+                        .into(),
+                }
+                .into_finding(),
+            ];
+        };
+        let usd = known.iter().map(|(_, (_, usd))| usd).sum();
         let draft = Draft {
             rule: RuleId::CacheBusts,
             tip: top.tip().into(),
-            evidence: ordered
-                .iter()
-                .map(|(bust, (times, usd))| bust.line(*times, *usd))
-                .collect(),
+            evidence,
             confidence: Confidence::Medium,
             how: "Counts main-thread requests in the last 14 days that rewrote a warm cache because the model changed, \
-                  an MCP server reconnected or CLAUDE.md, skills or agents changed. \
-                  The saving is what those rewrites cost above a warm cache read."
+                  an MCP server added or removed tools or CLAUDE.md, skills or agents changed. \
+                  The saving is what those rewrites cost above a warm cache read. \
+                  Rewrites with no cause in the transcripts are listed but not counted."
                 .into(),
         };
         ctx.priced(draft, usd).into_iter().collect()
@@ -199,6 +257,7 @@ mod tests {
             60_000,
             &["deferred_tools_delta"],
         );
+        fixture.mcp_changed();
         fixture.rebuilt(
             "s1",
             RebuildCause::PrefixChanged,
@@ -206,6 +265,7 @@ mod tests {
             60_000,
             &["mcp_instructions_delta", "skill_listing"],
         );
+        fixture.mcp_changed();
         fixture.rebuilt(
             "s2",
             RebuildCause::PrefixChanged,
@@ -214,7 +274,7 @@ mod tests {
             &["instructions"],
         );
         fixture.rebuilt("s2", RebuildCause::Idle, 3.00, 600_000, &[]);
-        fixture.rebuilt("s2", RebuildCause::Unknown, 3.00, 60_000, &[]);
+        fixture.rebuilt("s2", RebuildCause::Unknown, 0.15, 60_000, &[]);
         let findings = CacheBusts.evaluate(&fixture.ctx());
         assert_eq!(findings.len(), 1);
         let finding = &findings[0];
@@ -227,9 +287,96 @@ mod tests {
         assert_eq!(
             finding.evidence,
             [
-                "2 MCP reconnects mid-session, $0.90",
+                "2 MCP tool changes mid-session, $0.90",
                 "1 model switch mid-session, $0.30",
                 "1 change to CLAUDE.md, skills or agents mid-session, $0.20",
+                "1 rewrite mid-session with no cause in the transcripts, $0.15",
+            ]
+        );
+    }
+
+    #[test]
+    fn mcp_records_without_a_tool_change_leave_the_bust_to_the_other_changes() {
+        let mut fixture = Fixture::new();
+        fixture.rebuilt(
+            "s1",
+            RebuildCause::PrefixChanged,
+            0.60,
+            60_000,
+            &["deferred_tools_record", "instructions"],
+        );
+        let finding = &CacheBusts.evaluate(&fixture.ctx())[0];
+        assert_eq!(
+            finding.tip,
+            "edit CLAUDE.md, skills and agents between sessions"
+        );
+        assert_eq!(
+            finding.evidence,
+            ["1 change to CLAUDE.md, skills or agents mid-session, $0.60"]
+        );
+    }
+
+    #[test]
+    fn busts_with_no_cause_in_the_transcripts_claim_no_saving() {
+        let mut fixture = Fixture::new();
+        fixture.rebuilt(
+            "s1",
+            RebuildCause::PrefixChanged,
+            2.15,
+            60_000,
+            &["deferred_tools_record", "deferred_tools_delta"],
+        );
+        fixture.rebuilt("s1", RebuildCause::Unknown, 0.50, 60_000, &[]);
+        let findings = CacheBusts.evaluate(&fixture.ctx());
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(
+            finding.tip,
+            "watch for warm caches rewritten mid-session, the transcripts show no cause"
+        );
+        assert_eq!(finding.saving_usd, None);
+        assert_eq!(finding.confidence, Confidence::Low);
+        assert_eq!(
+            finding.evidence,
+            ["2 rewrites mid-session with no cause in the transcripts, $2.65"]
+        );
+        let mut trivial = Fixture::new();
+        trivial.rebuilt("s1", RebuildCause::Unknown, 0.19, 60_000, &[]);
+        assert!(CacheBusts.evaluate(&trivial.ctx()).is_empty());
+    }
+
+    fn change(kind: &str, names: &[&str], removed: &[&str]) -> PrefixChange {
+        PrefixChange {
+            ts: 0,
+            kind: kind.into(),
+            names: names.iter().map(|n| n.to_string()).collect(),
+            removed: removed.iter().map(|n| n.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn only_a_delta_that_adds_or_removes_mcp_tools_or_servers_changes_them() {
+        let changes = [
+            change("mcp_instructions_delta", &["linear"], &[]),
+            change(
+                "deferred_tools_delta",
+                &["WebFetch", "mcp__linear__search"],
+                &[],
+            ),
+            change("deferred_tools_record", &["mcp__docs__find"], &[]),
+            change("deferred_tools_delta", &["mcp__linear__search"], &[]),
+            change("mcp_instructions_delta", &["linear"], &[]),
+            change("deferred_tools_delta", &["WebSearch"], &[]),
+            change("deferred_tools_delta", &[], &["mcp__linear__search"]),
+            change("deferred_tools_delta", &["mcp__linear__search"], &[]),
+            change("mcp_instructions_delta", &["docs"], &[]),
+            change("mcp_instructions_delta", &[], &["docs"]),
+            change("instructions", &["mcp__x__y"], &[]),
+        ];
+        assert_eq!(
+            mcp_changes(&changes),
+            [
+                true, true, false, false, false, false, true, true, true, true, false
             ]
         );
     }
