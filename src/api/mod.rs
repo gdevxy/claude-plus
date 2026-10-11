@@ -1,4 +1,5 @@
 pub mod client;
+pub mod context;
 pub mod events;
 pub mod live;
 pub mod wire;
@@ -37,11 +38,12 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_SOCKET_PATH: usize = if cfg!(target_os = "linux") { 107 } else { 103 };
 const WRITER_EXITED: &str = "the claude-plus writer stopped unexpectedly";
-const REBUILDING: &str = "the store is being rebuilt";
+pub(crate) const REBUILDING: &str = "the store is being rebuilt";
 const DRAIN: Duration = Duration::from_secs(2);
 const ROUTES: &[(&str, Method)] = &[
     ("/health", Method::GET),
     ("/snapshot", Method::GET),
+    ("/context", Method::GET),
     ("/events", Method::POST),
     ("/import", Method::POST),
     ("/reindex", Method::POST),
@@ -78,6 +80,8 @@ pub struct State {
     pub prices: PriceTable,
     pub started: Instant,
     pub claude_dir: PathBuf,
+    pub claude_json: PathBuf,
+    pub scans: context::Scans,
     pub watching: AtomicBool,
     pub shutdown: Shutdown,
     pub log: Arc<Log>,
@@ -157,7 +161,7 @@ pub async fn serve(listener: UnixListener, state: Arc<State>) -> Result<()> {
     Ok(())
 }
 
-type Reply = Response<Full<Bytes>>;
+pub(crate) type Reply = Response<Full<Bytes>>;
 
 pub async fn handle<B>(state: Arc<State>, request: Request<B>) -> Reply
 where
@@ -169,6 +173,7 @@ where
     match (&method, path.as_str()) {
         (&Method::GET, "/health") => json(StatusCode::OK, &health(&state)),
         (&Method::GET, "/snapshot") => snapshot(state, request.uri().query()).await,
+        (&Method::GET, "/context") => context::context(state, request.uri().query()).await,
         (&Method::POST, "/events") => events(state, request.into_body()).await,
         (&Method::POST, "/import") => {
             state.log.info("import requested over the socket");
@@ -251,21 +256,23 @@ fn health(state: &State) -> Health {
     }
 }
 
-async fn snapshot(state: Arc<State>, query: Option<&str>) -> Reply {
+pub(crate) fn session_of(query: Option<&str>) -> Result<String, &'static str> {
     let session = query
         .unwrap_or("")
         .split('&')
         .find_map(|pair| pair.strip_prefix("session="))
-        .map(str::to_string);
-    let Some(session) = session else {
-        return failure(
-            StatusCode::BAD_REQUEST,
-            "session query parameter is required",
-        );
-    };
-    if !events::is_session_id(&session) {
-        return failure(StatusCode::BAD_REQUEST, events::SESSION_RULE);
+        .ok_or("session query parameter is required")?;
+    if !events::is_session_id(session) {
+        return Err(events::SESSION_RULE);
     }
+    Ok(session.to_string())
+}
+
+async fn snapshot(state: Arc<State>, query: Option<&str>) -> Reply {
+    let session = match session_of(query) {
+        Ok(session) => session,
+        Err(problem) => return failure(StatusCode::BAD_REQUEST, problem),
+    };
     let built = tokio::task::spawn_blocking(move || -> Result<Option<Snapshot>> {
         let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
         reader.reading(|reader| {
@@ -341,7 +348,7 @@ where
     )
 }
 
-fn json(status: StatusCode, body: &impl Serialize) -> Reply {
+pub(crate) fn json(status: StatusCode, body: &impl Serialize) -> Reply {
     let bytes = serde_json::to_vec(body).expect("wire types serialize");
     Response::builder()
         .status(status)
@@ -350,7 +357,7 @@ fn json(status: StatusCode, body: &impl Serialize) -> Reply {
         .expect("valid response")
 }
 
-fn failure(status: StatusCode, message: impl Into<String>) -> Reply {
+pub(crate) fn failure(status: StatusCode, message: impl Into<String>) -> Reply {
     json(
         status,
         &ErrorBody {

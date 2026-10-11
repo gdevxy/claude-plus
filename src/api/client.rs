@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
 
 use super::wire::{ErrorBody, EventsAccepted, Health, ImportOutcome, Snapshot};
+use crate::context_model::ContextReport;
 use crate::ingest::Rebuilt;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -59,6 +60,15 @@ impl Client {
         self.call(
             Method::GET,
             &format!("/snapshot?session={session}"),
+            None,
+            self.timeout,
+        )
+    }
+
+    pub fn context(&self, session: &str) -> Result<ContextReport, ClientError> {
+        self.call(
+            Method::GET,
+            &format!("/context?session={session}"),
             None,
             self.timeout,
         )

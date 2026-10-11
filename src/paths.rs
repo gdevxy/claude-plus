@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub claude_dir: PathBuf,
+    pub claude_json: PathBuf,
     pub data_dir: PathBuf,
 }
 
@@ -34,6 +35,9 @@ impl Paths {
         plus_home: Option<PathBuf>,
     ) -> Self {
         Self {
+            claude_json: claude_config_dir
+                .as_ref()
+                .map_or_else(|| home.join(".claude.json"), |dir| dir.join(".claude.json")),
             claude_dir: claude_config_dir.unwrap_or_else(|| home.join(".claude")),
             data_dir: plus_home.unwrap_or_else(|| home.join(".claude-plus")),
         }
@@ -94,6 +98,7 @@ mod tests {
     fn defaults_live_under_home() {
         let paths = Paths::resolve(Path::new("/home/ada"), None, None);
         assert_eq!(paths.claude_dir, PathBuf::from("/home/ada/.claude"));
+        assert_eq!(paths.claude_json, PathBuf::from("/home/ada/.claude.json"));
         assert_eq!(paths.data_dir, PathBuf::from("/home/ada/.claude-plus"));
         assert_eq!(
             paths.projects_dir(),
@@ -125,6 +130,7 @@ mod tests {
             Some(PathBuf::from("/tmp/plus")),
         );
         assert_eq!(paths.claude_dir, PathBuf::from("/tmp/claude"));
+        assert_eq!(paths.claude_json, PathBuf::from("/tmp/claude/.claude.json"));
         assert_eq!(paths.data_dir, PathBuf::from("/tmp/plus"));
     }
 

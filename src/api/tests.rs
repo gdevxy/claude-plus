@@ -53,6 +53,8 @@ impl Server {
             prices: PriceTable::bundled(),
             started: Instant::now(),
             claude_dir: temp.path().join("claude"),
+            claude_json: temp.path().join("claude.json"),
+            scans: context::Scans::default(),
             watching: AtomicBool::new(true),
             shutdown: shutdown.clone(),
             log,
@@ -392,6 +394,61 @@ fn only_this_session_s_own_limits_say_it_runs_on_a_subscription() {
 }
 
 #[test]
+fn the_context_route_joins_the_live_breakdown_the_transcript_and_the_config() {
+    let server = Server::start();
+    let work = server.temp.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("CLAUDE.md"), "x".repeat(700)).unwrap();
+    std::fs::create_dir_all(server.temp.path().join("claude/skills/tidy")).unwrap();
+    std::fs::write(
+        server.temp.path().join("claude/skills/tidy/SKILL.md"),
+        "---\nname: tidy\ndescription: Tidy up\n---\n",
+    )
+    .unwrap();
+    server.client().import().unwrap();
+    let now = epoch_ms(SystemTime::now());
+    server
+        .client()
+        .send_events(&json!({"events": [
+            {"session": SESSION, "kind": "session.start", "ts_ms": now - 2000, "data": {"cwd": work.display().to_string()}},
+            {"session": SESSION, "kind": "session.usage", "ts_ms": now - 1000, "data": {
+                "model": "claude-opus-5-5", "totalTokens": 25300, "maxTokens": 200000, "rawMaxTokens": 200000, "percentage": 13,
+                "categories": [{"name": "Messages", "tokens": 25300, "color": "claude", "isDeferred": false, "kind": "used"}],
+                "memoryFiles": [{"path": work.join("CLAUDE.md").display().to_string(), "type": "Project", "tokens": 200}],
+                "mcpTools": [], "agents": []
+            }}
+        ]}))
+        .unwrap();
+    let report = server.client().context(SESSION).unwrap();
+    assert_eq!(report.v, 1);
+    assert_eq!(report.project_dir, Some(work.display().to_string()));
+    let live = report.live.unwrap();
+    assert_eq!((live.ts_ms, live.total_tokens), (now - 1000, 25_300));
+    assert_eq!(report.history.unwrap().measured_tokens, 25_010);
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.tokens))
+            .collect::<Vec<_>>(),
+        vec![("CLAUDE.md", 200)]
+    );
+    let groups: Vec<(crate::config_scan::SourceKind, u64)> = report
+        .config
+        .groups
+        .iter()
+        .map(|group| (group.kind, group.count))
+        .collect();
+    assert_eq!(
+        groups,
+        vec![
+            (crate::config_scan::SourceKind::ClaudeMd, 1),
+            (crate::config_scan::SourceKind::Skill, 1)
+        ]
+    );
+}
+
+#[test]
 fn bad_requests_are_answered_with_a_reason() {
     let server = Server::start();
     let cases = [
@@ -409,6 +466,21 @@ fn bad_requests_are_answered_with_a_reason() {
             400,
             events::SESSION_RULE,
         ),
+        (
+            Method::GET,
+            "/context",
+            "",
+            400,
+            "session query parameter is required",
+        ),
+        (
+            Method::GET,
+            "/context?session=a%2Fb",
+            "",
+            400,
+            events::SESSION_RULE,
+        ),
+        (Method::POST, "/context", "", 405, "use GET for /context"),
         (
             Method::POST,
             "/events",
@@ -502,16 +574,19 @@ fn health_answers_while_a_snapshot_holds_the_reader() {
 }
 
 #[test]
-fn snapshots_are_refused_while_the_store_is_being_rebuilt() {
+fn snapshots_and_context_are_refused_while_the_store_is_being_rebuilt() {
     let server = Server::start_with(|store| {
         let mut writer = store.writer().unwrap();
         writer.mark_reindex_pending(true).unwrap();
         writer.commit().unwrap();
     });
-    assert_eq!(
-        server.raw(Method::GET, &format!("/snapshot?session={SESSION}"), ""),
-        (503, json!({"error": "the store is being rebuilt"}))
-    );
+    for route in ["snapshot", "context"] {
+        assert_eq!(
+            server.raw(Method::GET, &format!("/{route}?session={SESSION}"), ""),
+            (503, json!({"error": "the store is being rebuilt"})),
+            "{route}"
+        );
+    }
     assert!(server.client().health().unwrap().ingest.rebuilding);
     server.client().import().unwrap();
     assert!(!server.client().health().unwrap().ingest.rebuilding);

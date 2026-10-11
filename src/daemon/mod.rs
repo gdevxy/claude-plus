@@ -69,6 +69,8 @@ fn run_locked(
         prices,
         started: Instant::now(),
         claude_dir: paths.claude_dir.clone(),
+        claude_json: paths.claude_json.clone(),
+        scans: api::context::Scans::default(),
         watching: AtomicBool::new(false),
         shutdown: Shutdown::default(),
         log: log.clone(),
