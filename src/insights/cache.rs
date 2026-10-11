@@ -6,7 +6,7 @@ use super::{
     WEEKS_IN_WINDOW, median,
 };
 use crate::cache_model::RebuildCause;
-use crate::store::{PrefixChange, SpentRequest};
+use crate::store::PrefixChange;
 
 pub const SETUP_KINDS: &[&str] = &[
     "skill_listing",
@@ -88,21 +88,14 @@ impl Rule for IdleRebuilds {
 
 fn avoidable_usd(ctx: &InsightContext, rebuilt: &Rebuilt) -> f64 {
     let extra = rebuilt.rebuild.extra_usd.unwrap_or(0.0);
-    let ts = rebuilt.rebuild.ts_ms.div_euclid(1000);
-    let session: Vec<&SpentRequest> = ctx
+    let base = ctx
         .main_requests()
         .filter(|r| r.session_id == rebuilt.session_id)
-        .collect();
-    let Some(request) = session.iter().find(|r| r.point.ts == ts) else {
-        return extra;
-    };
-    let base = session
-        .iter()
         .map(|r| r.point.tokens.cache_read + r.point.tokens.cache_write())
         .min()
         .unwrap_or(0)
         .min(rebuilt.rebuild.tokens);
-    (extra - ctx.rewrite_premium(request, base)).max(0.0)
+    (extra - ctx.rewrite_premium(&rebuilt.request, base)).max(0.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

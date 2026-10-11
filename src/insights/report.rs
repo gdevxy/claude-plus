@@ -308,7 +308,7 @@ fn rebuilds(
         let (ttl, _) = cache_model::ttl_of(&Thread::Main, &main, false);
         let changes: Vec<i64> = kinds.iter().map(|(k, _)| k.ts).collect();
         let compacted_ts: Vec<i64> = compacted.iter().filter(|c| c.main).map(|c| c.ts).collect();
-        let found = cache_model::rebuilds(
+        let found = cache_model::rebuilt_requests(
             &main,
             ttl,
             &Context {
@@ -319,7 +319,7 @@ fn rebuilds(
                 now_ms,
             },
         );
-        for rebuild in found.into_iter().filter(|r| r.ts_ms >= since * 1000) {
+        for (request, rebuild) in found.into_iter().filter(|(_, r)| r.ts_ms >= since * 1000) {
             let before = main
                 .iter()
                 .rev()
@@ -332,6 +332,7 @@ fn rebuilds(
             let names: BTreeSet<String> = between.iter().map(|(k, _)| k.kind.clone()).collect();
             rebuilt.push(Rebuilt {
                 session_id: session.to_string(),
+                request: request.clone(),
                 gap_ms: rebuild.ts_ms - before,
                 ttl_ms: ttl.millis(),
                 kinds: names.into_iter().collect(),
@@ -705,6 +706,65 @@ mod tests {
         assert_eq!(subagent.rebuild.cause, cache_model::RebuildCause::Unknown);
         let added = rebuilt_after(&[("2026-10-10T10:01:00Z", "main", &["mcp__b__y"])]);
         assert!(added.mcp_changed);
+    }
+
+    #[test]
+    fn the_idle_rebuild_saving_leaves_out_the_smallest_context_when_requests_were_sent_before_they_ended()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let scan = config_scan::scan(&Roots {
+            home: temp.path().join("home"),
+            claude_dir: temp.path().join("claude"),
+            claude_json: temp.path().join("claude.json"),
+            project: None,
+        });
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        for (key, request) in [
+            ("r1", spent("2026-10-10T10:00:00Z", 0, 20_000)),
+            ("r2", spent("2026-10-10T10:00:30Z", 20_000, 80_000)),
+            ("r3", spent("2026-10-10T10:20:30Z", 0, 100_000)),
+            ("r4", spent("2026-10-10T10:21:00Z", 100_000, 0)),
+        ] {
+            w.request(&RequestRow {
+                key: key.into(),
+                session_id: request.session_id,
+                ts: request.point.ts,
+                sent_ts: Some(request.point.ts - 6),
+                model: request.point.model,
+                tokens: request.point.tokens,
+                cost_usd: request.cost_usd,
+                is_sidechain: false,
+                agent_id: None,
+                skill: None,
+                mcp_server: None,
+                effort: None,
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        let report = read(
+            &store,
+            &PriceTable::bundled(),
+            &Request {
+                session: "s1",
+                scan: &scan,
+                retention_days: Some(90),
+                now_ms: utc("2026-10-11T12:00:00Z") * 1000,
+            },
+            &Utc,
+        )
+        .unwrap();
+        let idle = report
+            .findings
+            .iter()
+            .find(|f| f.rule == RuleId::IdleRebuilds)
+            .unwrap();
+        let saving = idle.saving_usd.unwrap();
+        assert!(
+            (saving - (100_000.0 - 20_000.0) * 4.8 / 1e6 / 2.0).abs() < 1e-9,
+            "{saving}"
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::context_model::{Item, Ratios};
 use crate::history::Rates;
 use crate::pricing::PriceTable;
 use crate::store::{CompactionPoint, LargeResult, PromptPoint, SessionInfo, SpentRequest};
+use crate::timeline::Observed;
 use crate::transcript::TokenCounts;
 
 pub use cache::{CacheBusts, IdleRebuilds};
@@ -69,6 +70,7 @@ pub trait Rule {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rebuilt {
     pub session_id: String,
+    pub request: Observed,
     pub rebuild: Rebuild,
     pub gap_ms: i64,
     pub ttl_ms: i64,
@@ -199,30 +201,29 @@ impl InsightContext<'_> {
     }
 
     pub fn carried_usd(&self, request: &SpentRequest, carried: u64) -> f64 {
-        let tokens = &request.point.tokens;
+        self.carried(&request.point.model, &request.point.tokens, carried)
+    }
+
+    fn carried(&self, model: &str, tokens: &TokenCounts, carried: u64) -> f64 {
         self.prices
             .cost_within(
-                &request.point.model,
+                model,
                 &front_of_prompt(tokens, carried),
                 tokens.prompt_total(),
             )
             .unwrap_or(0.0)
     }
 
-    pub fn rewrite_premium(&self, request: &SpentRequest, tokens: u64) -> f64 {
+    pub fn rewrite_premium(&self, request: &Observed, tokens: u64) -> f64 {
         let read = TokenCounts {
             cache_read: tokens,
             ..Default::default()
         };
         let warm = self
             .prices
-            .cost_within(
-                &request.point.model,
-                &read,
-                request.point.tokens.prompt_total(),
-            )
+            .cost_within(&request.model, &read, request.tokens.prompt_total())
             .unwrap_or(0.0);
-        self.carried_usd(request, tokens) - warm
+        self.carried(&request.model, &request.tokens, tokens) - warm
     }
 
     pub fn carrying_usd(&self, tokens: u64) -> f64 {

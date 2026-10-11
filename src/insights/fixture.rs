@@ -8,6 +8,7 @@ use crate::pricing::PriceTable;
 use crate::store::{
     CompactionPoint, LargeResult, PromptPoint, RequestPoint, SessionInfo, SpentRequest,
 };
+use crate::timeline::{Observed, Source, Thread};
 use crate::transcript::TokenCounts;
 
 pub(crate) const NOW_S: i64 = 1_791_100_000;
@@ -111,10 +112,19 @@ impl Fixture {
         gap_ms: i64,
         kinds: &[&str],
     ) {
+        let ts_ms = (SINCE + 3_600) * 1000;
         self.rebuilds.push(Rebuilt {
             session_id: session.into(),
+            request: Observed {
+                ts_ms,
+                model: OPUS.into(),
+                thread: Thread::Main,
+                tokens: counts(0, 0, 80_000, 10),
+                effort: None,
+                source: Source::Transcript,
+            },
             rebuild: Rebuild {
-                ts_ms: (SINCE + 3_600) * 1000,
+                ts_ms,
                 cause,
                 tokens: 80_000,
                 extra_usd: Some(usd),

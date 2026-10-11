@@ -156,8 +156,19 @@ fn hit_ratio(requests: &[Observed]) -> Option<f64> {
 }
 
 pub fn rebuilds(main: &[&Observed], ttl: Ttl, context: &Context) -> Vec<Rebuild> {
+    rebuilt_requests(main, ttl, context)
+        .into_iter()
+        .map(|(_, rebuild)| rebuild)
+        .collect()
+}
+
+pub fn rebuilt_requests<'a>(
+    main: &[&'a Observed],
+    ttl: Ttl,
+    context: &Context,
+) -> Vec<(&'a Observed, Rebuild)> {
     main.windows(2)
-        .filter_map(|pair| rebuild(pair[0], pair[1], ttl, context))
+        .filter_map(|pair| Some((pair[1], rebuild(pair[0], pair[1], ttl, context)?)))
         .collect()
 }
 
