@@ -17,7 +17,7 @@ use crate::context_model::{self, Uses, breakdown, items};
 use crate::history::{Range, Rates, calendar};
 use crate::limits;
 use crate::pricing::PriceTable;
-use crate::store::{CompactionPoint, SpentRequest, Store};
+use crate::store::{CompactionPoint, SpentAdjustment, SpentRequest, Store};
 use crate::timeline::{Thread, Timeline};
 
 pub const MONTH_DAYS: i64 = 30;
@@ -83,7 +83,12 @@ impl Day {
     }
 }
 
-pub fn days(spans: &calendar::Spans, requests: &[SpentRequest], prices: &PriceTable) -> Vec<Day> {
+pub fn days(
+    spans: &calendar::Spans,
+    requests: &[SpentRequest],
+    adjustments: &[SpentAdjustment],
+    prices: &PriceTable,
+) -> Vec<Day> {
     let mut days: Vec<Day> = spans
         .spans
         .iter()
@@ -105,6 +110,11 @@ pub fn days(spans: &calendar::Spans, requests: &[SpentRequest], prices: &PriceTa
             cache_model::saved_usd(&request.point.model, tokens, prices).unwrap_or(0.0);
         day.read += tokens.cache_read;
         day.prompt += tokens.prompt_total();
+    }
+    for adjustment in adjustments {
+        if let Some(index) = spans.index_of(adjustment.ts) {
+            days[index].cost_usd += adjustment.cost_usd.unwrap_or(0.0);
+        }
     }
     days
 }
@@ -174,7 +184,8 @@ where
     let spans = calendar::spans(Range::Month, now_s, tz)?;
     let since = now_s - WINDOW_DAYS * DAY_S;
     let month = store.requests_between(spans.since().min(since), spans.until)?;
-    let calendar_days = days(&spans, &month, prices);
+    let reconciled = store.adjustments_between(spans.since(), spans.until)?;
+    let calendar_days = days(&spans, &month, &reconciled, prices);
     let requests: Vec<SpentRequest> = month
         .into_iter()
         .filter(|r| r.point.ts >= since && r.point.ts < spans.until)
@@ -373,9 +384,52 @@ mod tests {
         }
     }
 
+    fn adjusted(at: &str, usd: f64) -> SpentAdjustment {
+        SpentAdjustment {
+            session_id: "s1".into(),
+            ts: utc(at),
+            model: OPUS.into(),
+            tokens: TokenCounts {
+                output: 1_000,
+                ..Default::default()
+            },
+            cost_usd: Some(usd),
+        }
+    }
+
     fn month(now: &str, requests: &[SpentRequest]) -> Vec<Day> {
+        reconciled_month(now, requests, &[])
+    }
+
+    fn reconciled_month(
+        now: &str,
+        requests: &[SpentRequest],
+        adjustments: &[SpentAdjustment],
+    ) -> Vec<Day> {
         let spans = calendar::spans(Range::Month, utc(now), &Utc).unwrap();
-        days(&spans, requests, &PriceTable::bundled())
+        days(&spans, requests, adjustments, &PriceTable::bundled())
+    }
+
+    #[test]
+    fn days_count_reconciled_cost_on_the_local_day_it_was_spread_to() {
+        let request = spent("2026-10-10T08:00:00Z", 90_000, 10_000);
+        let paid = request.cost_usd.unwrap();
+        let days = reconciled_month(
+            "2026-10-11T12:00:00Z",
+            &[request],
+            &[
+                adjusted("2026-10-10T08:00:00Z", 1.25),
+                adjusted("2026-10-10T23:59:59Z", 0.50),
+                adjusted("2026-10-11T00:00:00Z", 2.00),
+                adjusted("2026-09-01T00:00:00Z", 9.00),
+            ],
+        );
+        let yesterday = &days[28];
+        assert!((yesterday.cost_usd - (paid + 1.75)).abs() < 1e-9);
+        assert_eq!(yesterday.requests, 1);
+        assert_eq!(yesterday.prompt, 90_000 + 10_000 + 10);
+        assert!((days[29].cost_usd - 2.0).abs() < 1e-9);
+        assert_eq!(days[29].requests, 0);
     }
 
     #[test]
@@ -506,7 +560,17 @@ mod tests {
             })
             .unwrap();
         }
+        w.adjustment(&SpentAdjustment {
+            session_id: "s1".into(),
+            ..adjusted("2026-10-10T10:30:00Z", 0.84)
+        })
+        .unwrap();
         w.commit().unwrap();
+        let paid: f64 = ["2026-10-10T10:00:00Z", "2026-10-10T10:20:00Z"]
+            .iter()
+            .map(|at| spent(at, 0, 100_000).cost_usd.unwrap())
+            .sum::<f64>()
+            + spent("2026-10-10T10:21:00Z", 100_000, 0).cost_usd.unwrap();
         let report = read(
             &store,
             &PriceTable::bundled(),
@@ -535,6 +599,7 @@ mod tests {
         );
         let recap = report.recap.unwrap();
         assert_eq!(recap.day, "Yesterday");
+        assert!((recap.cost_usd - (paid + 0.84)).abs() < 1e-9);
         assert_eq!(recap.win.as_deref(), Some("cache hits saved you $0.38"));
         assert_eq!(report.wins.hit_streak_days, 0);
     }
