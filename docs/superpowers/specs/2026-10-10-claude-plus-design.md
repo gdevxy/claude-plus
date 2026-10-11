@@ -247,7 +247,9 @@ Claude Code documents the transcript format as internal and subject to change, s
 - `meta(key, value)` holds the price table version and calibration parameters.
 - The schema version lives in SQLite's `user_version`.
   The first released schema is version 7, and each later migration adds one.
-  Versions 1 to 6 belong to pre-release builds; such a store is refused with a message asking to delete it and run `claude-plus import`.
+  Every store carries the SQLite `application_id` `0x436c2b70` in its header from the moment claude-plus creates it.
+  claude-plus opens an existing `data.db` only when its header carries that id, and refuses any other file without changing it, so it never stores its data in a file another program made.
+  Versions 1 to 6 belonged to pre-release builds, which wrote no id, so such a store is refused as not a claude-plus store.
 
 ## 5. Computation
 

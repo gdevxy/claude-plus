@@ -72,9 +72,9 @@ claude-plus uninstall
 ```
 
 This removes the mod and its marketplace from Claude Code and stops the daemon; `--purge` also deletes `~/.claude-plus` with the history claude-plus keeps.
-claude-plus marks its data directory with a `.claude-plus-data` file only when it created the directory or found it empty, or when the directory holds nothing but a claude-plus store and the files claude-plus writes beside it.
-It never stores its data in a `data.db` that another program made.
-`--purge` deletes only a marked directory, and in it only `data.db` when the file is a claude-plus store, and the daemon's files when they were created after the mark, or when the mark lists them because an earlier claude-plus left them there.
+claude-plus marks its data directory with a `.claude-plus-data` file only when it created the directory or found it empty.
+It never stores its data in a `data.db` that another program made: it creates `data.db` with a claude-plus stamp in its header, and refuses any `data.db` without that stamp, leaving the file as it is and asking you to move it aside.
+`--purge` deletes only a marked directory, and in it only `data.db` when the file carries the stamp, and the daemon's files when they were created after the mark.
 It keeps anything else it finds there, and names it.
 It refuses a symlink (with or without a trailing `/`), your home directory, a directory that holds or sits inside the Claude Code directory, and one without the mark.
 Run `claude-plus uninstall` before you remove the binary with `brew uninstall claude-plus`, or delete `~/.local/bin/claude-plus`.
