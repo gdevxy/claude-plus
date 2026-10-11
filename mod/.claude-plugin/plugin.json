@@ -20,7 +20,7 @@
     "alerts": {
       "type": "boolean",
       "title": "Alerts",
-      "description": "Toast when the cache is about to go cold, the 5h pace runs out before its reset or context nears auto-compact",
+      "description": "Toast when the cache is about to go cold, the 5h pace runs out before its reset, context nears auto-compact, or a spend limit or budget would run out",
       "default": true
     },
     "chime": {

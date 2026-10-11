@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { HistoryInput } from '../hooks/history'
-import { amount, hitFloor, historyScreen, metricChoices, metricsOf, nextMetric, nextRange, rangeChoices, shownMetric } from '../hooks/history'
+import { accountChoices, accountLabel, amount, hitFloor, historyScreen, metricChoices, metricsOf, nextAccount, nextMetric, nextRange, rangeChoices, resolvedAccount, shownMetric } from '../hooks/history'
 import type { Line } from '../hooks/state'
 import type { HistoryReport } from '../types'
-import { DAY_MS, OCT_5_MS, OPUS, bucket, contextReport, dayReport, historyReport, local, spend } from './fixtures'
+import { DAY_MS, OCT_5_MS, OPUS, bucket, contextReport, dayReport, historyReport, local, snapshot, spend } from './fixtures'
 import { colorOf, paletteOf, seriesOf } from '../hooks/palette'
 import { overflows, painted, trimmed } from './paint'
 import { VISIONS, distance } from './vision'
@@ -13,7 +13,7 @@ const OK = { status: 'ok', detail: null } as const
 const MIN_SERIES_DISTANCE: Readonly<Record<string, number>> = { dark: 15, light: 15, 'dark-daltonized': 15, 'light-daltonized': 12 }
 
 function input(overrides: Partial<HistoryInput> = {}): HistoryInput {
-  return { width: 40, range: '7d', metric: 'cost', reports: { '7d': historyReport(), '24h': dayReport() }, failures: {}, context: contextReport(), local: local(), daemon: OK, expanded: [], theme: 'dark', ...overrides }
+  return { width: 40, range: '7d', metric: 'cost', reports: { '7d': historyReport(), '24h': dayReport() }, failures: {}, context: contextReport(), local: local(), snapshot: null, accounts: [], daemon: OK, expanded: [], theme: 'dark', ...overrides }
 }
 
 function line(lines: Line[], key: string): Line {
@@ -238,6 +238,20 @@ describe('history screen', () => {
     expect(text(line(historyScreen(input({ reports: { '7d': projects } })), 'hist-projects-0'))).toBe('  a-very-long-pr… · 12 sessions $11.20')
   })
 
+  test('fixed labels fall back to shorter whole words at the narrowest width instead of being cut', () => {
+    const rows = trimmed(painted(historyScreen(input({ width: 26 })), 26))
+    expect(rows.filter(row => /Saved|\d sessions$|Context|claude-plus|shop|notes/.test(row))).toEqual([
+      ' 9 sessions',
+      '   Saved           $21.40',
+      '   claude-plus     $11.20',
+      '   shop             $4.10',
+      '   notes            $0.67',
+      '   Untitled… · shop $3.90',
+      ' Context       46k / 200k',
+    ])
+    expect(rows.filter(row => /…(?!\s*✻?\s*$)/.test(row) && !/Plan the|Untitled/.test(row))).toEqual([])
+  })
+
   test('the hit ratio scale starts at the lowest tenth and says so', () => {
     expect([hitFloor([0.76, 0.95]), hitFloor([1, 1]), hitFloor([]), hitFloor([0.05])]).toEqual([0.7, 0.9, 0, 0])
     const lines = historyScreen(input({ expanded: ['hist-hit'] }))
@@ -282,7 +296,7 @@ describe('history screen', () => {
     expect(historyScreen(input({ context: one })).some(line => line.key === 'hist-growth')).toBe(false)
   })
 
-  for (const width of [40, 60, 100]) {
+  for (const width of [26, 40, 60, 100]) {
     test(`no row is cut and every chart fills the width at ${width} columns`, () => {
       for (const [range, report] of [['7d', historyReport()], ['24h', dayReport()], ['90d', quarter()]] as const) {
         for (const metric of ['cost', 'tokens', 'pct'] as const) {
@@ -291,6 +305,59 @@ describe('history screen', () => {
           expect(lines.filter(found => found.chart !== undefined && found.chart.columns !== width - 2).map(found => found.key)).toEqual([])
           expect(painted(lines, width).filter(row => row.length > width)).toEqual([])
         }
+      }
+    })
+  }
+})
+
+describe('accounts', () => {
+  const accounts = [{ id: 'oauth:me', label: 'Me · Max', kind: 'oauth' as const }, { id: 'oauth:work', label: 'Acme · Enterprise', kind: 'oauth' as const }]
+  const current = snapshot({ account: accounts[1]! })
+  const shown = { ...historyReport(), account: 'oauth:work', accounts }
+
+  test('resolves current to the session account and all to null', () => {
+    expect(resolvedAccount({ range: '7d', metric: 'cost' }, current)).toBe('oauth:work')
+    expect(resolvedAccount({ range: '7d', metric: 'cost', account: 'current' }, current)).toBe('oauth:work')
+    expect(resolvedAccount({ range: '7d', metric: 'cost', account: 'all' }, current)).toBe(null)
+    expect(resolvedAccount({ range: '7d', metric: 'cost', account: 'oauth:me' }, current)).toBe('oauth:me')
+    expect(resolvedAccount({ range: '7d', metric: 'cost' }, snapshot({ account: null }))).toBe(null)
+    expect(resolvedAccount({ range: '7d', metric: 'cost' }, null)).toBe(null)
+  })
+
+  test('cycles current, the other accounts, then all', () => {
+    const chart = (account?: string) => ({ range: '7d' as const, metric: 'cost' as const, account })
+    expect(nextAccount(chart(), shown, current)).toBe('oauth:me')
+    expect(nextAccount(chart('oauth:me'), shown, current)).toBe('all')
+    expect(nextAccount(chart('all'), shown, current)).toBe('current')
+    expect(nextAccount(chart('all'), shown, snapshot({ account: null }))).toBe('oauth:me')
+  })
+
+  test('offers the control only with two accounts or more', () => {
+    expect(accountChoices({ range: '7d', metric: 'cost' }, { ...shown, accounts: [accounts[1]!] }, current)).toEqual([])
+    expect(accountChoices({ range: '7d', metric: 'cost' }, null, current)).toEqual([])
+    expect(accountChoices({ range: '7d', metric: 'cost' }, shown, current).map(c => c.text)).toEqual(['Acme · Enterprise', 'Me · Max', 'All'])
+    expect(accountChoices({ range: '7d', metric: 'cost', account: 'oauth:me' }, shown, current).filter(c => c.isActive).map(c => c.text)).toEqual(['Me · Max'])
+    expect(accountLabel({ range: '7d', metric: 'cost', account: 'all' }, shown, current)).toBe('All')
+    expect(accountLabel({ range: '7d', metric: 'cost' }, shown, current)).toBe('Acme · Enterprise')
+  })
+
+  test('the title names the account shown when there is a choice, and drops it before cutting a word', () => {
+    const titled = (width: number, account?: string) => text(line(historyScreen(input({ width, account, snapshot: current, accounts, reports: { '7d': shown } })), 'hist-head'))
+    expect(titled(60)).toBe(`Last 7 days · Acme · Enterprise${' '.repeat(21)}$15.97`)
+    expect(titled(60, 'all')).toBe(`Last 7 days · All${' '.repeat(35)}$15.97`)
+    expect(titled(26)).toBe('Last 7 days       $15.97')
+    expect(text(line(historyScreen(input({ width: 60, snapshot: current })), 'hist-head'))).toBe(`Last 7 days${' '.repeat(41)}$15.97`)
+    const loading = (width: number) => text(line(historyScreen(input({ width, snapshot: current, accounts, reports: {} })), 'hist-head'))
+    expect(loading(60)).toBe('Last 7 days · Acme · Enterprise')
+    expect(loading(26)).toBe('Last 7 days')
+  })
+
+  for (const width of [26, 60, 144]) {
+    test(`an account title at ${width} columns cuts no row`, () => {
+      for (const account of [undefined, 'oauth:me', 'all']) {
+        const lines = historyScreen(input({ width, account, snapshot: current, accounts, reports: { '7d': { ...shown, account: account === 'all' ? null : (account ?? 'oauth:work') } } }))
+        expect(overflows(lines, width)).toEqual([])
+        expect(painted(lines.filter(found => found.key === 'hist-head'), width).filter(row => row.includes('…'))).toEqual([])
       }
     })
   }

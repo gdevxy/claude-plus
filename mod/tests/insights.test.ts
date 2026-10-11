@@ -134,3 +134,11 @@ describe('insights screen', () => {
     })
   }
 })
+
+describe('narrow insights', () => {
+  test('the total and each tip meta fall back to shorter whole words at the narrowest width', () => {
+    const rows = trimmed(painted(insightsScreen(input({ width: 26 })), 26))
+    expect(rows.filter(row => /Insights|confidence/.test(row))).toEqual([' Insights   ~$5.55/week ?', '   high confidence      ?', '   high confidence      ?', '   low confidence       ?'])
+    expect(rows.filter(row => /…(?!\s*✻?\s*$)/.test(row))).toEqual([])
+  })
+})

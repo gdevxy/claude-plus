@@ -1,7 +1,7 @@
 import type { Daemon, Finding, InsightsFailure, InsightsReport, Recap } from '../types'
 import { approx, money, percent } from './format'
 import type { Line } from './state'
-import { MIN_CONTENT, PADDING, WHY_COLUMNS, fitting, gap, notice, pair, plain, prose } from './state'
+import { MIN_CONTENT, PADDING, WHY_COLUMNS, fitting, fittingPair, gap, notice, pair, plain, prose } from './state'
 
 export const STREAK_SHOWN = 2
 export const INDENT = 2
@@ -60,7 +60,8 @@ function headline(input: InsightsInput, report: InsightsReport | null, width: nu
   if (priced.length === 0) {
     lines.push(title)
   } else {
-    lines.push({ ...pair('ins-head', 'Insights', `up to ${weekly(total)}`, width - WHY_COLUMNS, { color: 'claude', bold: true }, { bold: true }), why: 'ins-total' })
+    const [head, saving] = fittingPair(width - WHY_COLUMNS, ['Insights', `up to ${weekly(total)}`], ['Insights', weekly(total)])
+    lines.push({ ...pair('ins-head', head, saving, width - WHY_COLUMNS, { color: 'claude', bold: true }, { bold: true }), why: 'ins-total' })
   }
   const count = report.findings.length
   const tips = `${count} ${count === 1 ? 'tip' : 'tips'} from your last 14 days`
@@ -116,7 +117,7 @@ function findingLines(input: InsightsInput, found: Finding): Line[] {
   const confidence = CONFIDENCE[found.confidence]
   const room = input.width - 2 * PADDING - WHY_COLUMNS - INDENT
   const share = found.saving_pct_5h === null ? null : `~${percent(found.saving_pct_5h)}`
-  const meta = share === null ? confidence : fitting(room, `${share} ${WEEKLY_SHARE} · ${confidence}`, `${share} ${SHORT_WEEKLY_SHARE} · ${confidence}`)
+  const meta = share === null ? confidence : fitting(room, `${share} ${WEEKLY_SHARE} · ${confidence}`, `${share} ${SHORT_WEEKLY_SHARE} · ${confidence}`, confidence)
   lines.push({ key: `${key}-meta`, segments: [{ text: `${' '.repeat(INDENT)}${meta}`, dim: true }], why: key })
   if (input.expanded.includes(key)) lines.push(prose(`explain-${key}`, found.how, { dim: true }, INDENT))
   return lines

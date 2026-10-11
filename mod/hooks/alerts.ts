@@ -1,5 +1,5 @@
 import type { Alerted, Daemon, Local, Snapshot } from '../types'
-import { approx, duration, tokens } from './format'
+import { approx, duration, percent, tokens } from './format'
 import { LAST_MINUTE_MS, RESET_TOLERANCE_MS, cacheClock, contextGauge, current, limitsOf, ownBreakdown } from './state'
 
 export const CONTEXT_ALERT = 0.9
@@ -8,14 +8,16 @@ export const CONTEXT_ASK_PCT = 60
 export const ALERT_TOAST_MS = 8000
 export const CHIME = 'sounds/chime.wav'
 
-export const EMPTY_ALERTED: Alerted = { session: null, model: null, cacheFor: null, paceFor: null, contextFired: false, threshold: null, thresholdAsked: false }
+export const EMPTY_ALERTED: Alerted = { session: null, model: null, cacheFor: null, paceFor: null, spendFor: null, spendHighFor: null, contextFired: false, threshold: null, thresholdAsked: false }
 
-export type Alert = { kind: 'cache' | 'pace' | 'context'; text: string }
+export type Alert = { kind: 'cache' | 'pace' | 'spend' | 'context'; text: string }
+
+export const SPEND_HIGH_PCT = 90
 
 export type AlertInput = { nowMs: number; snapshot: Snapshot | null; local: Local; daemon: Daemon; known: Alerted }
 
 export function ownAlerts(known: Alerted, session: string | null, model: string | null = known.model): Alerted {
-  if (known.session !== session) return { ...EMPTY_ALERTED, session, model }
+  if (known.session !== session) return { ...EMPTY_ALERTED, session, model, spendFor: known.spendFor, spendHighFor: known.spendHighFor }
   if (model === null || known.model === model) return known
   if (known.model === null) return { ...known, model }
   return { ...known, model, threshold: null, thresholdAsked: false, contextFired: false }
@@ -56,6 +58,19 @@ export function alertsOf(input: AlertInput): { alerts: Alert[]; next: Alerted } 
     const left = duration(Math.max(0, full - input.nowMs))
     alerts.push({ kind: 'pace', text: `At this pace the 5h limit runs out in ${left}, before its reset in ${duration(resets - input.nowMs)}` })
     next.paceFor = resets
+  }
+  const spend = limitsOf({ ...input, snapshot }).find(limit => limit.window === 'spend_limit' || limit.window === 'budget')
+  const spendResets = spend?.resets_at_ms ?? null
+  const spendFull = spend?.pace?.full_at_ms ?? null
+  const unseen = (seen: number | null) => spendResets !== null && (seen === null || Math.abs(seen - spendResets) > RESET_TOLERANCE_MS)
+  const name = spend?.window === 'budget' ? 'budget' : 'spend limit'
+  if (spendFull !== null && spendResets !== null && spendFull < spendResets && unseen(known.spendFor)) {
+    alerts.push({ kind: 'spend', text: `At this pace the ${name} runs out in ${duration(Math.max(0, spendFull - input.nowMs))}, before its reset in ${duration(spendResets - input.nowMs)}` })
+    next.spendFor = spendResets
+  }
+  if (spend !== undefined && spendResets !== null && spend.used_pct >= SPEND_HIGH_PCT && unseen(known.spendHighFor)) {
+    alerts.push({ kind: 'spend', text: `${percent(spend.used_pct)} of the ${name} is used, it resets in ${duration(spendResets - input.nowMs)}` })
+    next.spendHighFor = spendResets
   }
   const used = input.local.measure?.contextTokens ?? null
   const threshold = thresholdOf(input.local, known)

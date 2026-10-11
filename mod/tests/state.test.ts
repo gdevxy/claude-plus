@@ -575,6 +575,44 @@ describe('fitting', () => {
     }
   }
 
+  for (let width = 26; width <= 32; width += 1) {
+    for (const [name, state] of Object.entries(STATES)) {
+      test(`${name} at ${width} columns cuts no label mid-word`, () => {
+        const lines = screen(input({ width, ...state }))
+        expect(overflows(lines, width).filter(problem => problem.includes(' is cut at '))).toEqual([])
+        expect(painted(lines, width).filter(row => /…(?!\s*✻?\s*$)/.test(row))).toEqual([])
+      })
+    }
+  }
+
+  test('label and value rows fall back to shorter whole words at the narrowest width', () => {
+    const rows = (state: Partial<ScreenInput>) => trimmed(painted(screen(input({ width: 26, ...state })), 26))
+    const warm = rows({})
+    expect(warm.filter(row => /Cache ✻|Fable|● Opus|expires|Sonnet|Haiku|In \/ out|Turns/.test(row))).toEqual([
+      ' Cache ✻     52:14 left ?',
+      '   Fable 5.1       ~$0.67',
+      ' ● Opus 5.5        ~$0.03',
+      '     if it expires ~$0.40',
+      '   Sonnet 5.5      ~$0.20',
+      '   Haiku 5.5       ~$0.07',
+      '   In / out      2M / 61k',
+      '   Turns · agents  14 · 2',
+    ])
+    const cold = rows({ nowMs: NOW_MS + 53 * MINUTE_MS })
+    expect(cold.filter(row => /Cache ·|Rewarming|● Opus|then/.test(row))).toEqual([
+      ' Cache · cold   expired ?',
+      '   Rewarming costs ~$0.40',
+      ' ● Opus 5.5        ~$0.40',
+      '     then          ~$0.03',
+    ])
+    expect(rows({}).filter(row => row.includes('<0.1% of 5h'))).toEqual([])
+    expect(trimmed(painted(screen(input({ width: 40 })), 40)).filter(row => /● Opus|expires|Fable/.test(row))).toEqual([
+      '   Fable 5.1        ~$0.67, then ~$0.05',
+      ' ● Opus 5.5        ~$0.03 · <0.1% of 5h',
+      '     if it expires  ~$0.40 · 0.2% of 5h',
+    ])
+  })
+
   test('the cache line keeps one separator, cold or warm', () => {
     expect(text(line(screen(input()), 'cache'))).toBe('Cache ✻ warm (1h)         52:14 left')
     expect(text(line(screen(input({ nowMs: NOW_MS + 53 * MINUTE_MS })), 'cache'))).toBe('Cache · cold (1h)            expired')

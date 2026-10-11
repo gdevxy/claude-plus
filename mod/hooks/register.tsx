@@ -1,13 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 'claude-code'
 
-import type { Alerted, Chart, ContextReport, Daemon, DaemonStatus, Failures, HistoryFailure, HistoryRange, InsightsFailure, InsightsReport, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
+import type { AccountRef, Alerted, Chart, ContextReport, Daemon, DaemonStatus, Failures, HistoryFailure, HistoryRange, InsightsFailure, InsightsReport, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
 import { ALERT_TOAST_MS, CHIME, EMPTY_ALERTED, alertsOf, merged, ownAlerts, wantsThreshold } from './alerts'
 import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchInsights, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
 import { contextScreen } from './context'
 import { money } from './format'
-import { historyScreen, metricChoices, metricLabel, nextMetric, nextRange, rangeChoices, rangeLabel, shownMetric } from './history'
+import { accountChoices, accountLabel, historyScreen, metricChoices, metricLabel, nextAccount, nextMetric, nextRange, rangeChoices, rangeLabel, resolvedAccount, shownMetric } from './history'
 import { insightsScreen, recapText } from './insights'
 import { glowCell } from './chart'
 import type { Palette } from './palette'
@@ -59,12 +59,13 @@ export const RECAP_TOAST_MS = 8000
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
 const context = atom({ plugin: 'plus', key: 'context' } as const, null as ContextReport | null, { shape: 'context-1' })
-const history = atom({ plugin: 'plus', key: 'history' } as const, {} as Reports, { shape: 'history-1' })
+const history = atom({ plugin: 'plus', key: 'history' } as const, {} as Reports, { shape: 'history-2' })
 const failures = atom({ plugin: 'plus', key: 'failures' } as const, {} as Failures)
 const chart = atom({ plugin: 'plus', key: 'chart' } as const, { range: '7d', metric: 'cost' } as Chart)
+const accounts = atom({ plugin: 'plus', key: 'accounts' } as const, [] as AccountRef[])
 const insights = atom({ plugin: 'plus', key: 'insights' } as const, null as InsightsReport | null, { shape: 'insights-1' })
 const insightsFailure = atom({ plugin: 'plus', key: 'insightsFailure' } as const, null as InsightsFailure | null)
-const alerted = atom({ plugin: 'plus', key: 'alerted' } as const, EMPTY_ALERTED as Alerted, { shape: 'alerted-2' })
+const alerted = atom({ plugin: 'plus', key: 'alerted' } as const, EMPTY_ALERTED as Alerted, { shape: 'alerted-3' })
 const theme = atom({ plugin: 'plus', key: 'theme' } as const, 'auto')
 const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-2' })
 const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false, unasked: 'settled' } as PaneState)
@@ -95,6 +96,7 @@ type Runtime = {
   contextPolledAtMs: number
   historyPolledAtMs: number
   historyRunning: boolean
+  historyAccount: string | null | undefined
   insightsPolledAtMs: number
   insightsRunning: boolean
   usageDue: boolean
@@ -127,6 +129,7 @@ function fresh(options: PluginOptions): Runtime {
     contextPolledAtMs: -Infinity,
     historyPolledAtMs: -Infinity,
     historyRunning: false,
+    historyAccount: undefined,
     insightsPolledAtMs: -Infinity,
     insightsRunning: false,
     usageDue: false,
@@ -329,6 +332,24 @@ async function poll($: EngineInterface): Promise<void> {
   await animate($, async () => {
     await update($, snapshot, () => parsed)
   })
+  await followAccount($)
+}
+
+async function followAccount($: EngineInterface): Promise<void> {
+  if (runtime.historyAccount === undefined) return
+  if ((await askedAccount($)) === runtime.historyAccount) return
+  await forgetHistory($)
+  runtime.historyPolledAtMs = -Infinity
+}
+
+async function forgetHistory($: EngineInterface): Promise<void> {
+  runtime.historyAccount = undefined
+  await update($, history, () => ({}))
+  await update($, failures, () => ({}))
+}
+
+async function askedAccount($: EngineInterface): Promise<string | null> {
+  return resolvedAccount(await read($, chart), await read($, snapshot))
 }
 
 async function pollContext($: EngineInterface): Promise<void> {
@@ -349,9 +370,14 @@ async function pollHistory($: EngineInterface): Promise<void> {
     const path = await socketOf($)
     if (path === null) return
     const range = (await read($, chart)).range
-    const reply = await fetchHistory(io($), path, range)
+    const account = await askedAccount($)
+    const reply = await fetchHistory(io($), path, range, account)
+    if ((await askedAccount($)) !== account) return
     if (reply.kind === 'history') {
-      if (reply.report.range !== range) return
+      if (reply.report.range !== range || reply.report.account !== account) return
+      if (runtime.historyAccount !== account) await forgetHistory($)
+      runtime.historyAccount = account
+      await update($, accounts, () => reply.report.accounts)
       await update($, history, known => ({ ...known, [range]: reply.report }))
       await recordFailure($, range, null)
       return
@@ -465,6 +491,16 @@ async function cycleRange($: EngineInterface): Promise<void> {
   await update($, chart, known => ({ ...known, range: nextRange(known.range) }))
   runtime.historyPolledAtMs = -Infinity
   ensureTimers($)
+}
+
+async function cycleAccount($: EngineInterface): Promise<void> {
+  const shown = await read($, snapshot)
+  const listed = { accounts: await read($, accounts) }
+  await update($, chart, known => ({ ...known, account: nextAccount(known, listed, shown) }))
+  await forgetHistory($)
+  runtime.historyPolledAtMs = -Infinity
+  ensureTimers($)
+  if (!runtime.historyRunning) await pollHistory($)
 }
 
 async function cycleMetric($: EngineInterface): Promise<void> {
@@ -761,25 +797,42 @@ export const register: Register = (on, options) => {
     const open = await read($, expanded)
     const chosen = await read($, chart)
     const reports = await read($, history)
+    const shown = await read($, snapshot)
+    const listed = { accounts: await read($, accounts) }
     const lines =
       shownView === 'context'
         ? contextScreen({ width: e.props.bodyColumns, nowMs, report: await read($, context), local: known, daemon: status, expanded: open })
         : shownView === 'insights'
           ? insightsScreen({ width: e.props.bodyColumns, report: await read($, insights), failure: await read($, insightsFailure), daemon: status, expanded: open })
           : shownView === 'history'
-          ? historyScreen({ width: e.props.bodyColumns, range: chosen.range, metric: chosen.metric, reports, failures: await read($, failures), context: await read($, context), local: known, daemon: status, expanded: open, theme: await read($, theme) })
+          ? historyScreen({
+              width: e.props.bodyColumns,
+              range: chosen.range,
+              metric: chosen.metric,
+              account: chosen.account,
+              reports,
+              failures: await read($, failures),
+              context: await read($, context),
+              local: known,
+              snapshot: shown,
+              accounts: listed.accounts,
+              daemon: status,
+              expanded: open,
+              theme: await read($, theme),
+            })
           : screen({
               width: e.props.bodyColumns,
               nowMs,
               animations: runtime.animations,
-              snapshot: await read($, snapshot),
+              snapshot: shown,
               local: known,
               daemon: status,
               expanded: open,
               motions: await read($, motions),
             })
     const ui = $.ui.resolve(e)
-    const shown = reports[chosen.range] ?? null
+    const report = reports[chosen.range] ?? null
+    const choices = accountChoices(chosen, listed, shown)
     return (
       <PaneBody
         ui={ui}
@@ -796,7 +849,10 @@ export const register: Register = (on, options) => {
           shownView === 'history'
             ? [
                 { key: 'range', hotkey: 'r', label: rangeLabel(chosen.range), choices: rangeChoices(chosen.range), onPress: () => quietly(cycleRange($)) },
-                { key: 'metric', hotkey: 'g', label: metricLabel(shownMetric(chosen.metric, shown)), choices: metricChoices(chosen.metric, shown), onPress: () => quietly(cycleMetric($)) },
+                { key: 'metric', hotkey: 'g', label: metricLabel(shownMetric(chosen.metric, report)), choices: metricChoices(chosen.metric, report), onPress: () => quietly(cycleMetric($)) },
+                ...(choices.length > 0
+                  ? [{ key: 'account', hotkey: 'a', label: accountLabel(chosen, listed, shown), choices, separator: ' / ', onPress: () => quietly(cycleAccount($)) }]
+                  : []),
               ]
             : []
         }

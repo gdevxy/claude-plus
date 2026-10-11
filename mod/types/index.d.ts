@@ -240,6 +240,8 @@ export type HistoryReport = {
   models: ModelSpend[]
   projects: ProjectSpend[]
   sessions: SessionSpend[]
+  account: string | null
+  accounts: AccountRef[]
 }
 
 export type Reports = Partial<Record<HistoryRange, HistoryReport>>
@@ -248,7 +250,7 @@ export type HistoryFailure = { kind: 'missing' | 'failed'; reason: string }
 
 export type Failures = Partial<Record<HistoryRange, HistoryFailure>>
 
-export type Chart = { range: HistoryRange; metric: Metric }
+export type Chart = { range: HistoryRange; metric: Metric; account?: string }
 
 export type RuleId =
   | 'idle_rebuilds'
@@ -296,6 +298,8 @@ export type Alerted = {
   model: string | null
   cacheFor: number | null
   paceFor: number | null
+  spendFor: number | null
+  spendHighFor: number | null
   contextFired: boolean
   threshold: number | null
   thresholdAsked: boolean
@@ -318,6 +322,7 @@ declare module 'claude-code' {
       history: Shaped<Reports>
       failures: Failures
       chart: Chart
+      accounts: AccountRef[]
       insights: Shaped<InsightsReport | null>
       insightsFailure: InsightsFailure | null
       alerted: Shaped<Alerted>

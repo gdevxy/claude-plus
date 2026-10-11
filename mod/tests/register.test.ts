@@ -373,8 +373,12 @@ function expiring(inMs: number): Snapshot {
 }
 
 function historyOf(wiring: Wiring, url: string): HistoryReport {
-  const range = new URL(url).searchParams.get('range') ?? '7d'
-  return wiring.histories[range] ?? { ...historyReport({ range: range as HistoryReport['range'] }), buckets: [], totals: { ...historyReport().totals, requests: 0, cost_usd: 0, reconciled_usd: 0 } }
+  const params = new URL(url).searchParams
+  const range = params.get('range') ?? '7d'
+  const asked = params.get('account')
+  const account = asked === null || asked === 'all' ? null : asked
+  const report = wiring.histories[range] ?? { ...historyReport({ range: range as HistoryReport['range'] }), buckets: [], totals: { ...historyReport().totals, requests: 0, cost_usd: 0, reconciled_usd: 0 } }
+  return { ...report, account }
 }
 
 function servedBody(wiring: Wiring): unknown {
@@ -1301,7 +1305,8 @@ describe('plus mod', () => {
       expect((await ui.find({ key: 'tab-history' }))?.props).toEqual({ key: 'tab-history', hotkey: '3', plain: true, dimColor: false, label: columns === 40 ? 'Hist' : 'History' })
       expect((await ui.find({ key: 'range' }))?.props).toEqual({ key: 'range', hotkey: 'r', plain: true, label: '7 days' })
       expect((await ui.find({ key: 'metric' }))?.props).toEqual({ key: 'metric', hotkey: 'g', plain: true, label: 'Cost' })
-      expect(wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url)).toEqual(['http://claude-plus/history?range=7d'])
+      expect(wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url)).toEqual(['http://claude-plus/history?range=7d&account=all'])
+      expect(await ui.find({ key: 'account' })).toBeUndefined()
       for (const key of ['hist-spend-chart', 'hist-hit-chart', 'hist-peak-chart', 'hist-growth-chart']) {
         const chart = await ui.find({ key })
         expect([key, chart?.type, chart?.props.columns]).toEqual([key, 'Raster', columns - 2])
@@ -1309,7 +1314,7 @@ describe('plus mod', () => {
       const rows = paintTree(await ui.drawn(), columns)
       expect(rows.filter(row => row.length > columns)).toEqual([])
       expect(trimmed(rows.slice(0, 4))).toEqual([HISTORY_HEADERS[columns], '', columns === 40 ? ' r: 7 days  g: Cost' : ' r: 24h 7d 30d 90d  g: Cost Tokens % of 5h', ''])
-      const screen = historyScreen({ width: columns, range: '7d', metric: 'cost', reports: { '7d': historyReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [], theme: 'dark' })
+      const screen = historyScreen({ width: columns, range: '7d', metric: 'cost', reports: { '7d': historyReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), snapshot: null, accounts: [], daemon: { status: 'ok', detail: null }, expanded: [], theme: 'dark' })
       expect(trimmed(rows.slice(4))).toEqual(trimmed(painted(screen, columns)))
       await ui.unmount()
     })
@@ -1333,7 +1338,7 @@ describe('plus mod', () => {
     expect((await marked('range')).map(child => paintTree(child as Parameters<typeof paintTree>[0], 60).join(''))).toEqual(['24h'])
     expect((await marked('metric')).map(child => paintTree(child as Parameters<typeof paintTree>[0], 60).join(''))).toEqual(['Tokens'])
     expect((await ui.find({ key: 'hist-hit-chart' }))?.type).toBe('Raster')
-    const screen = historyScreen({ width: 60, range: '24h', metric: 'tokens', reports: { '24h': dayReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [], theme: 'dark' })
+    const screen = historyScreen({ width: 60, range: '24h', metric: 'tokens', reports: { '24h': dayReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), snapshot: null, accounts: [], daemon: { status: 'ok', detail: null }, expanded: [], theme: 'dark' })
     expect(trimmed(rows.slice(4))).toEqual(trimmed(painted(screen, 60)))
     expect(rows.some(row => row.includes('▇'))).toBe(true)
     await ui.unmount()
@@ -1343,7 +1348,7 @@ describe('plus mod', () => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on, { historyLag: () => clock.sleep(2000) })
     wiring.histories['30d'] = historyReport({ range: '30d' })
-    const asked = () => wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url.split('=')[1])
+    const asked = () => wiring.fetched.filter(call => call.url.includes('/history')).map(call => new URL(call.url).searchParams.get('range'))
     await start($)
     const ui = await mount($, 40)
     await ui.press({ key: 'tab-history' })
@@ -1355,6 +1360,108 @@ describe('plus mod', () => {
     expect(asked()).toEqual(['7d', '30d'])
     expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 30 days')).toBe(true)
     expect((await ui.find({ key: 'hist-spend-chart' }))?.type).toBe('Raster')
+  })
+
+  describe('History accounts', () => {
+    const me = { id: 'oauth:me', label: 'Me · Max', kind: 'oauth' as const }
+    const work = { id: 'oauth:work', label: 'Acme · Enterprise', kind: 'oauth' as const }
+    const listing = () => ({ '7d': historyReport({ accounts: [me, work] }), '24h': dayReport() })
+    const askedFor = (wiring: Wiring) => wiring.fetched.filter(call => call.url.includes('/history')).map(call => new URL(call.url).searchParams.get('account'))
+
+    test('a cycles the session account, the others and all, fetching each at once', async ($, on) => {
+      const clock = mock.clock(on, { now: NOW_MS })
+      const wiring = wire(on, { served: snapshot({ account: work }), histories: listing() })
+      await start($)
+      await clock.advance(1000)
+      const ui = await mount($, 60)
+      await ui.press({ key: 'tab-history' })
+      await clock.advance(1000)
+      expect((await ui.find({ key: 'account' }))?.props).toEqual({ key: 'account', hotkey: 'a', plain: true, label: 'Acme · Enterprise' })
+      expect(askedFor(wiring)).toEqual(['oauth:work'])
+      expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 7 days · Acme · Enterprise ')).toBe(true)
+      await ui.press({ key: 'account' })
+      expect((await ui.find({ key: 'account' }))?.props.label).toBe('Me · Max')
+      await clock.advance(100)
+      expect(askedFor(wiring)).toEqual(['oauth:work', 'oauth:me'])
+      expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 7 days · Me · Max ')).toBe(true)
+      await ui.press({ key: 'account' })
+      await clock.advance(100)
+      expect((await ui.find({ key: 'account' }))?.props.label).toBe('All')
+      expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 7 days · All ')).toBe(true)
+      await ui.press({ key: 'account' })
+      await clock.advance(100)
+      expect((await ui.find({ key: 'account' }))?.props.label).toBe('Acme · Enterprise')
+      expect(askedFor(wiring)).toEqual(['oauth:work', 'oauth:me', 'all', 'oauth:work'])
+      expect(wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url)[2]).toBe('http://claude-plus/history?range=7d&account=all')
+    })
+
+    test('a report for the account left while it was on its way is not shown', async ($, on) => {
+      const clock = mock.clock(on, { now: NOW_MS })
+      const wiring = wire(on, { served: snapshot({ account: work }), histories: listing(), historyLag: () => clock.sleep(2000) })
+      await start($)
+      await clock.advance(1000)
+      const ui = await mount($, 60)
+      await ui.press({ key: 'tab-history' })
+      for (let step = 0; step < 30; step += 1) await clock.advance(100)
+      expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 7 days · Acme · Enterprise ')).toBe(true)
+      await ui.press({ key: 'account' })
+      await clock.advance(500)
+      await ui.press({ key: 'account' })
+      for (let step = 0; step < 20; step += 1) await clock.advance(100)
+      expect(askedFor(wiring)).toEqual(['oauth:work', 'oauth:me', 'all'])
+      expect((await ui.find({ key: 'account' }))?.props.label).toBe('All')
+      expect(await ui.find({ key: 'hist-spend-chart' })).toBeUndefined()
+      expect((await ui.find({ key: 'hist-loading' }))?.text).toBe('Loading the last 7 days… ✻')
+      for (let step = 0; step < 30; step += 1) await clock.advance(100)
+      expect(askedFor(wiring)).toEqual(['oauth:work', 'oauth:me', 'all'])
+      expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 7 days · All ')).toBe(true)
+    })
+
+    test('a session that moves to another account shows that account, not the one before', async ($, on) => {
+      const clock = mock.clock(on, { now: NOW_MS })
+      const wiring = wire(on, { served: snapshot({ account: work }), histories: listing() })
+      await start($)
+      await clock.advance(1000)
+      const ui = await mount($, 60)
+      await ui.press({ key: 'tab-history' })
+      await clock.advance(1000)
+      wiring.served = snapshot({ account: me })
+      await clock.advance(3000)
+      expect(askedFor(wiring)).toEqual(['oauth:work', 'oauth:me'])
+      expect((await ui.find({ key: 'account' }))?.props.label).toBe('Me · Max')
+      expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 7 days · Me · Max ')).toBe(true)
+    })
+
+    for (const columns of [26, 60, 144]) {
+      test(`the account control fits ${columns} columns without cutting a word`, async ($, on) => {
+        const clock = mock.clock(on, { now: NOW_MS })
+        wire(on, { served: snapshot({ account: work }), histories: listing() })
+        await start($)
+        await clock.advance(1000)
+        const ui = await mount($, columns)
+        await ui.press({ key: 'tab-history' })
+        await clock.advance(1000)
+        const rows = trimmed(paintTree(await ui.drawn(), columns))
+        expect(rows.filter(row => row.length > columns)).toEqual([])
+        const top = rows.findIndex(row => row.startsWith(' r: '))
+        expect(rows.slice(0, top)).toEqual(
+          columns === 26
+            ? [' ✻         1: Live 2: Ctx', '          3: Hist 4: Tips', '']
+            : columns === 60
+              ? [' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights', '']
+              : [` ✻ claude-plus${' '.repeat(88)}1: Live 2: Context 3: History 4: Insights`, ''],
+        )
+        const controls = rows.slice(top, rows.indexOf('', top))
+        expect(controls).toEqual(
+          columns === 26
+            ? [' r: 7 days  g: Cost', ' a: Acme · Enterprise']
+            : columns === 60
+              ? [' r: 7 days  g: Cost  a: Acme · Enterprise']
+              : [' r: 24h 7d 30d 90d  g: Cost Tokens % of 5h  a: Acme · Enterprise / Me · Max / All'],
+        )
+        expect(rows.find(row => row.includes('Last 7 days'))?.includes('…')).toBe(false)
+      })
+    }
   })
 
   test('a hidden pane asks for no History report until it is shown again', async ($, on) => {
@@ -1391,7 +1498,7 @@ describe('plus mod', () => {
     await ui.press({ key: 'range' })
     await clock.advance(1000)
     expect((await ui.find({ key: 'range' }))?.props.label).toBe('30 days')
-    expect(wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url.split('=')[1])).toEqual(['7d', '30d'])
+    expect(wiring.fetched.filter(call => call.url.includes('/history')).map(call => new URL(call.url).searchParams.get('range'))).toEqual(['7d', '30d'])
     expect((await ui.find({ key: 'hist-loading' }))?.text).toBe('Loading the last 30 days… ✻')
     await ui.press({ key: 'range' })
     await clock.advance(1000)
@@ -1756,6 +1863,29 @@ describe('plus mod', () => {
     await $.session.measure(MEASURE)
     await clock.advance(5000)
     expect(wiring.toasts.map(toast => toast.text)).toEqual(['At this pace the 5h limit runs out in 42m, before its reset in 2h 10m'])
+  })
+
+  test('a spend limit past 90% raises one toast a period, and a new session does not raise it again', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const spend: LimitWindow = {
+      window: 'spend_limit',
+      used_pct: 91,
+      resets_at_ms: Date.parse('2026-11-01T00:00:00Z'),
+      sampled_at_ms: NOW_MS - MINUTE_MS,
+      reset_since_sample: false,
+      pace: { pct_per_hour: 0.01, projected_pct: 95, full_at_ms: null },
+      calibration: { family: 'opus', pairs: 0, needed: 20, pct_per_usd: null },
+    }
+    const wiring = wire(on, { served: snapshot({ limits: [spend] }), insights: insightsReport({ recap: null }) })
+    await start($)
+    await clock.advance(5000)
+    expect(wiring.toasts.map(toast => toast.text)).toEqual(['91% of the spend limit is used, it resets in 20d 15h'])
+    await clock.advance(30_000)
+    wiring.session = 's2'
+    wiring.served = { ...snapshot({ limits: [spend] }), session: 's2' }
+    await start($)
+    await clock.advance(30_000)
+    expect(wiring.toasts.length).toBe(1)
   })
 
   test('context near the auto-compact threshold asks for a free summary once and raises one toast', async ($, on) => {

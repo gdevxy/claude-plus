@@ -316,6 +316,10 @@ export function fitting(width: number, ...choices: string[]): string {
   return choices.find(choice => choice.length <= width) ?? choices[choices.length - 1] ?? ''
 }
 
+export function fittingPair(width: number, ...choices: (readonly [string, string])[]): readonly [string, string] {
+  return choices.find(([left, right]) => left.length + 1 + right.length <= width) ?? choices[choices.length - 1] ?? ['', '']
+}
+
 export function plain(key: string, text: string, style: Style = {}): Line {
   return { key, segments: [{ text, ...style }] }
 }
@@ -357,9 +361,10 @@ export function meter(key: string, label: string, fraction: number, value: strin
   return { key, segments: [{ text: labelled }, { text: cells.filled, color }, ...track, { text: ` ${value}` }] }
 }
 
-export function contextHead(key: string, title: string, used: number | null, window: number, full: number | null, width: number, accent: Style = {}): Line {
+export function contextHead(key: string, titles: readonly string[], used: number | null, window: number, full: number | null, width: number, accent: Style = {}): Line {
   const amount = used === null ? tokens(window) : `${tokens(used)} / ${tokens(window)}`
   const note = full === null ? '' : ` · ${tokens(full)} model`
+  const title = fitting(width - amount.length - 1, ...titles)
   const shownNote = title.length + 1 + amount.length + note.length <= width ? note : ''
   const line = pair(key, title, `${amount}${shownNote}`, width, {}, { bold: true })
   const left = line.segments[0]!
@@ -464,7 +469,7 @@ function context(input: ScreenInput, width: number): Line[] {
   const color: ThemeKey = used >= CONTEXT_WARNING ? 'warning' : 'text'
   const mark = gauge.threshold === null ? null : gauge.threshold / gauge.window
   return [
-    contextHead('context', 'Context', gauge.tokens, gauge.window, gauge.modelWindow, width),
+    contextHead('context', ['Context'], gauge.tokens, gauge.window, gauge.modelWindow, width),
     meter('context-bar', '', used / 100, percent(used).padStart(4), width, color, mark),
   ]
 }
@@ -483,7 +488,8 @@ function cache(input: ScreenInput, snapshot: Snapshot | null, width: number): Li
   const state = clock.state === 'warm' ? 'warm' : 'cold'
   const right = clock.state === 'warm' ? `${countdown(clock.remainingMs)} left` : 'expired'
   const title = 'Cache '
-  const left = `${title}${glyph.text} ${state} (${ttl})`
+  const named = `${title}${glyph.text} ${state}`
+  const left = fitting(width - WHY_COLUMNS - right.length - 1, `${named} (${ttl})`, named, `${title}${glyph.text}`)
   const padded = spread(left, right, width - WHY_COLUMNS)
   const urgent = clock.state === 'warm' && clock.remainingMs <= LAST_MINUTE_MS
   lines.push({
@@ -512,7 +518,8 @@ function cache(input: ScreenInput, snapshot: Snapshot | null, width: number): Li
       lines.push(prose('cache-note', whole))
     } else {
       lines.push(prose('cache-note', 'Cache went cold while you were away'))
-      lines.push(pair('cache-rewarm', '  Rewarming will cost', price, width, {}, { dim: true }))
+      const label = fitting(width - price.length - 1, '  Rewarming will cost', '  Rewarming costs', '  Rewarming')
+      lines.push(pair('cache-rewarm', label, price, width, {}, { dim: true }))
     }
   } else if (live !== undefined && live.saved_usd >= 0.01) {
     const saved = `Cache hits saved you ${money(live.saved_usd)}`
@@ -555,18 +562,28 @@ function forecast(input: ScreenInput, snapshot: Snapshot | null, width: number):
   const next = snapshot?.live.forecast ?? null
   if (next === null || (next.warm_usd === null && next.cold_usd === null)) return []
   const warm = cacheClock(snapshot, input.local, input.nowMs).state === 'warm'
-  const cost = (usd: number | null, pct: number | null) =>
-    usd === null ? 'price unknown' : pct === null ? approx(usd) : `${approx(usd)} · ${finePercent(pct)} of 5h`
-  const warmCost = cost(next.warm_usd, next.warm_pct_5h)
-  const coldCost = cost(next.cold_usd, next.cold_pct_5h)
-  const current = currentModel(next.model, warm ? warmCost : coldCost, width)
-  const later = warm ? coldCost : warmCost
-  const when = warm ? fitting(width - later.length - 1, '    if the cache expires', '    if it expires') : '    then'
+  const cost = (usd: number | null, pct: number | null, share: boolean) =>
+    usd === null ? 'price unknown' : pct === null || !share ? approx(usd) : `${approx(usd)} · ${finePercent(pct)} of 5h`
+  const marked = `● ${modelName(next.model)}`
+  const whens = warm ? ['    if the cache expires', '    if it expires'] : ['    then']
+  const shortest = whens[whens.length - 1] ?? ''
+  const costs = (share: boolean) => {
+    const warmCost = cost(next.warm_usd, next.warm_pct_5h, share)
+    const coldCost = cost(next.cold_usd, next.cold_pct_5h, share)
+    return warm ? { now: warmCost, later: coldCost } : { now: coldCost, later: warmCost }
+  }
+  const full = costs(true)
+  const fits = (left: string, right: string) => left.length + 1 + right.length <= width
+  const { now, later } = fits(marked, full.now) && fits(shortest, full.later) ? full : costs(false)
+  const current = currentModel(next.model, now, width)
+  const when = fitting(width - later.length - 1, ...whens)
   const after = pair('next-after', when, later, width, { dim: true }, { dim: true })
   const others = next.lineup.filter(entry => entry.model !== next.model)
   const above = next.lineup.findIndex(entry => entry.model === next.model)
+  const both = (entry: ModelCost) => `${approx(entry.cold_usd)}, then ${approx(entry.warm_usd)}`
+  const thenWarm = others.every(entry => fits(`  ${modelName(entry.model)}`, both(entry)))
   const switched = (entry: ModelCost) =>
-    pair(`next-${entry.model}`, `  ${modelName(entry.model)}`, `${approx(entry.cold_usd)}, then ${approx(entry.warm_usd)}`, width, {}, { dim: true })
+    pair(`next-${entry.model}`, `  ${modelName(entry.model)}`, thenWarm ? both(entry) : approx(entry.cold_usd), width, {}, { dim: true })
   const lines: Line[] = [
     forecastHeading(warm, width),
     ...others.slice(0, Math.max(0, above)).map(switched),
@@ -621,8 +638,15 @@ function session(input: ScreenInput, snapshot: Snapshot | null, width: number): 
   if (snapshot !== null) {
     const t = snapshot.totals.tokens
     const prompt = t.input + t.cache_read + t.cache_write_5m + t.cache_write_1h
-    lines.push(pair('session-tokens', '  Processed / generated', `${tokens(prompt)} / ${tokens(t.output)}`, width, {}, { dim: true }))
-    lines.push(pair('session-turns', '  Turns · subagents', `${input.local.turns} · ${snapshot.totals.subagents}`, width, {}, { dim: true }))
+    const processed = `${tokens(prompt)} / ${tokens(t.output)}`
+    lines.push(pair('session-tokens', fitting(width - processed.length - 1, '  Processed / generated', '  In / out'), processed, width, {}, { dim: true }))
+    const [turnsLabel, turnsValue] = fittingPair(
+      width,
+      ['  Turns · subagents', `${input.local.turns} · ${snapshot.totals.subagents}`],
+      ['  Turns · agents', `${input.local.turns} · ${snapshot.totals.subagents}`],
+      ['  Turns', String(input.local.turns)],
+    )
+    lines.push(pair('session-turns', turnsLabel, turnsValue, width, {}, { dim: true }))
     if (snapshot.totals.reconciled_usd >= 0.01) {
       lines.push(pair('session-reconciled', '  Reconciled', money(snapshot.totals.reconciled_usd), width, { dim: true }, { dim: true }))
     }

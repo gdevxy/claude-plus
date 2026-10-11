@@ -94,7 +94,7 @@ export function paintTree(node: Drawn, width: number): string[] {
   const rows =
     props.flexDirection === 'column'
       ? children.flatMap(child => paintTree(child, inner))
-      : across(children, inner, props.justifyContent === 'space-between', cells(props.gap))
+      : across(children, inner, props.justifyContent === 'space-between', cells(props.gap)).map(row => (props.justifyContent === 'flex-end' ? row.padStart(inner) : row))
   return rows.map(row => `${' '.repeat(left)}${row}`)
 }
 

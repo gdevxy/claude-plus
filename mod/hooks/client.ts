@@ -132,12 +132,12 @@ export function parseContext(text: string): ContextReport | null {
   return value as unknown as ContextReport
 }
 
-export function historyPath(range: HistoryRange): string {
-  return `/history?range=${range}`
+export function historyPath(range: HistoryRange, account: string | null): string {
+  return `/history?range=${range}&account=${account === null ? 'all' : encodeURIComponent(account)}`
 }
 
-export async function fetchHistory(io: Io, socket: string, range: HistoryRange): Promise<HistoryReply> {
-  const reply = await request(io, socket, historyPath(range), {}, HISTORY_TIMEOUT_MS)
+export async function fetchHistory(io: Io, socket: string, range: HistoryRange, account: string | null): Promise<HistoryReply> {
+  const reply = await request(io, socket, historyPath(range, account), {}, HISTORY_TIMEOUT_MS)
   if (!reply.ok) {
     if (reply.status === NOT_FOUND_STATUS) return { kind: 'missing' }
     return reply.status === REBUILDING_STATUS ? { kind: 'rebuilding' } : { kind: 'failed', reason: reply.reason }
@@ -151,6 +151,8 @@ export function parseHistory(text: string): HistoryReport | null {
   if (!isObject(value) || value.v !== 1 || typeof value.range !== 'string' || !isObject(value.totals)) return null
   const lists = [value.buckets, value.models, value.projects, value.sessions]
   if (!lists.every(Array.isArray) || !isObject(value.calibration)) return null
+  if (typeof value.account !== 'string') value.account = null
+  if (!Array.isArray(value.accounts)) value.accounts = []
   return value as unknown as HistoryReport
 }
 

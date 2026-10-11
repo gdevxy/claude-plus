@@ -3,7 +3,7 @@ import type { ThemeKey } from 'claude-code'
 import type { BreakdownCategory, ConfigGroup, ContextItem, ContextReport, Daemon, History, ItemKind, LiveContext, Local, Part, SourceKind } from '../types'
 import { bar, duration, fit, modelName, percent, tokens } from './format'
 import type { Line } from './state'
-import { CONTEXT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, contextHead, gap, heading, meter, modelWindowBeyond, notice, pair, plain, prose } from './state'
+import { CONTEXT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, contextHead, fitting, fittingPair, gap, heading, meter, modelWindowBeyond, notice, pair, plain, prose } from './state'
 
 export const LABEL_COLUMNS = 16
 export const VALUE_COLUMNS = 7
@@ -148,7 +148,7 @@ function headline(input: ContextInput, composition: LiveContext | null, width: n
   if (composition === null && (measure === null || measure.contextPercent === null)) {
     return [plain('ctx-head', 'Context', { bold: true }), prose('ctx-empty', 'The breakdown appears after your first prompt ✻', { dim: true })]
   }
-  const title = composition === null ? 'Context' : `Context · ${modelName(composition.model)}`
+  const titles = composition === null ? ['Context'] : [`Context · ${modelName(composition.model)}`, 'Context']
   const used = composition?.total_tokens ?? measure?.contextTokens ?? null
   const window = composition?.max_tokens ?? measure?.contextWindow ?? 0
   const fill = composition?.percentage ?? measure?.contextPercent ?? 0
@@ -157,7 +157,7 @@ function headline(input: ContextInput, composition: LiveContext | null, width: n
   const full = composition === null ? null : modelWindowBeyond(input.local, composition.model, window)
   const mark = threshold === null || window <= 0 ? null : threshold / window
   const lines = [
-    contextHead('ctx-head', title, used, window, full, width, { color: 'claude', bold: true }),
+    contextHead('ctx-head', titles, used, window, full, width, { color: 'claude', bold: true }),
     meter('ctx-bar', '', fill / 100, percent(fill).padStart(4), width, color, mark),
   ]
   if (threshold !== null && used !== null) {
@@ -250,8 +250,9 @@ function unused(report: ContextReport | null, width: number): Line[] {
   if (items.length === 0) return []
   const total = items.reduce((sum, item) => sum + item.tokens, 0)
   const estimated = items.some(item => item.estimated)
+  const cost = `${estimated ? '~' : ''}${tokens(total)} a turn`
   const lines = [
-    pair('ctx-unused', 'Not used in 14 days', `${estimated ? '~' : ''}${tokens(total)} a turn`, width, { dim: true }, { bold: true }),
+    pair('ctx-unused', fitting(width - cost.length - 1, 'Not used in 14 days', 'Unused'), cost, width, { dim: true }, { bold: true }),
     ...items.slice(0, UNUSED_SHOWN).map((item, index) => itemRow(`ctx-unused-${index}`, item, width)),
   ]
   const more = moreRow('ctx-unused-more', '  ', items.slice(UNUSED_SHOWN), width)
@@ -281,7 +282,8 @@ function configured(input: ContextInput, report: ContextReport | null, width: nu
   for (const [kind, label] of SOURCES) {
     const mine = groups.filter(group => group.kind === kind)
     if (mine.length === 0) continue
-    lines.push(pair(`ctx-config-${kind}`, `  ${label}`, configValue(mine), width, {}, { dim: true }))
+    const [shown, value] = fittingPair(width, [`  ${label}`, configValue(mine)], [`  ${label}`, configTotal(mine)])
+    lines.push(pair(`ctx-config-${kind}`, shown, value, width, {}, { dim: true }))
   }
   if (input.expanded.includes('config') && report !== null) {
     const ago = duration(Math.max(0, input.nowMs - report.config.scanned_at_ms))
@@ -296,9 +298,13 @@ function configured(input: ContextInput, report: ContextReport | null, width: nu
   return lines
 }
 
+function configTotal(groups: ConfigGroup[]): string {
+  return String(groups.reduce((sum, group) => sum + group.count, 0))
+}
+
 function configValue(groups: ConfigGroup[]): string {
   const count = (loading: string) => groups.filter(group => group.loading === loading).reduce((sum, group) => sum + group.count, 0)
-  const parts = [String(groups.reduce((sum, group) => sum + group.count, 0))]
+  const parts = [configTotal(groups)]
   if (count('on_demand') > 0) parts.push(`${count('on_demand')} on demand`)
   if (count('off') > 0) parts.push(`${count('off')} off`)
   return parts.join(' · ')

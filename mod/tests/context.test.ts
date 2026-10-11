@@ -5,6 +5,7 @@ import { compositionOf, contextScreen, themeColor } from '../hooks/context'
 import type { Line } from '../hooks/state'
 import { WHY_COLUMNS } from '../hooks/state'
 import { MINUTE_MS, NOW_MS, contextReport, local } from './fixtures'
+import { painted, trimmed } from './paint'
 
 const OK = { status: 'ok', detail: null } as const
 
@@ -294,5 +295,21 @@ describe('context screen', () => {
     expect(line(lines, 'ctx-cat-2').segments[1]).toEqual({ text: '█▎', color: 'permission' })
     expect(line(lines, 'ctx-cat-6').segments[1]?.color).toBe('text')
     expect(line(lines, 'ctx-cat-7').segments.every(segment => segment.dim === true)).toBe(true)
+  })
+})
+
+describe('narrow context', () => {
+  test('fixed labels fall back to shorter whole words at the narrowest width instead of being cut', () => {
+    const rows = trimmed(painted(contextScreen(input({ width: 26 })), 26))
+    expect(rows.filter(row => /^ Context|Unused|Not used|CLAUDE\.md files|^   Skills|Plugins/.test(row))).toEqual([
+      ' Context       46k / 200k',
+      ' Unused       2.3k a turn',
+      '   CLAUDE.md files      3',
+      '   Skills              66',
+      '   Plugins      5 · 1 off',
+    ])
+    const crowded = contextReport({ config: { ...contextReport().config, groups: [{ kind: 'skill', loading: 'on_demand', count: 66, tokens: 1000 }] } })
+    expect(trimmed(painted(contextScreen(input({ width: 26, report: crowded })), 26)).filter(row => row.startsWith('   Skills'))).toEqual(['   Skills              66'])
+    expect(rows.filter(row => /…(?!\s*✻?\s*$)/.test(row) && !/Skill |MCP |CLAUDE\.md ·/.test(row))).toEqual([])
   })
 })

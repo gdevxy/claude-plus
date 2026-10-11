@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { AlertInput } from '../hooks/alerts'
 import { EMPTY_ALERTED, alertsOf, merged, ownAlerts, thresholdOf, wantsThreshold } from '../hooks/alerts'
 import type { Alerted, LimitWindow, Local } from '../types'
-import { MINUTE_MS, NOW_MS, local, snapshot } from './fixtures'
+import { DAY_MS, MINUTE_MS, NOW_MS, local, snapshot } from './fixtures'
 
 const OK = { status: 'ok', detail: null } as const
 const KNOWN: Alerted = { ...EMPTY_ALERTED, session: 's1' }
@@ -26,6 +26,20 @@ function pacing(fullInMs: number | null, resetsInMs: number) {
     pace: { pct_per_hour: 40, projected_pct: 120, full_at_ms: fullInMs === null ? null : NOW_MS + fullInMs },
   }
   return snapshot({ limits: [limit] })
+}
+
+const PERIOD_END_MS = Date.parse('2026-11-01T00:00:00Z')
+
+function spendWindow(used: number, window = 'spend_limit', resetsAtMs = PERIOD_END_MS): LimitWindow {
+  return {
+    window,
+    used_pct: used,
+    resets_at_ms: resetsAtMs,
+    sampled_at_ms: NOW_MS - MINUTE_MS,
+    reset_since_sample: false,
+    pace: { pct_per_hour: 0.01, projected_pct: 60, full_at_ms: null },
+    calibration: { family: 'opus', pairs: 0, needed: 20, pct_per_usd: null },
+  }
 }
 
 function near(tokens: number, threshold: number | null): Local {
@@ -104,8 +118,39 @@ describe('alerts', () => {
     expect(thresholdOf(near(1, 167_000), { ...KNOWN, threshold: 150_000 })).toBe(167_000)
   })
 
+  test('warns once a period when the spend pace goes past the limit and once at 90%', () => {
+    const base = { nowMs: NOW_MS, local: local(), daemon: OK, known: EMPTY_ALERTED }
+    const over = snapshot({ limits: [{ ...spendWindow(40), pace: { pct_per_hour: 0.2, projected_pct: 130, full_at_ms: NOW_MS + 10 * DAY_MS } }] })
+    const first = alertsOf({ ...base, snapshot: over })
+    expect(first.alerts.map(a => a.kind)).toEqual(['spend'])
+    expect(first.alerts[0]?.text).toBe('At this pace the spend limit runs out in 10d, before its reset in 20d 15h')
+    expect(alertsOf({ ...base, snapshot: over, known: first.next }).alerts).toEqual([])
+    const high = alertsOf({ ...base, snapshot: snapshot({ limits: [spendWindow(91)] }), known: first.next })
+    expect(high.alerts.map(a => a.text)).toEqual(['91% of the spend limit is used, it resets in 20d 15h'])
+    expect(alertsOf({ ...base, snapshot: snapshot({ limits: [spendWindow(95)] }), known: high.next }).alerts).toEqual([])
+  })
+
+  test('the spend alerts fire again in the next period and name a budget as such', () => {
+    const base = { nowMs: NOW_MS, local: local(), daemon: OK, known: EMPTY_ALERTED }
+    const fired = alertsOf({ ...base, snapshot: snapshot({ limits: [spendWindow(91)] }) }).next
+    const nextPeriod = Date.parse('2026-12-01T00:00:00Z')
+    expect(alertsOf({ ...base, snapshot: snapshot({ limits: [spendWindow(92, 'spend_limit', nextPeriod)] }), known: fired }).alerts.map(a => a.kind)).toEqual(['spend'])
+    const budget = snapshot({ limits: [{ ...spendWindow(50, 'budget'), pace: { pct_per_hour: 0.2, projected_pct: 130, full_at_ms: NOW_MS + 10 * DAY_MS + 3 * 60 * MINUTE_MS } }] })
+    expect(alertsOf({ ...base, snapshot: budget }).alerts.map(a => a.text)).toEqual(['At this pace the budget runs out in 10d 3h, before its reset in 20d 15h'])
+    const late = snapshot({ limits: [{ ...spendWindow(50), pace: { pct_per_hour: 0.2, projected_pct: 130, full_at_ms: PERIOD_END_MS + DAY_MS } }] })
+    expect(alertsOf({ ...base, snapshot: late }).alerts).toEqual([])
+    expect(alertsOf({ ...base, snapshot: snapshot({ limits: [spendWindow(89)] }) }).alerts).toEqual([])
+  })
+
+  test('a new session keeps the spend alerts of the period and forgets the rest', () => {
+    const before: Alerted = { ...EMPTY_ALERTED, session: 's0', cacheFor: 1, paceFor: 2, spendFor: PERIOD_END_MS, spendHighFor: PERIOD_END_MS }
+    expect(ownAlerts(before, 's1')).toEqual({ ...EMPTY_ALERTED, session: 's1', spendFor: PERIOD_END_MS, spendHighFor: PERIOD_END_MS })
+    const known = { ...before, session: 's0' }
+    expect(alertsOf(input({ snapshot: snapshot({ limits: [spendWindow(91)] }), known })).alerts).toEqual([])
+  })
+
   test('a new session starts with nothing alerted', () => {
-    const before: Alerted = { session: 's0', model: null, cacheFor: 1, paceFor: 2, contextFired: true, threshold: 3, thresholdAsked: true }
+    const before: Alerted = { session: 's0', model: null, cacheFor: 1, paceFor: 2, spendFor: null, spendHighFor: null, contextFired: true, threshold: 3, thresholdAsked: true }
     expect(ownAlerts(before, 's1')).toEqual({ ...EMPTY_ALERTED, session: 's1' })
     expect(ownAlerts(before, 's0')).toBe(before)
     expect(alertsOf(input({ snapshot: expiring(59_000), known: { ...before, cacheFor: NOW_MS + 59_000 } })).alerts.map(alert => alert.kind)).toEqual(['cache'])

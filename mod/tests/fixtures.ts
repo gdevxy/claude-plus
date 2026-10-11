@@ -326,6 +326,8 @@ export function historyReport(overrides: Partial<HistoryReport> = {}): HistoryRe
       { id: 'a1b2c3d4-0000-0000-0000-000000000001', title: 'Plan the History view', project: 'claude-plus', last_ms: NOW_MS - 2 * HOUR_MS, ...spend(6.4) },
       { id: 'a1b2c3d4-0000-0000-0000-000000000002', title: null, project: 'shop', last_ms: NOW_MS - DAY_MS, ...spend(3.9) },
     ],
+    account: null,
+    accounts: [],
     ...overrides,
   }
 }

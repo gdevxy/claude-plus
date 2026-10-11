@@ -1,6 +1,6 @@
 import type { ThemeKey } from 'claude-code'
 
-import type { Bucket, ContextReport, Daemon, Failures, HistoryFailure, HistoryRange, HistoryReport, Local, Metric, Reports, Spend } from '../types'
+import type { AccountRef, Bucket, Chart, ContextReport, Daemon, Failures, HistoryFailure, HistoryRange, HistoryReport, Local, Metric, Reports, Snapshot, Spend } from '../types'
 import type { Layout, Piece } from './chart'
 import { area, bars, grouped, layout, markers, MARKER, stacked } from './chart'
 import { compositionOf, reportOf } from './context'
@@ -23,6 +23,8 @@ export const RETRY_SECONDS = 30
 export const MIN_HEAD = 8
 
 const SEPARATOR = ' · '
+const CURRENT = 'current'
+const ALL = 'all'
 
 const RANGE_LABELS: Readonly<Record<HistoryRange, string>> = { '24h': '24 hours', '7d': '7 days', '30d': '30 days', '90d': '90 days' }
 const METRIC_LABELS: Readonly<Record<Metric, string>> = { cost: 'Cost', tokens: 'Tokens', pct: '% of 5h' }
@@ -31,10 +33,13 @@ export type HistoryInput = {
   width: number
   range: HistoryRange
   metric: Metric
+  account?: string
   reports: Reports
   failures: Failures
   context: ContextReport | null
   local: Local
+  snapshot: Snapshot | null
+  accounts: readonly AccountRef[]
   daemon: Daemon
   expanded: readonly string[]
   theme: string
@@ -74,6 +79,39 @@ export function nextMetric(metric: Metric, report: HistoryReport | null): Metric
   return allowed[(allowed.indexOf(shownMetric(metric, report)) + 1) % allowed.length] ?? 'cost'
 }
 
+export type Listing = { accounts: readonly AccountRef[] }
+
+export function resolvedAccount(chart: Chart, snapshot: Snapshot | null): string | null {
+  const chosen = chart.account ?? CURRENT
+  if (chosen === ALL) return null
+  if (chosen === CURRENT) return snapshot?.live.account?.id ?? null
+  return chosen
+}
+
+function cycle(listing: Listing | null, snapshot: Snapshot | null): string[] {
+  const own = snapshot?.live.account?.id ?? null
+  const others = (listing?.accounts ?? []).map(account => account.id).filter(id => id !== own)
+  return [...(own === null ? [] : [CURRENT]), ...others, ALL]
+}
+
+export function nextAccount(chart: Chart, listing: Listing | null, snapshot: Snapshot | null): string {
+  const order = cycle(listing, snapshot)
+  const index = order.indexOf(chart.account ?? CURRENT)
+  return order[(index + 1) % order.length] ?? ALL
+}
+
+export function accountChoices(chart: Chart, listing: Listing | null, snapshot: Snapshot | null): Choice[] {
+  if ((listing?.accounts.length ?? 0) < 2) return []
+  const label = (id: string) =>
+    id === ALL ? 'All' : id === CURRENT ? (snapshot?.live.account?.label ?? 'Current') : (listing?.accounts.find(account => account.id === id)?.label ?? id)
+  const active = chart.account ?? CURRENT
+  return cycle(listing, snapshot).map(id => ({ text: label(id), isActive: id === active }))
+}
+
+export function accountLabel(chart: Chart, listing: Listing | null, snapshot: Snapshot | null): string {
+  return accountChoices(chart, listing, snapshot).find(choice => choice.isActive)?.text ?? 'All'
+}
+
 export function valueOf(spend: Spend, metric: Metric): number {
   if (metric === 'tokens') return spend.tokens
   if (metric === 'pct') return spend.pct_5h ?? 0
@@ -102,8 +140,16 @@ export function historyScreen(input: HistoryInput): Line[] {
   return sections.flatMap((section, index) => (index === 0 ? section : [gap(index), ...section]))
 }
 
-function headline(input: HistoryInput, report: HistoryReport | null, metric: Metric, width: number): Line[] {
+function titleOf(input: HistoryInput, room: number): string {
   const title = `Last ${rangeLabel(input.range)}`
+  const chart = { range: input.range, metric: input.metric, account: input.account }
+  const listing = { accounts: input.accounts }
+  if (accountChoices(chart, listing, input.snapshot).length === 0) return title
+  return fitting(room, `${title}${SEPARATOR}${accountLabel(chart, listing, input.snapshot)}`, title)
+}
+
+function headline(input: HistoryInput, report: HistoryReport | null, metric: Metric, width: number): Line[] {
+  const title = titleOf(input, width)
   const failure = input.failures[input.range]
   if (report === null) {
     if (input.daemon.status !== 'ok') return []
@@ -116,11 +162,12 @@ function headline(input: HistoryInput, report: HistoryReport | null, metric: Met
   }
   const value = amount(valueOf(totals, metric), metric)
   const why = metric === 'pct' ? 'hist-pct' : undefined
-  const head = pair('hist-head', title, value, why === undefined ? width : width - WHY_COLUMNS, { color: 'claude', bold: true }, { bold: true })
+  const room = (why === undefined ? width : width - WHY_COLUMNS) - value.length - 1
+  const head = pair('hist-head', titleOf(input, room), value, why === undefined ? width : width - WHY_COLUMNS, { color: 'claude', bold: true }, { bold: true })
   const lines: Line[] = [why === undefined ? head : { ...head, why }]
   const sessions = `${count(totals.sessions)} ${totals.sessions === 1 ? 'session' : 'sessions'}`
   const requests = `${count(totals.requests)} ${totals.requests === 1 ? 'request' : 'requests'}`
-  lines.push(plain('hist-sub', `${sessions} · ${requests}`, { dim: true }))
+  lines.push(plain('hist-sub', fitting(width, `${sessions} · ${requests}`, sessions), { dim: true }))
   if (failure !== undefined) lines.push(prose('hist-stale', `Could not refresh: ${failure.reason}`, { dim: true }))
   if (totals.unpriced > 0) {
     const noun = totals.unpriced === 1 ? 'request on an unknown model is' : 'requests on unknown models are'
@@ -224,7 +271,10 @@ function cacheChart(input: HistoryInput, report: HistoryReport, width: number): 
     lines.push(prose('explain-hist-hit', `The share of prompt tokens read from the cache instead of sent again.${scale}`, { dim: true }))
   }
   lines.push({ key: 'hist-hit-chart', segments: [], chart: bars(stacks, shape, HIT_ROWS, 1 - floor) })
-  if (totals.saved_usd >= 0.01) lines.push(pair('hist-saved', `${INDENT}Saved by cache hits`, money(totals.saved_usd), width, { color: 'success' }, { dim: true }))
+  if (totals.saved_usd >= 0.01) {
+    const saved = money(totals.saved_usd)
+    lines.push(pair('hist-saved', fitting(width - saved.length - 1, `${INDENT}Saved by cache hits`, `${INDENT}Saved`), saved, width, { color: 'success' }, { dim: true }))
+  }
   if (totals.rebuilds > 0) {
     lines.push(pair('hist-rebuilds', `${INDENT}Rebuilds`, `${totals.rebuilds} · ${approx(totals.rebuild_usd)}`, width, {}, { dim: true }))
   }
@@ -251,25 +301,25 @@ function peakChart(report: HistoryReport, width: number): Line[] {
 function top(kind: 'projects' | 'sessions', report: HistoryReport, metric: Metric, width: number): Line[] {
   const rows =
     kind === 'projects'
-      ? report.projects.map(project => ({ head: project.name, tail: `${project.sessions} ${project.sessions === 1 ? 'session' : 'sessions'}`, spend: project }))
-      : report.sessions.map(session => ({ head: session.title ?? `Untitled ${session.id.slice(0, 8)}`, tail: session.project, spend: session }))
+      ? report.projects.map(project => ({ head: project.name, tail: `${project.sessions} ${project.sessions === 1 ? 'session' : 'sessions'}`, cuttable: false, spend: project }))
+      : report.sessions.map(session => ({ head: session.title ?? `Untitled ${session.id.slice(0, 8)}`, tail: session.project, cuttable: true, spend: session }))
   if (rows.length === 0) return []
   return [
     plain(`hist-${kind}`, kind === 'projects' ? 'Top projects' : 'Top sessions', { bold: true }),
     ...rows.slice(0, TOP_SHOWN).map((row, index) => {
       const value = amount(valueOf(row.spend, metric), metric)
       const room = width - INDENT.length - value.length - 1
-      return pair(`hist-${kind}-${index}`, `${INDENT}${named(row.head, row.tail, room)}`, value, width, {}, { dim: true })
+      return pair(`hist-${kind}-${index}`, `${INDENT}${named(row.head, row.tail, room, row.cuttable)}`, value, width, {}, { dim: true })
     }),
   ]
 }
 
-function named(head: string, tail: string, room: number): string {
+function named(head: string, tail: string, room: number, cuttable: boolean): string {
   const whole = `${head}${SEPARATOR}${tail}`
   if (whole.length <= room) return whole
   const headRoom = room - SEPARATOR.length - tail.length
   if (headRoom >= MIN_HEAD) return `${fit(head, headRoom)}${SEPARATOR}${tail}`
-  if (head.length + SEPARATOR.length + MIN_HEAD <= room) return whole
+  if (cuttable && head.length + SEPARATOR.length + MIN_HEAD <= room) return whole
   return head
 }
 
@@ -280,10 +330,11 @@ function growth(input: HistoryInput, width: number): Line[] {
   const values = points.map(point => point.prompt_tokens)
   const window = compositionOf({ report: input.context, local: input.local })?.max_tokens ?? input.local.measure?.contextWindow ?? Math.max(...values)
   const last = values[values.length - 1] ?? 0
+  const used = `${tokens(last)} / ${tokens(window)}`
   const compacted = points.flatMap((point, index) => (point.compacted ? [Math.min(width - 1, Math.floor((index * width) / points.length))] : []))
   const curve = area(values, width, GROWTH_ROWS, window, 'claude')
   const lines: Line[] = [
-    pair('hist-growth', 'Context this session', `${tokens(last)} / ${tokens(window)}`, width, {}, { bold: true }),
+    pair('hist-growth', fitting(width - used.length - 1, 'Context this session', 'Context'), used, width, {}, { bold: true }),
     { key: 'hist-growth-chart', segments: [], chart: compacted.length > 0 ? stacked(markers(width, compacted, 'warning'), curve) : curve },
   ]
   if (compacted.length > 0) {

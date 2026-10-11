@@ -208,21 +208,34 @@ describe('daemon client', () => {
     expect(parseContext('nope')).toBeNull()
   })
 
+  test('asks History for an account with its id encoded', () => {
+    expect(historyPath('7d', null)).toBe('/history?range=7d&account=all')
+    expect(historyPath('30d', 'gateway:https://gw:443')).toBe('/history?range=30d&account=gateway%3Ahttps%3A%2F%2Fgw%3A443')
+  })
+
+  test('a history report from a daemon before accounts reads as all accounts with none listed', () => {
+    const { account: _account, accounts: _accounts, ...older } = historyReport()
+    const parsed = parseHistory(JSON.stringify({ v: 1, ...older }))
+    expect([parsed?.account, parsed?.accounts]).toEqual([null, []])
+    const listed = parseHistory(JSON.stringify({ v: 1, ...historyReport(), account: 'oauth:me', accounts: [{ id: 'oauth:me', label: 'Me · Max', kind: 'oauth' }] }))
+    expect([listed?.account, listed?.accounts.length]).toEqual(['oauth:me', 1])
+  })
+
   test('a history report is fetched for its range and a rebuilding daemon is told apart', async () => {
     const seen: [string, HttpInit][] = []
     const good = JSON.stringify({ v: 1, ...historyReport() })
     const serving = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: good }), seen)
-    expect(await fetchHistory(serving, '/s.sock', '30d')).toEqual({ kind: 'history', report: { v: 1, ...historyReport() } })
-    expect(seen[0]).toEqual(['http://claude-plus/history?range=30d', { socketPath: '/s.sock' }])
-    expect(historyPath('24h')).toBe('/history?range=24h')
+    expect(await fetchHistory(serving, '/s.sock', '30d', null)).toEqual({ kind: 'history', report: { v: 1, ...historyReport() } })
+    expect(seen[0]).toEqual(['http://claude-plus/history?range=30d&account=all', { socketPath: '/s.sock' }])
+    expect(historyPath('24h', null)).toBe('/history?range=24h&account=all')
     const rebuilding = answering(Promise.resolve({ status: 503, ok: false, headers: {}, text: '{"error":"the store is being rebuilt"}' }))
-    expect(await fetchHistory(rebuilding, '/s.sock', '7d')).toEqual({ kind: 'rebuilding' })
+    expect(await fetchHistory(rebuilding, '/s.sock', '7d', null)).toEqual({ kind: 'rebuilding' })
     const refused = answering(Promise.resolve({ status: 400, ok: false, headers: {}, text: '{"error":"range must be 24h, 7d, 30d or 90d"}' }))
-    expect(await fetchHistory(refused, '/s.sock', '7d')).toEqual({ kind: 'failed', reason: '400: range must be 24h, 7d, 30d or 90d' })
+    expect(await fetchHistory(refused, '/s.sock', '7d', null)).toEqual({ kind: 'failed', reason: '400: range must be 24h, 7d, 30d or 90d' })
     const garbled = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: '{"v":1}' }))
-    expect(await fetchHistory(garbled, '/s.sock', '7d')).toEqual({ kind: 'failed', reason: 'unreadable history' })
+    expect(await fetchHistory(garbled, '/s.sock', '7d', null)).toEqual({ kind: 'failed', reason: 'unreadable history' })
     const older = answering(Promise.resolve({ status: 404, ok: false, headers: {}, text: '{"error":"no route for GET /history"}' }))
-    expect(await fetchHistory(older, '/s.sock', '7d')).toEqual({ kind: 'missing' })
+    expect(await fetchHistory(older, '/s.sock', '7d', null)).toEqual({ kind: 'missing' })
   })
 
   test('the insights report is fetched for the session and a rebuilding or older daemon is told apart', async () => {
