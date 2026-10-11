@@ -121,29 +121,6 @@ impl Paths {
         Ok(())
     }
 
-    pub fn adopt_data_dir(&self) -> Result<()> {
-        let entries = self.entries()?;
-        if !entries
-            .iter()
-            .all(|name| OWN_NAMES.contains(&name.as_str()))
-        {
-            return Ok(());
-        }
-        self.mark_data_dir()?;
-        let mut adopted = String::new();
-        for name in entries.iter().filter(|name| {
-            DATABASE_FILES.contains(&name.as_str()) || DAEMON_FILES.contains(&name.as_str())
-        }) {
-            adopted.push_str(&format!("{ADOPTED}{name}\n"));
-        }
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(self.marker())
-            .and_then(|mut file| file.write_all(adopted.as_bytes()))
-            .with_context(|| format!("cannot write {}", self.marker().display()))
-    }
-
     fn entries(&self) -> Result<Vec<String>> {
         std::fs::read_dir(&self.data_dir)
             .with_context(|| format!("cannot read {}", self.data_dir.display()))?
@@ -172,34 +149,10 @@ impl Paths {
     }
 }
 
-pub fn adopted_in(marker: &str) -> impl Iterator<Item = &str> {
-    marker
-        .lines()
-        .filter_map(|line| line.strip_prefix(ADOPTED))
-        .filter(|name| DATABASE_FILES.contains(name) || DAEMON_FILES.contains(name))
-}
-
-const ADOPTED: &str = "written by an earlier claude-plus: ";
-
 pub const MARKER: &str = ".claude-plus-data";
 
 pub const DATABASE_FILES: &[&str] = &["data.db-wal", "data.db-shm", "data.db-journal"];
 pub const DAEMON_FILES: &[&str] = &["daemon.sock", "daemon.lock", "daemon.log", "daemon.log.1"];
-const OWN_NAMES: &[&str] = &[
-    MARKER,
-    "data.db",
-    "data.db-wal",
-    "data.db-shm",
-    "data.db-journal",
-    "daemon.sock",
-    "daemon.lock",
-    "daemon.log",
-    "daemon.log.1",
-    "marketplace",
-    "marketplace.lock",
-    "marketplace.new",
-    "marketplace.old",
-];
 const MARKER_TEXT: &str =
     "claude-plus keeps its data here; claude-plus uninstall --purge deletes what it wrote\n";
 
@@ -356,9 +309,13 @@ mod tests {
     }
 
     #[test]
-    fn only_a_new_or_empty_data_dir_or_one_with_an_adopted_store_is_marked() {
+    fn only_a_new_or_empty_data_dir_is_marked() {
         let temp = tempfile::tempdir().unwrap();
         let at = |name: &str| Paths::resolve(temp.path(), None, Some(temp.path().join(name)));
+        let new = at("new");
+        new.ensure_data_dir().unwrap();
+        assert!(new.marker().is_file());
+
         let empty = at("empty");
         std::fs::create_dir(&empty.data_dir).unwrap();
         empty.ensure_data_dir().unwrap();
@@ -368,22 +325,9 @@ mod tests {
         std::fs::create_dir(&foreign.data_dir).unwrap();
         std::fs::write(foreign.data_dir.join("daemon.log"), "theirs").unwrap();
         foreign.ensure_data_dir().unwrap();
-        let store = crate::store::Store::open(&foreign.database()).unwrap();
-        assert!(!store.adopted());
+        drop(crate::store::Store::open(&foreign.database()).unwrap());
+        foreign.ensure_data_dir().unwrap();
         assert!(!foreign.marker().exists());
-
-        let earlier = at("earlier");
-        std::fs::create_dir(&earlier.data_dir).unwrap();
-        std::fs::write(earlier.data_dir.join("daemon.log"), "ours").unwrap();
-        earlier.adopt_data_dir().unwrap();
-        let text = std::fs::read_to_string(earlier.marker()).unwrap();
-        assert_eq!(adopted_in(&text).collect::<Vec<_>>(), ["daemon.log"]);
-
-        let mixed = at("mixed");
-        std::fs::create_dir(&mixed.data_dir).unwrap();
-        std::fs::write(mixed.data_dir.join("precious"), "theirs").unwrap();
-        mixed.adopt_data_dir().unwrap();
-        assert!(!mixed.marker().exists());
     }
 
     #[test]

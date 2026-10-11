@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 
 use super::daemon::{ensured, stopped};
 use crate::daemon::control::{self, is_older};
-use crate::paths::{DAEMON_FILES, DATABASE_FILES, MARKER, Paths, adopted_in};
+use crate::paths::{DAEMON_FILES, DATABASE_FILES, MARKER, Paths};
 use crate::setup::bundle::{self, MARKETPLACE, PLUGIN_ID};
 use crate::setup::claude::{self, ClaudeCode, Outcome, Step};
 use crate::setup::{Found, install_steps, uninstall_steps};
@@ -236,11 +236,8 @@ fn purge_data_dir(paths: &Paths) -> Result<Option<Vec<String>>> {
         );
     }
     let marked = born(&dir, MARKER);
-    let marker = read_marker(&dir);
-    let written_by_claude_plus = |name: &str| {
-        adopted_in(&marker).any(|adopted| adopted == name)
-            || marked.is_some_and(|marked| born(&dir, name).is_some_and(|at| at >= marked))
-    };
+    let written_by_claude_plus =
+        |name: &str| marked.is_some_and(|marked| born(&dir, name).is_some_and(|at| at >= marked));
     let database = present(&dir, "data.db");
     let database_is_ours = database && holds_claude_plus_database(&dir);
     let mut ours: Vec<&str> = Vec::new();
@@ -287,28 +284,11 @@ fn present(dir: &std::os::fd::OwnedFd, name: &str) -> bool {
     rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).is_ok()
 }
 
-fn read_marker(dir: &std::os::fd::OwnedFd) -> String {
-    use rustix::fs::{Mode, OFlags};
-    use std::io::Read;
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let mut text = String::new();
-    if let Ok(fd) = rustix::fs::openat(dir, MARKER, flags, Mode::empty()) {
-        let _ = std::fs::File::from(fd)
-            .take(64 * 1024)
-            .read_to_string(&mut text);
-    }
-    text
-}
-
 fn holds_claude_plus_database(dir: &std::os::fd::OwnedFd) -> bool {
-    use rustix::fs::{FileType, Mode, OFlags};
+    use rustix::fs::{Mode, OFlags};
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let Ok(fd) = rustix::fs::openat(dir, "data.db", flags, Mode::empty()) else {
-        return false;
-    };
-    let regular = rustix::fs::fstat(&fd)
-        .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
-    regular && crate::store::is_claude_plus_database(&mut std::fs::File::from(fd))
+    rustix::fs::openat(dir, "data.db", flags, Mode::empty())
+        .is_ok_and(crate::store::is_claude_plus_store)
 }
 
 #[cfg(target_vendor = "apple")]
@@ -398,7 +378,7 @@ fn purge_refusal(paths: &Paths) -> Option<String> {
     }
     if !paths.marker().is_file() {
         return refuse(format!(
-            "claude-plus cannot tell it made it, as it has no {MARKER} file; a directory that holds only what claude-plus writes gets that file when the daemon starts (claude-plus daemon stop, then claude-plus daemon --ensure)"
+            "claude-plus cannot tell it made it, as it has no {MARKER} file, which claude-plus writes only in a directory it created or found empty; delete it yourself if you know it holds nothing but claude-plus data"
         ));
     }
     None

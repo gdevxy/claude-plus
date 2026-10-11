@@ -289,9 +289,10 @@ fn a_daemon_that_cannot_open_the_store_explains_where_to_look() {
         ));
     let text = std::fs::read_to_string(&log).unwrap();
     assert!(
-        text.contains(
-            "was created by a pre-release claude-plus; delete it and run claude-plus import"
-        ),
+        text.contains(&format!(
+            "{} is not a claude-plus store, so claude-plus leaves it as it is",
+            env.plus.join("data.db").display()
+        )),
         "{text}"
     );
 }

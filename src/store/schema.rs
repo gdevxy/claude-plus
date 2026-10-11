@@ -181,21 +181,6 @@ INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXI
 "#,
 ];
 
-pub fn known_objects() -> &'static std::collections::BTreeSet<String> {
-    static KNOWN: std::sync::OnceLock<std::collections::BTreeSet<String>> =
-        std::sync::OnceLock::new();
-    KNOWN.get_or_init(|| {
-        let conn = rusqlite::Connection::open_in_memory().expect("an in-memory database opens");
-        let mut known = std::collections::BTreeSet::new();
-        for sql in MIGRATIONS {
-            conn.execute_batch(sql)
-                .expect("every migration applies in order");
-            known.extend(super::schema_objects(&conn).expect("the schema is readable"));
-        }
-        known
-    })
-}
-
 pub fn version_of(index: usize) -> usize {
     PRE_RELEASE_VERSIONS.end() + index + 1
 }

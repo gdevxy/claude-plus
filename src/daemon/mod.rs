@@ -59,9 +59,6 @@ fn run_locked(
         lock => lock?,
     };
     let mut store = Store::open(&paths.database())?;
-    if store.adopted() {
-        paths.adopt_data_dir()?;
-    }
     prune_breakdowns(&mut store, paths, log)?;
     let reader = Store::open_read_only(&paths.database())?;
     let history_reader = Store::open_read_only(&paths.database())?;

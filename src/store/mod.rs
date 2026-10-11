@@ -47,7 +47,7 @@ pub struct Busy;
 pub struct PreRelease;
 
 #[derive(Debug, thiserror::Error)]
-#[error("not a claude-plus database")]
+#[error("not a claude-plus store")]
 pub struct NotOurs;
 
 pub const APPLICATION_ID: i32 = 0x436c_2b70;
@@ -70,7 +70,6 @@ pub struct MigrationFailed {
 
 pub struct Store {
     conn: Connection,
-    adopted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,48 +134,36 @@ impl Store {
     }
 
     fn open_writable(path: &Path) -> Result<Self> {
+        create_stamped(path)?;
+        refuse_unstamped(path)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(path)
-                .with_context(|| format!("cannot create {}", path.display()))?;
+            use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("cannot restrict {} to its owner", path.display()))?;
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        let adopted = check_owner(&conn, Stamp::Yes)?;
+        refuse_unstamped_connection(&conn)?;
         use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let mut store = Self::migrated(conn)?;
-        store.adopted = adopted;
-        Ok(store)
+        Self::migrated(conn)
     }
 
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let open = || -> Result<Self> {
+            refuse_unstamped(path)?;
             let conn = Connection::open_with_flags(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
             conn.busy_timeout(READ_BUSY_TIMEOUT)?;
-            check_owner(&conn, Stamp::No)?;
-            let store = Self {
-                conn,
-                adopted: false,
-            };
+            refuse_unstamped_connection(&conn)?;
+            let store = Self { conn };
             store.refuse_unsupported_schema()?;
             Ok(store)
         };
         open().map_err(|error| opening_error(path, error))
-    }
-
-    pub fn adopted(&self) -> bool {
-        self.adopted
     }
 
     pub fn reading<T>(&self, read: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
@@ -219,10 +206,7 @@ impl Store {
     fn migrated_with(conn: Connection, migrations: &[&str]) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
-        let mut store = Self {
-            conn,
-            adopted: false,
-        };
+        let mut store = Self { conn };
         store.refuse_unsupported_schema()?;
         let latest = schema::version_of(migrations.len() - 1);
         while store.schema_version()? < latest {
@@ -427,57 +411,73 @@ fn migration_failed(version: usize, error: rusqlite::Error) -> anyhow::Error {
     .into()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Stamp {
-    Yes,
-    No,
+fn create_stamped(path: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Ok(());
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut fresh = path.as_os_str().to_owned();
+    fresh.push(format!(
+        ".new-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let fresh = std::path::PathBuf::from(fresh);
+    let created = stamp_new_file(&fresh).and_then(|()| match std::fs::hard_link(&fresh, path) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+            Err(error).with_context(|| format!("cannot create {}", path.display()))
+        }
+        _ => Ok(()),
+    });
+    let _ = std::fs::remove_file(&fresh);
+    created
 }
 
-fn check_owner(conn: &Connection, stamp: Stamp) -> Result<bool> {
+fn stamp_new_file(fresh: &Path) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(fresh)
+        .with_context(|| format!("cannot create {}", fresh.display()))?;
+    Connection::open(fresh)?.pragma_update(None, "application_id", APPLICATION_ID)?;
+    Ok(())
+}
+
+fn refuse_unstamped(path: &Path) -> Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(path, flags, Mode::empty())
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    if !is_claude_plus_store(fd) {
+        return Err(NotOurs.into());
+    }
+    Ok(())
+}
+
+fn refuse_unstamped_connection(conn: &Connection) -> Result<()> {
     let id: i32 = conn
         .pragma_query_value(None, "application_id", |row| row.get(0))
         .map_err(friendly)?;
-    if id == APPLICATION_ID {
-        return Ok(false);
-    }
-    let objects = schema_objects(conn).map_err(friendly)?;
-    if id != 0 || !objects.is_subset(schema::known_objects()) {
+    if id != APPLICATION_ID {
         return Err(NotOurs.into());
     }
-    let version = user_version(conn)?;
-    if schema::PRE_RELEASE_VERSIONS.contains(&version) || version > Store::latest_schema_version() {
-        return Ok(false);
-    }
-    if objects.is_empty() != (version == 0) {
-        return Err(NotOurs.into());
-    }
-    let legacy = version > 0;
-    if stamp == Stamp::No {
-        return Ok(false);
-    }
-    conn.pragma_update(None, "application_id", APPLICATION_ID)
-        .map_err(friendly)?;
-    if legacy {
-        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-            .map_err(friendly)?;
-    }
-    Ok(legacy)
+    Ok(())
 }
 
-pub(crate) fn schema_objects(
-    conn: &Connection,
-) -> rusqlite::Result<std::collections::BTreeSet<String>> {
-    conn.prepare(
-        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view', 'trigger') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
-    )?
-    .query_map([], |row| row.get(0))?
-    .collect()
+pub fn is_claude_plus_store(fd: std::os::fd::OwnedFd) -> bool {
+    use rustix::fs::FileType;
+    let regular = rustix::fs::fstat(&fd)
+        .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+    regular && is_claude_plus_database(&mut std::fs::File::from(fd))
 }
 
 fn opening_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
     if error.is::<NotOurs>() {
         return anyhow::anyhow!(
-            "{} is not a claude-plus database, so claude-plus leaves it alone; move it away, or set CLAUDE_PLUS_HOME to a directory of its own",
+            "{} is not a claude-plus store, so claude-plus leaves it as it is; move it aside, or set CLAUDE_PLUS_HOME to a directory of its own",
             path.display()
         );
     }
@@ -632,6 +632,13 @@ pub(crate) fn raw_records(conn: &Connection, file_id: i64, kinds: &[&str]) -> Re
 mod tests {
     use super::*;
     use crate::transcript::TokenCounts;
+
+    fn stamped(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        conn
+    }
 
     fn request(key: &str, ts: i64, model: &str, cost: Option<f64>) -> RequestRow {
         RequestRow {
@@ -1236,8 +1243,7 @@ mod tests {
             path.display()
         );
         for version in 1..=6 {
-            Connection::open(&path)
-                .unwrap()
+            stamped(&path)
                 .pragma_update(None, "user_version", version)
                 .unwrap();
             let error = Store::open(&path).err().expect("must refuse");
@@ -1265,8 +1271,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("data.db");
         {
-            let conn = Connection::open(&path).unwrap();
-            let store = Store::migrated_with(conn, &schema::MIGRATIONS[..1]).unwrap();
+            let store = Store::migrated_with(stamped(&path), &schema::MIGRATIONS[..1]).unwrap();
             assert_eq!(store.schema_version().unwrap(), 7);
         }
         Connection::open(&path)
@@ -1293,11 +1298,8 @@ mod tests {
         let path = temp.path().join("data.db");
         let before = 7;
         {
-            let store = Store::migrated_with(
-                Connection::open(&path).unwrap(),
-                &schema::MIGRATIONS[..before],
-            )
-            .unwrap();
+            let store =
+                Store::migrated_with(stamped(&path), &schema::MIGRATIONS[..before]).unwrap();
             assert_eq!(store.schema_version().unwrap(), 13);
             store
                 .conn
@@ -1318,9 +1320,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("data.db");
         {
-            let store =
-                Store::migrated_with(Connection::open(&path).unwrap(), &schema::MIGRATIONS[..9])
-                    .unwrap();
+            let store = Store::migrated_with(stamped(&path), &schema::MIGRATIONS[..9]).unwrap();
             assert_eq!(store.schema_version().unwrap(), 15);
             assert!(!store.reindex_pending().unwrap());
             store
@@ -1386,8 +1386,22 @@ mod tests {
         ));
     }
 
+    const REFUSAL: &str = "is not a claude-plus store, so claude-plus leaves it as it is; move it aside, or set CLAUDE_PLUS_HOME to a directory of its own";
+
+    fn assert_refused(path: &Path) {
+        let before = std::fs::read(path).unwrap();
+        let error = Store::open(path).err().expect("must refuse").to_string();
+        assert_eq!(error, format!("{} {REFUSAL}", path.display()));
+        let error = Store::open_read_only(path)
+            .err()
+            .expect("must refuse")
+            .to_string();
+        assert_eq!(error, format!("{} {REFUSAL}", path.display()));
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
     #[test]
-    fn a_store_from_before_the_application_id_is_adopted() {
+    fn a_store_without_the_claude_plus_stamp_is_refused_and_left_as_it_was() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("data.db");
         drop(Store::open(&path).unwrap());
@@ -1396,43 +1410,93 @@ mod tests {
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
             .unwrap();
         drop(conn);
+        assert_refused(&path);
         assert!(!is_claude_plus_database(
             &mut std::fs::File::open(&path).unwrap()
         ));
-        let store = Store::open(&path).unwrap();
-        assert!(store.adopted());
-        assert!(is_claude_plus_database(
-            &mut std::fs::File::open(&path).unwrap()
-        ));
-        drop(store);
-        assert!(!Store::open(&path).unwrap().adopted());
     }
 
     #[test]
-    fn a_foreign_database_with_claude_plus_tables_and_its_own_is_refused() {
+    fn a_foreign_database_with_claude_plus_table_names_is_refused() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("data.db");
-        drop(Store::open(&path).unwrap());
-        let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "application_id", 0).unwrap();
-        conn.execute_batch("CREATE TABLE notes (x)").unwrap();
-        drop(conn);
-        let error = Store::open(&path).err().expect("must refuse").to_string();
-        assert!(error.contains("is not a claude-plus database"), "{error}");
-        Connection::open(&path)
+        for version in [9, 16] {
+            let path = temp.path().join(format!("v{version}.db"));
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (id TEXT); INSERT INTO sessions VALUES ('precious');
+                 CREATE TABLE meta (key TEXT, value TEXT);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+            drop(conn);
+            assert_refused(&path);
+        }
+        let other = temp.path().join("other.db");
+        Connection::open(&other)
             .unwrap()
             .pragma_update(None, "application_id", 7)
             .unwrap();
-        let error = Store::open(&path).err().expect("must refuse").to_string();
-        assert!(error.contains("is not a claude-plus database"), "{error}");
+        assert_refused(&other);
+    }
+
+    #[test]
+    fn an_existing_file_that_is_no_store_is_refused_and_left_as_it_was() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, content) in [
+            ("empty", &b""[..]),
+            ("text", b"mine"),
+            ("header", b"SQLite format 3\0"),
+        ] {
+            let path = temp.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            assert_refused(&path);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_file_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        std::fs::write(&path, "mine").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(Store::open(&path).is_err());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_not_followed_to_create_a_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        let target = temp.path().join("elsewhere.db");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(Store::open(&path).is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn a_new_store_leaves_nothing_but_its_own_files() {
+        let temp = tempfile::tempdir().unwrap();
+        drop(Store::open(&temp.path().join("data.db")).unwrap());
+        let mut names: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.starts_with("data.db-"))
+            .collect();
+        names.sort();
+        assert_eq!(names, ["data.db"]);
     }
 
     #[test]
     fn newer_schema_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("data.db");
-        Connection::open(&path)
-            .unwrap()
+        stamped(&path)
             .pragma_update(None, "user_version", 99)
             .unwrap();
         let expected = format!(
@@ -1454,21 +1518,9 @@ mod tests {
         let path = temp.path().join("data.db");
         assert!(Store::open_read_only(&path).is_err());
         assert!(!path.exists());
-        Connection::open(&path)
-            .unwrap()
-            .execute_batch("CREATE TABLE unrelated (x)")
-            .unwrap();
-        let error = Store::open_read_only(&path).err().expect("must refuse");
-        assert!(
-            error.to_string().ends_with("is not a claude-plus database, so claude-plus leaves it alone; move it away, or set CLAUDE_PLUS_HOME to a directory of its own"),
-            "{error}"
-        );
-        let conn = Connection::open(&path).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 0);
-        assert_eq!(
-            schema_objects(&conn).unwrap(),
-            std::collections::BTreeSet::from(["unrelated".to_string()])
-        );
+        drop(Store::migrated_with(stamped(&path), &schema::MIGRATIONS[..1]).unwrap());
+        let store = Store::open_read_only(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 7);
     }
 
     #[test]

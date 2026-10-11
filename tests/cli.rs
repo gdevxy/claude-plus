@@ -540,7 +540,7 @@ fn reconcile_failure_still_prints_the_import_report() {
         ));
 }
 
-fn corrupt_database(env: &Env) -> PathBuf {
+fn foreign_database(env: &Env) -> PathBuf {
     std::fs::create_dir_all(&env.plus).unwrap();
     let database = env.plus.join("data.db");
     std::fs::write(&database, "this is not an SQLite database, just text").unwrap();
@@ -548,23 +548,23 @@ fn corrupt_database(env: &Env) -> PathBuf {
 }
 
 #[test]
-fn import_names_a_corrupt_database() {
+fn import_refuses_a_data_db_claude_plus_did_not_make() {
     let env = env();
-    let database = corrupt_database(&env);
+    let database = foreign_database(&env);
     cmd(&env, &["import"]).assert().failure().stderr(format!(
-        "claude-plus: cannot open {}: file is not a database\n",
+        "claude-plus: {} is not a claude-plus store, so claude-plus leaves it as it is; move it aside, or set CLAUDE_PLUS_HOME to a directory of its own\n",
         database.display()
     ));
 }
 
 #[test]
-fn doctor_reports_a_corrupt_database() {
+fn doctor_reports_a_data_db_claude_plus_did_not_make() {
     let env = env();
-    let database = corrupt_database(&env);
+    let database = foreign_database(&env);
     let doctor = stdout_of(&env, &["doctor"]);
     assert!(
         doctor.ends_with(&format!(
-            "  Database:    cannot open {}: file is not a database\n",
+            "  Database:    {} is not a claude-plus store, so claude-plus leaves it as it is; move it aside, or set CLAUDE_PLUS_HOME to a directory of its own\n",
             database.display()
         )),
         "{doctor}"
