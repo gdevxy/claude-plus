@@ -49,7 +49,7 @@ type Runtime = {
   socket: string | null | undefined
   ensuring: Promise<void> | null
   ensuredAtMs: number
-  replacedAtMs: number
+  replaceTried: boolean
   posting: { sinceMs: number } | null
   idPrefix: string | null
   sequence: number
@@ -66,7 +66,7 @@ function fresh(options: PluginOptions): Runtime {
     socket: undefined,
     ensuring: null,
     ensuredAtMs: -Infinity,
-    replacedAtMs: -Infinity,
+    replaceTried: false,
     posting: null,
     idPrefix: null,
     sequence: 0,
@@ -188,12 +188,11 @@ async function poll($: EngineInterface): Promise<void> {
     return
   }
   if (reply.kind === 'outdated') {
-    const outdated: Daemon = { status: reply.newer === 'pane' ? 'outdated' : 'newer', detail: null }
-    if (status !== outdated.status) await update($, daemon, () => outdated)
-    const at = await $.clock.now()
-    if (outdated.status === 'outdated' && at - runtime.replacedAtMs >= ENSURE_RETRY_MS) {
-      runtime.replacedAtMs = at
-      quietly(ensureDaemon($))
+    const next: DaemonStatus = reply.newer === 'daemon' ? 'newer' : runtime.replaceTried ? 'behind' : 'outdated'
+    if (status !== next) await update($, daemon, (): Daemon => ({ status: next, detail: null }))
+    if (next === 'outdated') {
+      runtime.replaceTried = true
+      quietly((runtime.ensuring ?? Promise.resolve()).then(() => ensureDaemon($)))
     }
     return
   }
@@ -203,6 +202,7 @@ async function poll($: EngineInterface): Promise<void> {
   }
   const parsed = reply.snapshot
   if (parsed.session !== id) return
+  runtime.replaceTried = false
   if (status !== 'ok') await update($, daemon, (): Daemon => ({ status: 'ok', detail: null }))
   await animate($, async () => {
     await update($, snapshot, () => parsed)
@@ -237,7 +237,11 @@ async function forward($: EngineInterface, kind: string, data: { [key: string]: 
 }
 
 function needsEnsure(status: DaemonStatus): boolean {
-  return status === 'unreachable' || status === 'outdated'
+  return status === 'unreachable'
+}
+
+function settlesOnPoll(status: DaemonStatus): boolean {
+  return status === 'outdated' || status === 'behind' || status === 'newer'
 }
 
 function ensureDaemon($: EngineInterface): Promise<void> {
@@ -248,7 +252,7 @@ function ensureDaemon($: EngineInterface): Promise<void> {
         result => ensureOutcome(result.exitCode, result.stderr),
         ensureError,
       )
-      await update($, daemon, () => outcome)
+      await update($, daemon, known => (outcome.status === 'ok' && settlesOnPoll(known.status) ? known : outcome))
       if (outcome.status !== 'ok') return
       await flush($)
       await poll($)
@@ -297,6 +301,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'plus' }, async ($, e) => {
     ensureTimers($)
+    runtime.replaceTried = true
     quietly(ensureDaemon($))
     await $.store.set(FULLSCREEN_KEY, e.presentation.isFullscreen)
     await update($, pane, known => ({ ...known, asked: true }))

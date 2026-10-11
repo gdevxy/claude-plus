@@ -13,6 +13,7 @@ type Wiring = {
   lag: (() => Promise<void>) | null
   openRefusal: string | null
   resets: number
+  ensureCures: boolean
   silent: boolean
   holding: boolean
   held: (() => void)[]
@@ -125,7 +126,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), serving: 'current', lag: null, openRefusal: null, resets: 0, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -147,7 +148,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
   })
   on('process.run', ($, e) => {
     wiring.ran.push(e.argv)
-    if (wiring.serving === 'older') wiring.serving = 'current'
+    if (wiring.serving === 'older' && wiring.ensureCures) wiring.serving = 'current'
     return { value: { exitCode: wiring.exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('http.fetch', async ($, e) => {
@@ -537,6 +538,27 @@ describe('plus mod', () => {
     const ui = await mount($, 40)
     expect(await ui.find({ key: 'daemon' })).toBeUndefined()
     expect((await ui.find({ key: 'headline' }))?.text).toContain('$4.18')
+    await ui.unmount()
+  })
+
+  test('an old claude-plus binary gets one steady notice to update it and no endless restarts', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { serving: 'older', ensureCures: false })
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 40)
+    const shown: (string | undefined)[] = []
+    for (let second = 0; second < 120; second += 1) {
+      await clock.advance(1000)
+      shown.push((await ui.find({ key: 'daemon' }))?.text)
+    }
+    expect([...new Set(shown)]).toEqual(['The claude-plus daemon is older than this pane'])
+    expect((await ui.find({ key: 'daemon-fix' }))?.text).toBe('Update the claude-plus binary')
+    expect(wiring.ran).toHaveLength(2)
+    await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+    await clock.advance(1000)
+    expect(wiring.ran).toHaveLength(3)
+    expect((await ui.find({ key: 'daemon' }))?.text).toBe('The claude-plus daemon is older than this pane')
     await ui.unmount()
   })
 

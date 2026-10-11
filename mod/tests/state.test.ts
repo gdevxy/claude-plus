@@ -448,6 +448,8 @@ describe('live screen', () => {
     expect(text(line(wide, 'daemon'))).toBe('The daemon is not answering · run claude-plus daemon --ensure')
     const outdated = screen(input({ daemon: { status: 'outdated', detail: null } }))
     expect(text(line(outdated, 'daemon'))).toBe('Restarting the out-of-date claude-plus daemon…')
+    const behind = screen(input({ width: 100, daemon: { status: 'behind', detail: null } }))
+    expect(text(line(behind, 'daemon'))).toBe('The claude-plus daemon is older than this pane · update the claude-plus binary')
     const newer = screen(input({ width: 100, daemon: { status: 'newer', detail: null } }))
     expect(text(line(newer, 'daemon'))).toBe('The claude-plus daemon is newer than this pane · update the plus plugin')
     const rebuilding = screen(input({ daemon: { status: 'rebuilding', detail: null } }))
@@ -483,6 +485,7 @@ const STATES: Record<string, Partial<ScreenInput>> = {
   'a plan still learning': { snapshot: LEARNING() },
   'an older daemon': { daemon: { status: 'outdated', detail: null } },
   'a newer daemon': { daemon: { status: 'newer', detail: null } },
+  'an old binary': { daemon: { status: 'behind', detail: null } },
   'unpriced requests': { snapshot: { ...snapshot(), totals: { ...snapshot().totals, unpriced_requests: 2 } } },
 }
 

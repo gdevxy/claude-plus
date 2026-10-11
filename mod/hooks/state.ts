@@ -340,6 +340,11 @@ function notice(input: ScreenInput, width: number): Line[] {
     return [prose('daemon', 'claude-plus is not installed yet. Install it, or set its path in the plugin options', { color: 'warning' })]
   }
   if (status === 'outdated') return [prose('daemon', 'Restarting the out-of-date claude-plus daemon…', { dim: true })]
+  if (status === 'behind') {
+    const whole = 'The claude-plus daemon is older than this pane · update the claude-plus binary'
+    if (whole.length <= width) return [prose('daemon', whole, { color: 'warning' })]
+    return [prose('daemon', 'The claude-plus daemon is older than this pane', { color: 'warning' }), prose('daemon-fix', 'Update the claude-plus binary', { color: 'warning' })]
+  }
   if (status === 'newer') {
     const whole = 'The claude-plus daemon is newer than this pane · update the plus plugin'
     if (whole.length <= width) return [prose('daemon', whole, { color: 'warning' })]
