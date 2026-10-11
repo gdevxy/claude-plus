@@ -5,6 +5,7 @@ pub mod config_scan;
 pub mod context_model;
 pub mod daemon;
 pub mod forecast;
+pub mod history;
 pub mod ingest;
 pub mod limits;
 pub mod paths;
