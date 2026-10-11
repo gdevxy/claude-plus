@@ -1,3 +1,4 @@
+mod cache;
 pub mod words;
 
 use std::collections::BTreeMap;
@@ -10,6 +11,8 @@ use crate::history::Rates;
 use crate::pricing::PriceTable;
 use crate::store::{CompactionPoint, LargeResult, PromptPoint, SessionInfo, SpentRequest};
 use crate::transcript::TokenCounts;
+
+pub use cache::{CacheBusts, IdleRebuilds};
 
 pub const INSIGHTS_VERSION: u32 = 1;
 pub const WINDOW_DAYS: i64 = 14;
@@ -91,7 +94,7 @@ pub struct InsightContext<'a> {
 }
 
 pub fn rules() -> Vec<Box<dyn Rule>> {
-    Vec::new()
+    vec![Box::new(IdleRebuilds), Box::new(CacheBusts)]
 }
 
 pub fn evaluate(ctx: &InsightContext) -> Vec<Finding> {
@@ -122,6 +125,16 @@ pub fn listed<T>(items: &[T], line: impl Fn(&T) -> String, what: &str) -> Vec<St
         lines.push(format!("and {} more {what}", items.len() - SHOWN_EVIDENCE));
     }
     lines
+}
+
+pub fn median(mut values: Vec<f64>) -> Option<f64> {
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    match values.len() {
+        0 => None,
+        n if n % 2 == 1 => Some(values[middle]),
+        _ => Some((values[middle - 1] + values[middle]) / 2.0),
+    }
 }
 
 pub fn is_main(request: &SpentRequest) -> bool {

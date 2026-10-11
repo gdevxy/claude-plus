@@ -1,4 +1,6 @@
 use super::{DAY_S, InsightContext, MemoryText, Rebuilt, WINDOW_DAYS};
+use crate::cache_model::FIVE_MINUTES_MS;
+use crate::cache_model::{Rebuild, RebuildCause};
 use crate::context_model::{Item, Ratios};
 use crate::history::Rates;
 use crate::limits::Fit;
@@ -97,6 +99,28 @@ impl Fixture {
             project: project.into(),
             cwd: Some("/work/demo".into()),
             title: title.map(String::from),
+        });
+    }
+
+    pub fn rebuilt(
+        &mut self,
+        session: &str,
+        cause: RebuildCause,
+        usd: f64,
+        gap_ms: i64,
+        kinds: &[&str],
+    ) {
+        self.rebuilds.push(Rebuilt {
+            session_id: session.into(),
+            rebuild: Rebuild {
+                ts_ms: (SINCE + 3_600) * 1000,
+                cause,
+                tokens: 80_000,
+                extra_usd: Some(usd),
+            },
+            gap_ms,
+            ttl_ms: FIVE_MINUTES_MS,
+            kinds: kinds.iter().map(|k| k.to_string()).collect(),
         });
     }
 

@@ -132,3 +132,10 @@ fn sessions_without_a_title_are_named_by_their_id() {
     assert_eq!(ctx.title("abcdef1234"), "Untitled abcdef12");
     assert_eq!(ctx.title("s2"), "Fix the login flow");
 }
+
+#[test]
+fn the_median_of_an_even_count_averages_the_middle_pair() {
+    assert_eq!(median(vec![]), None);
+    assert_eq!(median(vec![5.0, 1.0, 3.0]), Some(3.0));
+    assert_eq!(median(vec![4.0, 1.0, 3.0, 2.0]), Some(2.5));
+}
