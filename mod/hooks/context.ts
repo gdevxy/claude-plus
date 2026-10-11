@@ -292,7 +292,9 @@ function shareRows(rows: Row[], width: number, estimated: boolean, drill: Drill)
     }
     if (toggle === undefined) return [line]
     line.toggle = toggle
-    return isOpen ? [line, ...drillRows(row.key, members, width)] : [line]
+    if (!isOpen) return [line]
+    const configured = estimated ? [configuredRow(row.key, members, width)] : []
+    return [line, ...configured, ...drillRows(row.key, members, width)]
   })
 }
 
@@ -302,6 +304,11 @@ function drillRows(key: string, items: readonly ContextItem[], width: number): L
     .map((item, index) => pair(`${key}-item-${index}`, `    ${drillLabel(item)}`, `${item.estimated ? '~' : ''}${tokens(item.tokens)}`, width, {}, { dim: true }))
   const more = moreRow(`${key}-more`, '    ', items.slice(DRILL_SHOWN), width)
   return more === null ? lines : [...lines, more]
+}
+
+function configuredRow(key: string, items: readonly ContextItem[], width: number): Line {
+  const sum = items.reduce((total, item) => total + item.tokens, 0)
+  return pair(`${key}-configured`, '    Configured now', `~${tokens(sum)}`, width, { dim: true }, { dim: true })
 }
 
 function moreRow(key: string, indent: string, rest: readonly ContextItem[], width: number): Line | null {

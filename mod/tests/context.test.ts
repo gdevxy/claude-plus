@@ -190,7 +190,12 @@ describe('context screen', () => {
       '  Messages      ██████▏░░░░░░░     20k',
     ])
     const estimated = contextScreen(input({ report: contextReport({ live: null }), expanded: ['open-memory_file'] }))
-    expect(text(line(estimated, 'ctx-part-memory-item-0'))).toBe('    CLAUDE.md · Project           1.6k')
+    const at = frame(estimated).indexOf('▾ Memory files     ▍░░░░░░░░░░   ~1.5k')
+    expect(frame(estimated).slice(at, at + 3)).toEqual([
+      '▾ Memory files     ▍░░░░░░░░░░   ~1.5k',
+      '    Configured now               ~1.6k',
+      '    CLAUDE.md · Project           1.6k',
+    ])
   })
 
   test('says how many unused items are left out and what they cost', () => {
