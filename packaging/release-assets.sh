@@ -34,3 +34,11 @@ for target in $targets; do
 done
 sed "$substitutions" "$here/claude-plus.rb.in" > "$dist/claude-plus.rb"
 sed "s|@GITHUB_OWNER@|$owner|g" "$here/install.sh" > "$dist/install.sh"
+if grep -n '@[A-Z0-9_][A-Z0-9_]*@' "$dist/claude-plus.rb" "$dist/install.sh" >&2; then
+  echo "release-assets.sh: a placeholder above was left unfilled" >&2
+  exit 1
+fi
+grep -q "CLAUDE_PLUS_GITHUB_OWNER:-$owner}" "$dist/install.sh" || {
+  echo "release-assets.sh: $dist/install.sh does not name $owner" >&2
+  exit 1
+}
