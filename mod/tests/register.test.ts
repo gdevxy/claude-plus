@@ -30,6 +30,7 @@ type Wiring = {
   statuses: (string | undefined)[]
   placed: boolean
   duringUsage: (() => void) | null
+  reportSession: string | null
 }
 
 const MEASURE = {
@@ -129,8 +130,126 @@ const PANE_FRAMES: Record<number, string[]> = {
   ],
 }
 
+const CONTEXT_FRAMES: Record<number, string[]> = {
+  40: [
+    ' ✻ claude-plus       1: Live 2: Context',
+    '',
+    ' Context · Opus 5.5          46k / 200k',
+    ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    ' Auto-compact at 167k · 121k to go',
+    '',
+    ' By category                          ?',
+    '   System prompt █░░░░░░░░░░░░░    3.1k',
+    '   System tools  ████▍░░░░░░░░░   14.2k',
+    ' ▸ MCP tools     █▎░░░░░░░░░░░░    4.1k',
+    ' ▸ Memory files  ▋░░░░░░░░░░░░░      2k',
+    ' ▸ Skills        ▊░░░░░░░░░░░░░    2.6k',
+    '   Messages      ██████▏░░░░░░░     20k',
+    '   Free space                      121k',
+    '   Autocompact buffer               33k',
+    ' + 8.4k of tool schemas load on demand',
+    ' ~12.4k injected since your first',
+    ' request · 1 compaction',
+    '',
+    ' Largest items                        ?',
+    '   MCP linear · 2 tools            4.1k',
+    '   Skill superpowers:brainstorming 2.3k',
+    '   CLAUDE.md · Project             1.6k',
+    '   Agent reviewer                   120',
+    '',
+    ' Not used in 14 days        2.3k a turn',
+    '   Skill superpowers:brainstorming 2.3k',
+    '',
+    ' Largest tool results                 ?',
+    '   Read                            ~12k',
+    '   linear search                  ~4.2k',
+    '',
+    ' Configured                           ?',
+    '   CLAUDE.md files      3 · 1 on demand',
+    '   Skills              66 · 2 on demand',
+    '   MCP servers                        3',
+    '   Plugins                    5 · 1 off',
+  ],
+  60: [
+    ' ✻ claude-plus                           1: Live 2: Context',
+    '',
+    ' Context · Opus 5.5                              46k / 200k',
+    ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    ' Auto-compact at 167k · 121k to go',
+    '',
+    ' By category                                              ?',
+    '   System prompt ██▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    3.1k',
+    '   System tools  ██████████▌░░░░░░░░░░░░░░░░░░░░░░░   14.2k',
+    ' ▸ MCP tools     ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    4.1k',
+    ' ▸ Memory files  █▌░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░      2k',
+    ' ▸ Skills        █▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    2.6k',
+    '   Messages      ██████████████▊░░░░░░░░░░░░░░░░░░░     20k',
+    '   Free space                                          121k',
+    '   Autocompact buffer                                   33k',
+    ' + 8.4k of tool schemas load on demand',
+    ' ~12.4k injected since your first request · 1 compaction',
+    '',
+    ' Largest items                                            ?',
+    '   MCP linear · 2 tools                                4.1k',
+    '   Skill superpowers:brainstorming                     2.3k',
+    '   CLAUDE.md · Project                                 1.6k',
+    '   Agent reviewer                                       120',
+    '',
+    ' Not used in 14 days                            2.3k a turn',
+    '   Skill superpowers:brainstorming                     2.3k',
+    '',
+    ' Largest tool results                                     ?',
+    '   Read                                                ~12k',
+    '   linear search                                      ~4.2k',
+    '',
+    ' Configured                                               ?',
+    '   CLAUDE.md files                          3 · 1 on demand',
+    '   Skills                                  66 · 2 on demand',
+    '   MCP servers                                            3',
+    '   Plugins                                        5 · 1 off',
+  ],
+  100: [
+    ' ✻ claude-plus                                                                   1: Live 2: Context',
+    '',
+    ' Context · Opus 5.5                                                                      46k / 200k',
+    ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    ' Auto-compact at 167k · 121k to go',
+    '',
+    ' By category                                                                                      ?',
+    '   System prompt █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    3.1k',
+    '   System tools  ██████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   14.2k',
+    ' ▸ MCP tools     ██████▋░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    4.1k',
+    ' ▸ Memory files  ███▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░      2k',
+    ' ▸ Skills        ████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    2.6k',
+    '   Messages      ████████████████████████████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░     20k',
+    '   Free space                                                                                  121k',
+    '   Autocompact buffer                                                                           33k',
+    ' + 8.4k of tool schemas load on demand',
+    ' ~12.4k injected since your first request · 1 compaction',
+    '',
+    ' Largest items                                                                                    ?',
+    '   MCP linear · 2 tools                                                                        4.1k',
+    '   Skill superpowers:brainstorming                                                             2.3k',
+    '   CLAUDE.md · Project                                                                         1.6k',
+    '   Agent reviewer                                                                               120',
+    '',
+    ' Not used in 14 days                                                                    2.3k a turn',
+    '   Skill superpowers:brainstorming                                                             2.3k',
+    '',
+    ' Largest tool results                                                                             ?',
+    '   Read                                                                                        ~12k',
+    '   linear search                                                                              ~4.2k',
+    '',
+    ' Configured                                                                                       ?',
+    '   CLAUDE.md files                                                                  3 · 1 on demand',
+    '   Skills                                                                          66 · 2 on demand',
+    '   MCP servers                                                                                    3',
+    '   Plugins                                                                                5 · 1 off',
+  ],
+}
+
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), usages: [], serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), usages: [], serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -176,7 +295,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     const body = e.url.includes('/snapshot')
       ? JSON.stringify(servedBody(wiring))
       : e.url.includes('/context')
-        ? JSON.stringify({ v: 1, ...wiring.report, session: wiring.session })
+        ? JSON.stringify({ v: 1, ...wiring.report, session: wiring.reportSession ?? wiring.session })
         : '{"accepted":1,"rejected":[]}'
     return { value: { status: 200, ok: true, headers: {}, text: body } }
   })
@@ -793,6 +912,23 @@ describe('plus mod', () => {
     })
   }
 
+  for (const columns of [40, 60, 100]) {
+    test(`the Context view draws its whole frame at ${columns} columns`, async ($, on) => {
+      const clock = mock.clock(on, { now: NOW_MS })
+      wire(on)
+      await start($)
+      await $.session.measure(MEASURE)
+      await clock.advance(1000)
+      const ui = await mount($, columns)
+      await ui.press({ key: 'tab-context' })
+      await clock.advance(1000)
+      const rows = paintTree(await ui.drawn(), columns)
+      expect(rows.filter(row => row.length > columns)).toEqual([])
+      expect(trimmed(rows)).toEqual(CONTEXT_FRAMES[columns])
+      await ui.unmount()
+    })
+  }
+
   test('the breakdown is forwarded as a session.usage event without its grid', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)
@@ -917,5 +1053,24 @@ describe('plus mod', () => {
     await clock.advance(3000)
     expect(await ui.find({ key: 'ctx-top' })).toBeUndefined()
     expect(await ui.find({ key: 'ctx-cat-6' })).toBeUndefined()
+  })
+
+  test('a late context report of the session before /clear is ignored', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-context' })
+    await clock.advance(1000)
+    expect(await ui.find({ key: 'ctx-top' })).toBeDefined()
+    wiring.session = 's2'
+    wiring.reportSession = 's1'
+    await clock.advance(3000)
+    await clock.advance(10_000)
+    expect(wiring.fetched.some(call => call.url.endsWith('/context?session=s2'))).toBe(true)
+    expect(await ui.find({ key: 'ctx-top' })).toBeUndefined()
+    expect(await ui.find({ key: 'ctx-cat-6' })).toBeUndefined()
+    expect((await ui.find({ key: 'ctx-head' }))?.text).toBe('Context')
   })
 })
