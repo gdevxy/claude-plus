@@ -79,6 +79,7 @@ impl Shutdown {
 pub struct State {
     pub writer: WriterHandle,
     pub reader: Mutex<Store>,
+    pub history_reader: Mutex<Store>,
     pub prices: PriceTable,
     pub started: Instant,
     pub claude_dir: PathBuf,

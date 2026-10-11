@@ -26,7 +26,10 @@ pub async fn history(state: Arc<State>, query: Option<&str>) -> Reply {
         Err(problem) => return failure(StatusCode::BAD_REQUEST, problem),
     };
     let built = tokio::task::spawn_blocking(move || -> Result<Option<HistoryReport>> {
-        let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+        let reader = state
+            .history_reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         reader.reading(|reader| {
             if reader.reindex_pending()? {
                 return Ok(None);

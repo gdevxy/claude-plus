@@ -42,6 +42,7 @@ impl Server {
         let mut store = Store::open(&database).unwrap();
         prepare(&mut store);
         let reader = Store::open_read_only(&database).unwrap();
+        let history_reader = Store::open_read_only(&database).unwrap();
         let log = Arc::new(Log::open(&temp.path().join("daemon.log"), false).unwrap());
         let (writer, _) =
             writer::spawn(store, PriceTable::bundled(), projects, log.clone()).unwrap();
@@ -51,6 +52,7 @@ impl Server {
         let state = Arc::new(State {
             writer: writer.clone(),
             reader: Mutex::new(reader),
+            history_reader: Mutex::new(history_reader),
             prices: PriceTable::bundled(),
             started: Instant::now(),
             claude_dir: temp.path().join("claude"),
@@ -601,6 +603,33 @@ fn health_answers_while_a_snapshot_holds_the_reader() {
         .health();
     drop(held);
     assert!(health.is_ok(), "{health:?}");
+}
+
+#[test]
+fn a_snapshot_answers_at_once_while_a_history_report_is_being_built() {
+    let server = Server::start();
+    let building = server.state.history_reader.lock().unwrap();
+    let started = Instant::now();
+    let snapshot = server
+        .client()
+        .with_timeout(Duration::from_millis(500))
+        .snapshot(SESSION);
+    let waited = started.elapsed();
+    drop(building);
+    assert!(snapshot.is_ok(), "{snapshot:?}");
+    assert!(waited < Duration::from_millis(100), "{waited:?}");
+}
+
+#[test]
+fn a_history_report_does_not_wait_for_a_snapshot() {
+    let server = Server::start();
+    let held = server.state.reader.lock().unwrap();
+    let history = server
+        .client()
+        .with_timeout(Duration::from_millis(500))
+        .history(Range::Quarter);
+    drop(held);
+    assert!(history.is_ok(), "{history:?}");
 }
 
 #[test]
