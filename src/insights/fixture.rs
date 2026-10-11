@@ -160,6 +160,16 @@ impl Fixture {
             session_id: session.into(),
             ts,
             main: true,
+            post_tokens: None,
+        });
+    }
+
+    pub fn compacted(&mut self, session: &str, ts: i64, post_tokens: u64) {
+        self.compactions.push(CompactionPoint {
+            session_id: session.into(),
+            ts,
+            main: true,
+            post_tokens: Some(post_tokens),
         });
     }
 

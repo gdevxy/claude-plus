@@ -36,6 +36,7 @@ pub struct CompactionPoint {
     pub session_id: String,
     pub ts: i64,
     pub main: bool,
+    pub post_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -88,7 +89,7 @@ fn prefix_changes_sql() -> String {
 
 fn compactions_sql() -> String {
     format!(
-        "SELECT c.ts, {MAIN_THREAD} FROM compactions c JOIN files f ON f.id = c.file_id
+        "SELECT c.ts, {MAIN_THREAD}, c.post_tokens FROM compactions c JOIN files f ON f.id = c.file_id
          WHERE c.session_id = ?1 AND c.ts >= ?2 AND c.ts < ?3 ORDER BY c.ts, c.line_no"
     )
 }
@@ -230,6 +231,7 @@ impl Store {
                 session_id: session_id.to_string(),
                 ts: r.get(0)?,
                 main: r.get(1)?,
+                post_tokens: r.get::<_, Option<i64>>(2)?.map(|n| n.max(0) as u64),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -388,7 +390,7 @@ mod tests {
             })
             .unwrap();
         }
-        for (file_id, ts) in [(main, 140), (agent, 145)] {
+        for (file_id, ts, post_tokens) in [(main, 140, Some(20_000)), (agent, 145, None)] {
             w.compaction(&CompactionRow {
                 file_id,
                 line_no: 9,
@@ -396,7 +398,7 @@ mod tests {
                 ts: Some(ts),
                 trigger: None,
                 pre_tokens: None,
-                post_tokens: None,
+                post_tokens,
             })
             .unwrap();
         }
@@ -488,12 +490,14 @@ mod tests {
                 CompactionPoint {
                     session_id: "s1".into(),
                     ts: 140,
-                    main: true
+                    main: true,
+                    post_tokens: Some(20_000),
                 },
                 CompactionPoint {
                     session_id: "s1".into(),
                     ts: 145,
-                    main: false
+                    main: false,
+                    post_tokens: None,
                 },
             ]
         );

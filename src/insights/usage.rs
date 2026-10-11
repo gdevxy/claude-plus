@@ -6,12 +6,18 @@ use super::{Confidence, Draft, Finding, InsightContext, Rule, RuleId, is_main, l
 use crate::context_model::TextKind;
 use crate::forecast::{alternative_for, family};
 use crate::store::SpentRequest;
+use crate::transcript::TokenCounts;
 
 pub const LARGE_RESULT_CHARS: u64 = 20_000;
 pub const KEPT_RESULT_CHARS: u64 = 10_000;
-pub const LATE_PROMPT_TOKENS: u64 = 100_000;
-pub const MIN_LATE_TURNS: usize = 10;
-pub const REGROWTH: f64 = 0.5;
+pub const COMPACT_THRESHOLDS: &[u64] = &[
+    50_000, 100_000, 150_000, 200_000, 250_000, 300_000, 350_000, 400_000, 500_000, 600_000,
+    700_000, 800_000, 900_000,
+];
+pub const NEAR_BEST: f64 = 0.9;
+pub const RESTART_CONTEXT_TOKENS: u64 = 68_000;
+pub const RESTART_REWRITE_TOKENS: u64 = 40_000;
+pub const SUMMARY_TOKENS: u64 = 20_000;
 pub const QUICK_REQUESTS: usize = 3;
 pub const QUICK_OUTPUT_TOKENS: u64 = 1_000;
 pub const TOP_TIER: &[&str] = &["opus", "fable", "mythos"];
@@ -173,47 +179,231 @@ fn tip_for(source: &Source) -> String {
 
 pub struct LateCompaction;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Restart {
+    context: u64,
+    rewrite: u64,
+    summary: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Outcome {
+    net_usd: f64,
+    compactions: u64,
+    late_turns: u64,
+}
+
+impl Restart {
+    fn observed(ctx: &InsightContext) -> Self {
+        let mut context = Vec::new();
+        let mut rewrite = Vec::new();
+        let mut summary = Vec::new();
+        for compaction in ctx.compactions.iter().filter(|c| c.main) {
+            summary.extend(compaction.post_tokens.map(|n| n as f64));
+            let first = ctx
+                .main_requests()
+                .filter(|r| r.session_id == compaction.session_id && r.point.ts > compaction.ts)
+                .min_by_key(|r| r.point.ts);
+            if let Some(first) = first {
+                let tokens = &first.point.tokens;
+                context.push(tokens.prompt_total() as f64);
+                rewrite.push((tokens.input + tokens.cache_write()) as f64);
+            }
+        }
+        let typical =
+            |values: Vec<f64>, fallback: u64| median(values).map_or(fallback, |m| m as u64);
+        Restart {
+            context: typical(context, RESTART_CONTEXT_TOKENS),
+            rewrite: typical(rewrite, RESTART_REWRITE_TOKENS),
+            summary: typical(summary, SUMMARY_TOKENS),
+        }
+    }
+}
+
+struct Policy<'a> {
+    threshold: u64,
+    sessions: Vec<(&'a str, Outcome)>,
+}
+
+impl Policy<'_> {
+    fn net_usd(&self) -> f64 {
+        self.sessions
+            .iter()
+            .map(|(_, outcome)| outcome.net_usd)
+            .sum()
+    }
+}
+
+fn simulate(
+    ctx: &InsightContext,
+    segments: &[Vec<&SpentRequest>],
+    restart: Restart,
+    threshold: u64,
+) -> Outcome {
+    let mut outcome = Outcome::default();
+    for turns in segments {
+        let one_hour = turns.iter().any(|r| r.point.tokens.cache_write_1h > 0);
+        let mut removed = 0u64;
+        let mut rewrite_next = false;
+        for request in turns {
+            let tokens = &request.point.tokens;
+            let model = request.point.model.as_str();
+            let whole = tokens.prompt_total();
+            if whole >= threshold {
+                outcome.late_turns += 1;
+            }
+            outcome.net_usd += ctx.carried_usd(request, removed);
+            if rewrite_next {
+                let written = TokenCounts {
+                    cache_write_1h: if one_hour { restart.rewrite } else { 0 },
+                    cache_write_5m: if one_hour { 0 } else { restart.rewrite },
+                    ..Default::default()
+                };
+                let read = TokenCounts {
+                    cache_read: restart.rewrite,
+                    ..Default::default()
+                };
+                let premium = ctx
+                    .prices
+                    .cost_within(model, &written, whole)
+                    .unwrap_or(0.0)
+                    - ctx.prices.cost_within(model, &read, whole).unwrap_or(0.0);
+                outcome.net_usd -= premium;
+                rewrite_next = false;
+            }
+            let context = whole.saturating_sub(removed);
+            if context >= threshold && context > restart.context {
+                let summarized = TokenCounts {
+                    cache_read: context,
+                    output: restart.summary,
+                    ..Default::default()
+                };
+                outcome.net_usd -= ctx.prices.cost(model, &summarized).unwrap_or(0.0);
+                outcome.compactions += 1;
+                removed += context - restart.context;
+                rewrite_next = true;
+            }
+        }
+    }
+    outcome
+}
+
+fn segments<'a>(ctx: &InsightContext<'a>, session: &str) -> Vec<Vec<&'a SpentRequest>> {
+    let mut turns: Vec<&SpentRequest> = ctx
+        .requests
+        .iter()
+        .filter(|r| is_main(r) && r.session_id == session)
+        .collect();
+    turns.sort_by_key(|r| r.point.ts);
+    let mut cuts: Vec<i64> = ctx
+        .compactions
+        .iter()
+        .filter(|c| c.main && c.session_id == session)
+        .map(|c| c.ts)
+        .collect();
+    cuts.sort();
+    let mut segments: Vec<Vec<&SpentRequest>> = vec![Vec::new()];
+    let mut next_cut = cuts.iter().peekable();
+    for turn in turns {
+        let mut cut = false;
+        while next_cut.peek().is_some_and(|ts| **ts < turn.point.ts) {
+            next_cut.next();
+            cut = true;
+        }
+        if cut && segments.last().is_some_and(|s| !s.is_empty()) {
+            segments.push(Vec::new());
+        }
+        if let Some(last) = segments.last_mut() {
+            last.push(turn);
+        }
+    }
+    segments
+}
+
 impl Rule for LateCompaction {
     fn evaluate(&self, ctx: &InsightContext) -> Vec<Finding> {
-        let mut sessions: BTreeMap<&str, (usize, u64, f64)> = BTreeMap::new();
-        for request in ctx.main_requests() {
-            let prompt = request.point.tokens.prompt_total();
-            if prompt < LATE_PROMPT_TOKENS {
-                continue;
-            }
-            let session = sessions.entry(&request.session_id).or_default();
-            session.0 += 1;
-            session.1 = session.1.max(prompt);
-            session.2 += REGROWTH * ctx.carried_usd(request, prompt - LATE_PROMPT_TOKENS);
-        }
-        let mut late: Vec<(&str, (usize, u64, f64))> = sessions
+        let restart = Restart::observed(ctx);
+        let sessions: Vec<&str> = ctx
+            .main_requests()
+            .map(|r| r.session_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .filter(|(_, (turns, _, _))| *turns >= MIN_LATE_TURNS)
             .collect();
-        late.sort_by(|a, b| b.1.2.total_cmp(&a.1.2).then_with(|| a.0.cmp(b.0)));
-        if late.is_empty() {
+        let split: Vec<(&str, Vec<Vec<&SpentRequest>>)> = sessions
+            .iter()
+            .map(|session| (*session, segments(ctx, session)))
+            .collect();
+        let policies: Vec<Policy> = COMPACT_THRESHOLDS
+            .iter()
+            .map(|threshold| Policy {
+                threshold: *threshold,
+                sessions: split
+                    .iter()
+                    .map(|(session, segments)| {
+                        (*session, simulate(ctx, segments, restart, *threshold))
+                    })
+                    .filter(|(_, outcome)| outcome.compactions > 0)
+                    .collect(),
+            })
+            .collect();
+        let best = policies.iter().map(Policy::net_usd).fold(0.0, f64::max);
+        let Some(chosen) = policies
+            .into_iter()
+            .rev()
+            .find(|policy| best > 0.0 && policy.net_usd() >= NEAR_BEST * best)
+        else {
             return Vec::new();
-        }
-        let usd = late.iter().map(|(_, (_, _, usd))| usd).sum();
+        };
+        let (threshold, usd) = (chosen.threshold, chosen.net_usd());
+        let mut late: Vec<(&str, Outcome)> = chosen
+            .sessions
+            .into_iter()
+            .filter(|(_, outcome)| outcome.net_usd > 0.0)
+            .collect();
+        late.sort_by(|a, b| {
+            b.1.net_usd
+                .total_cmp(&a.1.net_usd)
+                .then_with(|| a.0.cmp(b.0))
+        });
+        let peak = |session: &str| {
+            ctx.main_requests()
+                .filter(|r| r.session_id == session)
+                .map(|r| r.point.tokens.prompt_total())
+                .max()
+                .unwrap_or(0)
+        };
         let draft = Draft {
             rule: RuleId::LateCompaction,
-            tip: "run /compact once a session passes 100k tokens".into(),
+            tip: format!(
+                "run /compact once a session passes {} tokens",
+                tokens(threshold)
+            ),
             evidence: listed(
                 &late,
-                |(session, (turns, peak, _))| {
+                |(session, outcome)| {
                     format!(
-                        "{}: {} above 100k, peak ~{}",
+                        "{}: {} above {}, peak ~{}",
                         ctx.title(session),
-                        count(*turns as u64, "turn", "turns"),
-                        tokens(*peak)
+                        count(outcome.late_turns, "turn", "turns"),
+                        tokens(threshold),
+                        tokens(peak(session))
                     )
                 },
                 "sessions",
             ),
             confidence: Confidence::Medium,
             how: format!(
-                "Finds sessions of the last 14 days with {MIN_LATE_TURNS} or more main-thread turns above 100k prompt tokens. \
-                 The saving prices half of the tokens past 100k on those turns: an earlier /compact summarizes them away, and the context grows back after it."
+                "Replays the main-thread turns of the last 14 days as if you ran /compact whenever context passed {threshold}. \
+                 Each /compact is priced as its own request, reading the whole context and writing a ~{} token summary, \
+                 plus a cache rewrite of ~{} tokens on the next turn; the turns after it carry ~{} tokens of context and grow back as they did. \
+                 Sizes come from your own compactions when there are any. \
+                 {threshold} is the highest threshold that saves within {:.0}% of the best one, \
+                 because every /compact also forgets detail that the saving cannot price.",
+                tokens(restart.summary),
+                tokens(restart.rewrite),
+                tokens(restart.context),
+                (1.0 - NEAR_BEST) * 100.0,
+                threshold = tokens(threshold),
             ),
         };
         ctx.priced(draft, usd).into_iter().collect()
@@ -496,24 +686,92 @@ mod tests {
         );
     }
 
+    fn compacted_once_before(fixture: &mut Fixture) {
+        fixture.compacted("s0", SINCE + 1, 2_000);
+        fixture.request("s0", SINCE + 2, OPUS, counts(0, 10_000, 10_000, 0));
+    }
+
     #[test]
-    fn sessions_that_stayed_above_100k_for_ten_turns_suggest_compacting_earlier() {
+    fn compacting_earlier_is_priced_net_of_its_own_request_and_the_rewrite_after_it() {
         let mut fixture = Fixture::new();
         fixture.session("s1", PROJECT, Some("Long debugging"));
-        for n in 0..10 {
-            fixture.request("s1", SINCE + n, OPUS, counts(0, 300_000 + n as u64, 0, 10));
-        }
-        for n in 0..9 {
-            fixture.request("s2", SINCE + n, OPUS, counts(0, 500_000, 0, 10));
+        compacted_once_before(&mut fixture);
+        for n in 0..100 {
+            fixture.request("s1", SINCE + 100 + n, OPUS, counts(0, 400_000, 0, 0));
         }
         let finding = &LateCompaction.evaluate(&fixture.ctx())[0];
         assert_eq!(
-            finding.evidence,
-            ["Long debugging: 10 turns above 100k, peak ~300k"]
+            finding.tip,
+            "run /compact once a session passes 400k tokens"
         );
-        let carried: f64 = (0..10).map(|n| (200_000 + n) as f64).sum();
-        close(finding.saving_usd, REGROWTH * carried * 0.2 / 1e6 / 2.0);
-        fixture.requests.truncate(9);
+        assert_eq!(
+            finding.evidence,
+            ["Long debugging: 100 turns above 400k, peak ~400k"]
+        );
+        let summary_request = (400_000.0 * 0.2 + 2_000.0 * 20.0) / 1e6;
+        let rewrite = 10_000.0 * (5.0 - 0.2) / 1e6;
+        let lighter_turns = 99.0 * (400_000.0 - 20_000.0) * 0.2 / 1e6;
+        close(
+            finding.saving_usd,
+            (lighter_turns - summary_request - rewrite) / 2.0,
+        );
+    }
+
+    #[test]
+    fn the_threshold_is_the_highest_one_near_the_best_and_counts_the_sessions_it_costs() {
+        let mut fixture = Fixture::new();
+        fixture.session("s1", PROJECT, Some("Long debugging"));
+        compacted_once_before(&mut fixture);
+        let mut turns = |session: &str, at: i64, n: i64, context: u64| {
+            for k in 0..n {
+                fixture.request(session, SINCE + at + k, OPUS, counts(0, context, 0, 0));
+            }
+        };
+        turns("s1", 100, 100, 400_000);
+        turns("s2", 300, 3, 400_000);
+        turns("s3", 400, 10, 300_000);
+        let finding = &LateCompaction.evaluate(&fixture.ctx())[0];
+        assert_eq!(
+            finding.tip,
+            "run /compact once a session passes 400k tokens"
+        );
+        assert_eq!(
+            finding.evidence,
+            ["Long debugging: 100 turns above 400k, peak ~400k"]
+        );
+        let compact = |context: f64| (context * 0.2 + 2_000.0 * 20.0) / 1e6 + 10_000.0 * 4.8 / 1e6;
+        let lighter = |turns: f64, context: f64| turns * (context - 20_000.0) * 0.2 / 1e6;
+        let s1 = lighter(99.0, 400_000.0) - compact(400_000.0);
+        let s2 = lighter(2.0, 400_000.0) - compact(400_000.0);
+        let s3 = lighter(9.0, 300_000.0) - compact(300_000.0);
+        assert!(s2 < 0.0 && s3 > 0.0);
+        assert!(s1 + s2 >= NEAR_BEST * (s1 + s2 + s3));
+        close(finding.saving_usd, (s1 + s2) / 2.0);
+    }
+
+    #[test]
+    fn a_compaction_that_costs_more_than_it_saves_is_no_tip() {
+        let mut fixture = Fixture::new();
+        fixture.session("s1", PROJECT, Some("Long debugging"));
+        compacted_once_before(&mut fixture);
+        for n in 0..3 {
+            fixture.request("s1", SINCE + 100 + n, OPUS, counts(0, 400_000, 0, 0));
+        }
+        assert!(LateCompaction.evaluate(&fixture.ctx()).is_empty());
+    }
+
+    #[test]
+    fn a_real_compaction_starts_the_context_over_in_both_cases() {
+        let mut fixture = Fixture::new();
+        fixture.session("s1", PROJECT, Some("Long debugging"));
+        compacted_once_before(&mut fixture);
+        for n in 0..3 {
+            fixture.request("s1", SINCE + 100 + n, OPUS, counts(0, 400_000, 0, 0));
+        }
+        fixture.compacted("s1", SINCE + 103, 2_000);
+        for n in 0..3 {
+            fixture.request("s1", SINCE + 104 + n, OPUS, counts(0, 400_000, 0, 0));
+        }
         assert!(LateCompaction.evaluate(&fixture.ctx()).is_empty());
     }
 
