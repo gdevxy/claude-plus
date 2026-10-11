@@ -92,7 +92,7 @@ fn scaled(value: f64, step: usize) -> String {
     }
 }
 
-fn grouped(value: u64) -> String {
+pub fn grouped(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::new();
     for (index, ch) in digits.chars().enumerate() {

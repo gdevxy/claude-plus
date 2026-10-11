@@ -124,6 +124,37 @@ impl Fixture {
         });
     }
 
+    pub fn prompt(&mut self, session: &str, ts: i64) {
+        self.prompts.push(PromptPoint {
+            session_id: session.into(),
+            ts,
+        });
+    }
+
+    pub fn effort(&mut self, effort: &str) {
+        if let Some(last) = self.requests.last_mut() {
+            last.point.effort = Some(effort.into());
+        }
+    }
+
+    pub fn large(&mut self, session: &str, ts: i64, chars: u64, tool: &str, target: Option<&str>) {
+        self.tool_results.push(LargeResult {
+            session_id: session.into(),
+            ts,
+            chars,
+            tool: Some(tool.into()),
+            target: target.map(String::from),
+        });
+    }
+
+    pub fn compaction(&mut self, session: &str, ts: i64) {
+        self.compactions.push(CompactionPoint {
+            session_id: session.into(),
+            ts,
+            main: true,
+        });
+    }
+
     pub fn request(&mut self, session: &str, ts: i64, model: &str, tokens: TokenCounts) {
         self.push(session, ts, model, tokens, None);
     }

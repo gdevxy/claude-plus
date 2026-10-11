@@ -1,5 +1,6 @@
 mod cache;
 mod setup;
+mod usage;
 pub mod words;
 
 use std::collections::BTreeMap;
@@ -15,6 +16,7 @@ use crate::transcript::TokenCounts;
 
 pub use cache::{CacheBusts, IdleRebuilds};
 pub use setup::{OversizedMemory, Retention, UnusedMcpServers, UnusedSkills};
+pub use usage::{CostlyTasks, LargeToolResults, LateCompaction, ModelFit, Task, tasks};
 
 pub const INSIGHTS_VERSION: u32 = 1;
 pub const WINDOW_DAYS: i64 = 14;
@@ -101,7 +103,11 @@ pub fn rules() -> Vec<Box<dyn Rule>> {
         Box::new(UnusedMcpServers),
         Box::new(UnusedSkills),
         Box::new(OversizedMemory),
+        Box::new(LargeToolResults),
+        Box::new(LateCompaction),
+        Box::new(ModelFit),
         Box::new(CacheBusts),
+        Box::new(CostlyTasks),
         Box::new(Retention),
     ]
 }
