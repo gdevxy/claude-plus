@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod api;
 pub mod cache_model;
 pub mod cli;
