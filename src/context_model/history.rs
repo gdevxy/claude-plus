@@ -201,20 +201,22 @@ fn thinned(points: Vec<Point>) -> Vec<Point> {
         return points;
     }
     let last = points.len() - 1;
-    let mut keep: Vec<usize> = (0..MAX_POINTS)
-        .map(|i| i * last / (MAX_POINTS - 1))
+    let mut keep: Vec<usize> = points
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| p.compacted && *i != 0 && *i != last)
+        .map(|(i, _)| i)
         .collect();
-    keep.extend(
-        points
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.compacted)
-            .map(|(i, _)| i),
-    );
+    keep.truncate(MAX_POINTS - 2);
+    keep.extend([0, last]);
+    let rest: Vec<usize> = (0..=last).filter(|i| !keep.contains(i)).collect();
+    let slots = MAX_POINTS - keep.len();
+    let span = rest.len() - 1;
+    keep.extend((0..slots).map(|j| rest[j * span / (slots - 1).max(1)]));
     keep.sort_unstable();
-    keep.dedup();
     keep.into_iter().map(|i| points[i]).collect()
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,16 +370,19 @@ mod tests {
         let requests: Vec<RequestPoint> = (0..500)
             .map(|i| request(i, 1_000 + i as u64, None))
             .collect();
-        let history = compose(&requests, &[], &[333], None, &Ratios::default()).unwrap();
-        assert!(history.points.len() <= MAX_POINTS + 1);
+        let compactions: Vec<i64> = (0..10).map(|i| 33 + i * 47).collect();
+        let history = compose(&requests, &[], &compactions, None, &Ratios::default()).unwrap();
+        assert_eq!(history.points.len(), MAX_POINTS);
         assert_eq!(history.points.first().unwrap().ts_ms, 0);
         assert_eq!(history.points.last().unwrap().ts_ms, 499_000);
-        assert!(
-            history
-                .points
-                .iter()
-                .any(|p| p.compacted && p.ts_ms == 333_000)
-        );
+        let kept: Vec<i64> = history
+            .points
+            .iter()
+            .filter(|p| p.compacted)
+            .map(|p| p.ts_ms / 1000)
+            .collect();
+        assert_eq!(kept, compactions);
+        assert!(history.points.windows(2).all(|w| w[0].ts_ms < w[1].ts_ms));
     }
 
     #[test]
