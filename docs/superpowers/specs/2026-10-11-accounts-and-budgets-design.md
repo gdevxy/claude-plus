@@ -50,7 +50,8 @@ This change makes the account a first-class dimension, adds a per-account monthl
 ### OAuth account timeline
 
 The daemon reads the `oauthAccount` block of `.claude.json` in the Claude Code config location (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`), read-only.
-It reads it at startup and whenever the file changes, through the existing watcher.
+It reads it at startup, on every `session.start` event before attributing that session, and on every periodic rescan (60 seconds).
+The existing watcher only covers `projects/`, and an account switch only matters to sessions that start after it, so these three moments are enough.
 It keeps `accountUuid`, `organizationUuid`, `organizationName`, `organizationType`, `billingType`, `seatTier` and `displayName`, and nothing else.
 The email address is not stored.
 
@@ -64,7 +65,8 @@ The mod adds an `auth` object to the `session.start` event it already forwards:
 
 - `provider`: `bedrock`, `vertex` or `foundry` when the matching `CLAUDE_CODE_USE_*` variable is set, else `anthropic`.
 - `base_url`: the value of `ANTHROPIC_BASE_URL`, or null.
-- `api_key`: true when `ANTHROPIC_API_KEY` is set or an `apiKeyHelper` is configured; the key itself is never read or sent.
+- `api_key`: true when `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set; only presence is sent, never the value.
+  An `apiKeyHelper` lives in the settings files, not the environment, so it is not detected; such a session falls back to the timeline.
 
 The mod reads these with `$.env.get`.
 
@@ -77,7 +79,8 @@ The daemon resolves a session's account in this order:
 
 A session without a `session.start` event (a `claude -p` run, a session while the daemon was down) uses step 4 only.
 A session with no matching period stays unattributed and appears as "Unknown".
-Attribution happens once per session and is not recomputed when periods change later, except by `reindex`.
+Attribution is stored in its own table, `session_accounts`, because `sessions` is a derived table that `reindex` clears.
+A `session.start` attribution replaces a timeline one, and neither is recomputed later.
 
 ### Labels
 
@@ -116,14 +119,20 @@ CREATE TABLE budgets (
     period TEXT NOT NULL,
     updated_ms INTEGER NOT NULL
 );
-ALTER TABLE sessions ADD COLUMN account_id TEXT;
+CREATE TABLE session_accounts (
+    session_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    source TEXT NOT NULL
+);
+CREATE INDEX session_accounts_by_account ON session_accounts(account_id);
 ALTER TABLE limit_samples ADD COLUMN account_id TEXT;
 CREATE INDEX limit_samples_by_account ON limit_samples(account_id, window, ts_ms);
 ```
 
 Account ids are `oauth:<accountUuid>`, `api`, `cloud:<provider>` and `gateway:<scheme://host:port>`.
 `period` is always `monthly` in this version.
-Rows written before the migration keep a null `account_id`.
+`session_accounts.source` is `start` or `timeline`.
+Sessions without a row and limit samples with a null `account_id` are "Unknown".
 `limit_samples.account_id` is copied from the session's account when the sample is stored.
 
 ## 5. Limits, fit and pace per account
