@@ -1,11 +1,15 @@
-import type { BoxProps, ButtonProps, ElementConstructor, TextProps } from 'claude-code'
+import type { BoxProps, ButtonProps, ElementConstructor, RasterProps, TextProps } from 'claude-code'
 
+import type { Grid } from '../chart'
+import { encode, runs } from '../chart'
+import type { Palette } from '../palette'
 import type { Line, Segment } from '../state'
 
 export type Ui = {
   Box: ElementConstructor<BoxProps>
   Text: ElementConstructor<TextProps>
   Button: ElementConstructor<ButtonProps>
+  Raster?: ElementConstructor<RasterProps>
 }
 
 export function Piece({ ui, segment }: { ui: Ui; segment: Segment }) {
@@ -17,8 +21,27 @@ export function Piece({ ui, segment }: { ui: Ui; segment: Segment }) {
   )
 }
 
-export function Row({ ui, line, width, onToggle }: { ui: Ui; line: Line; width: number; onToggle: (key: string) => void }) {
+export function Chart({ ui, chartKey, grid, width, palette }: { ui: Ui; chartKey: string; grid: Grid; width: number; palette: Palette | null }) {
+  const { Box, Text, Raster } = ui
+  if (Raster !== undefined && palette !== null) return <Raster key={chartKey} columns={grid.columns} rows={grid.rows} cells={encode(grid, palette)} />
+  return (
+    <Box key={chartKey} flexDirection="column" width={width}>
+      {runs(grid).map((row, index) => (
+        <Text key={`${chartKey}-${index}`} wrap="truncate-end">
+          {row.map(run => (
+            <Text color={run.fg ?? undefined} backgroundColor={run.bg ?? undefined}>
+              {run.text}
+            </Text>
+          ))}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
+export function Row({ ui, line, width, palette, onToggle }: { ui: Ui; line: Line; width: number; palette: Palette | null; onToggle: (key: string) => void }) {
   const { Box, Text, Button } = ui
+  if (line.chart !== undefined) return <Chart ui={ui} chartKey={line.key} grid={line.chart} width={width} palette={palette} />
   const pieces = (
     <Text wrap={line.wrap === true ? 'wrap' : 'truncate-end'}>
       {line.segments.map(segment => (

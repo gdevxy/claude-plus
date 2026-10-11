@@ -2,19 +2,23 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
 import type { HttpInit, On, SessionUsageArgs } from 'claude-code'
 
-import type { ContextReport, Snapshot } from '../types'
-import { MINUTE_MS, NOW_MS, contextReport, snapshot, usage } from './fixtures'
-import { paintTree, trimmed } from './paint'
+import type { ContextReport, HistoryReport, Snapshot } from '../types'
+import { historyScreen } from '../hooks/history'
+import { MINUTE_MS, NOW_MS, contextReport, dayReport, historyReport, local, snapshot, usage } from './fixtures'
+import { paintTree, painted, trimmed } from './paint'
 
 type Wiring = {
   session: string
   served: Snapshot | null
   serving: 'current' | 'older' | 'newer'
   lag: (() => Promise<void>) | null
+  historyLag: (() => Promise<void>) | null
   openRefusal: string | null
   resets: number
   ensureCures: boolean
   report: ContextReport
+  histories: Record<string, HistoryReport>
+  theme: string
   usages: SessionUsageArgs[]
   silent: boolean
   holding: boolean
@@ -40,9 +44,15 @@ const MEASURE = {
   changed: ['context' as const],
 }
 
+const HISTORY_HEADERS: Record<number, string> = {
+  40: ' ✻        1: Live 2: Context 3: History',
+  60: ' ✻ claude-plus                1: Live 2: Context 3: History',
+  100: ' ✻ claude-plus                                                        1: Live 2: Context 3: History',
+}
+
 const PANE_FRAMES: Record<number, string[]> = {
   40: [
-    ' ✻ claude-plus       1: Live 2: Context',
+    ' ✻        1: Live 2: Context 3: History',
     '',
     ' Opus 5.5 · high                  $4.18',
     '',
@@ -71,7 +81,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '         resets 2d 23h',
   ],
   60: [
-    ' ✻ claude-plus                           1: Live 2: Context',
+    ' ✻ claude-plus                1: Live 2: Context 3: History',
     '',
     ' Opus 5.5 · high                                      $4.18',
     '',
@@ -100,7 +110,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '         resets in 2d 23h',
   ],
   100: [
-    ' ✻ claude-plus                                                                   1: Live 2: Context',
+    ' ✻ claude-plus                                                        1: Live 2: Context 3: History',
     '',
     ' Opus 5.5 · high                                                                              $4.18',
     '',
@@ -132,7 +142,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 
 const CONTEXT_FRAMES: Record<number, string[]> = {
   40: [
-    ' ✻ claude-plus       1: Live 2: Context',
+    ' ✻        1: Live 2: Context 3: History',
     '',
     ' Context · Opus 5.5          46k / 200k',
     ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
@@ -170,7 +180,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
     '   Plugins                    5 · 1 off',
   ],
   60: [
-    ' ✻ claude-plus                           1: Live 2: Context',
+    ' ✻ claude-plus                1: Live 2: Context 3: History',
     '',
     ' Context · Opus 5.5                              46k / 200k',
     ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
@@ -208,7 +218,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
     '   Plugins                                        5 · 1 off',
   ],
   100: [
-    ' ✻ claude-plus                                                                   1: Live 2: Context',
+    ' ✻ claude-plus                                                        1: Live 2: Context 3: History',
     '',
     ' Context · Opus 5.5                                                                      46k / 200k',
     ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
@@ -248,10 +258,12 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), usages: [], serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
+  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: wiring.theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
+  on('config.set', ($, e) => ({ value: e.value }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.turns', () => ({ value: 14 }))
   on('session.usage', ($, e) => {
@@ -283,6 +295,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     wiring.fetched.push(e)
     if (wiring.silent) await new Promise(() => undefined)
     if (wiring.lag !== null && e.url.includes('/snapshot')) await wiring.lag()
+    if (wiring.historyLag !== null && e.url.includes('/history')) await wiring.historyLag()
     if (wiring.holding && e.url.endsWith('/events')) await new Promise<void>(resolve => wiring.held.push(resolve))
     if (wiring.down) throw new Error('ECONNREFUSED')
     if (wiring.resets > 0) {
@@ -293,7 +306,9 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     if (wiring.rebuilding && e.url.includes('/snapshot')) return { value: { status: 503, ok: false, headers: {}, text: '{"error":"rebuilding"}' } }
     const body = e.url.includes('/snapshot')
       ? JSON.stringify(servedBody(wiring))
-      : e.url.includes('/context')
+      : e.url.includes('/history')
+        ? JSON.stringify({ v: 1, ...historyOf(wiring, e.url) })
+        : e.url.includes('/context')
         ? JSON.stringify({ v: 1, ...wiring.report, session: wiring.reportSession ?? wiring.session })
         : '{"accepted":1,"rejected":[]}'
     return { value: { status: 200, ok: true, headers: {}, text: body } }
@@ -304,6 +319,11 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   return wiring
+}
+
+function historyOf(wiring: Wiring, url: string): HistoryReport {
+  const range = new URL(url).searchParams.get('range') ?? '7d'
+  return wiring.histories[range] ?? { ...historyReport({ range: range as HistoryReport['range'] }), buckets: [], totals: { ...historyReport().totals, requests: 0, cost_usd: 0, reconciled_usd: 0 } }
 }
 
 function servedBody(wiring: Wiring): unknown {
@@ -1071,5 +1091,174 @@ describe('plus mod', () => {
     expect(await ui.find({ key: 'ctx-top' })).toBeUndefined()
     expect(await ui.find({ key: 'ctx-cat-6' })).toBeUndefined()
     expect((await ui.find({ key: 'ctx-head' }))?.text).toBe('Context')
+  })
+  for (const columns of [40, 60, 100]) {
+    test(`the History tab draws raster charts at ${columns} columns`, async ($, on) => {
+      const clock = mock.clock(on, { now: NOW_MS })
+      const wiring = wire(on)
+      await start($)
+      await $.session.measure(MEASURE)
+      await clock.advance(1000)
+      const ui = await mount($, columns)
+      await ui.press({ key: 'tab-history' })
+      await clock.advance(1000)
+      expect((await ui.find({ key: 'tab-history' }))?.props).toEqual({ key: 'tab-history', hotkey: '3', plain: true, dimColor: false, label: 'History' })
+      expect((await ui.find({ key: 'range' }))?.props).toEqual({ key: 'range', hotkey: 'r', plain: true, label: '7 days' })
+      expect((await ui.find({ key: 'metric' }))?.props).toEqual({ key: 'metric', hotkey: 'g', plain: true, label: 'Cost' })
+      expect(wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url)).toEqual(['http://claude-plus/history?range=7d'])
+      for (const key of ['hist-spend-chart', 'hist-hit-chart', 'hist-peak-chart', 'hist-growth-chart']) {
+        const chart = await ui.find({ key })
+        expect([key, chart?.type, chart?.props.columns]).toEqual([key, 'Raster', columns - 2])
+      }
+      const rows = paintTree(await ui.drawn(), columns)
+      expect(rows.filter(row => row.length > columns)).toEqual([])
+      expect(trimmed(rows.slice(0, 4))).toEqual([HISTORY_HEADERS[columns], '', ' r: 7 days  g: Cost', ''])
+      const screen = historyScreen({ width: columns, range: '7d', metric: 'cost', reports: { '7d': historyReport() }, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [] })
+      expect(trimmed(rows.slice(4))).toEqual(trimmed(painted(screen, columns)))
+      await ui.unmount()
+    })
+  }
+
+  test('r cycles the range and fetches it at once, g cycles what the bars count', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    wiring.histories['30d'] = historyReport()
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 60)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    await ui.press({ key: 'metric' })
+    expect((await ui.find({ key: 'metric' }))?.props.label).toBe('Tokens')
+    expect((await ui.find({ key: 'hist-head' }))?.text.endsWith('1.6M')).toBe(true)
+    await ui.press({ key: 'metric' })
+    expect((await ui.find({ key: 'metric' }))?.props.label).toBe('% of 5h')
+    await ui.press({ key: 'metric' })
+    expect((await ui.find({ key: 'metric' }))?.props.label).toBe('Cost')
+    await ui.press({ key: 'range' })
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'range' }))?.props.label).toBe('30 days')
+    expect(wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url.split('=')[1])).toEqual(['7d', '30d'])
+    expect((await ui.find({ key: 'hist-loading' }))?.text).toBe('Loading the last 30 days… ✻')
+    await ui.press({ key: 'range' })
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'hist-empty' }))?.text).toBe('No requests in the last 90 days yet ✻')
+    await ui.press({ key: 'range' })
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'hist-spend' }))?.text.startsWith('Cost by hour')).toBe(true)
+    await ui.press({ key: 'range' })
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 7 days')).toBe(true)
+  })
+
+  test('g skips the 5h share until the limit is calibrated', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on, { histories: { '7d': historyReport({ calibration: { calibrated: false, pairs: 4, needed: 20 } }) } })
+    await start($)
+    const ui = await mount($, 60)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    await ui.press({ key: 'metric' })
+    await ui.press({ key: 'metric' })
+    expect((await ui.find({ key: 'metric' }))?.props.label).toBe('Cost')
+  })
+
+  test('the History view asks for its report every 30 s while shown and not at all from Live', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    const asked = () => wiring.fetched.filter(call => call.url.includes('/history')).length
+    await start($)
+    await clock.advance(60_000)
+    expect(asked()).toBe(0)
+    const ui = await mount($, 60)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    expect(asked()).toBe(1)
+    await clock.advance(28_000)
+    expect(asked()).toBe(1)
+    await clock.advance(2000)
+    expect(asked()).toBe(2)
+    expect(wiring.fetched.some(call => call.url.includes('/context?session=s1'))).toBe(true)
+    await ui.press({ key: 'tab-live' })
+    await clock.advance(60_000)
+    expect(asked()).toBe(2)
+  })
+
+  test('charts are text in theme colors where the theme has no known palette, and follow a theme change', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on, { theme: 'dark-ansi' })
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    const text = await ui.find({ key: 'hist-spend-chart' })
+    expect(text?.type).toBe('Box')
+    expect(paintTree(await ui.drawn(), 40).some(row => row.includes('▅▅▅▅ ▃▃▃▃'))).toBe(true)
+    await $.config.set({ key: 'theme', value: 'light', previous: 'dark-ansi', provider: { plugin: 'engine', tier: 'core' }, origin: { kind: 'composer' } })
+    expect((await ui.find({ key: 'hist-spend-chart' }))?.type).toBe('Raster')
+    await ui.unmount()
+  })
+
+  test('the desktop draws the charts as text', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on)
+    await start($)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({
+      plugin: 'plus',
+      surface: 'desktop',
+      component: 'Pane',
+      requestId: 'plus',
+      props: { title: 'claude-plus', isFocused: true, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+      viewport: { columns: 160, rows: 50, isFullscreen: true },
+    })
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'hist-spend-chart' }))?.type).toBe('Box')
+  })
+
+  test('a History report that takes two seconds still arrives and the countdown never waits for it', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { historyLag: () => clock.sleep(2000) })
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-history' })
+    for (let step = 0; step < 40; step += 1) await clock.advance(100)
+    expect((await ui.find({ key: 'hist-spend-chart' }))?.type).toBe('Raster')
+    const seconds = wiring.statuses.flatMap(status => {
+      const found = /cache (\d+):(\d+)/.exec(status ?? '')
+      return found === null ? [] : [Number(found[1]) * 60 + Number(found[2])]
+    })
+    const steps = seconds.slice(1).map((second, index) => (seconds[index] ?? 0) - second)
+    expect(steps.filter(step => step !== 1)).toEqual([])
+  })
+
+  test('a History report that comes back for another range is not shown', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    wiring.histories['30d'] = historyReport()
+    wiring.histories['90d'] = historyReport()
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    await ui.press({ key: 'range' })
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'hist-loading' }))?.text).toBe('Loading the last 30 days… ✻')
+    expect(await ui.find({ key: 'hist-spend-chart' })).toBeUndefined()
+  })
+
+  test('the History view keeps its last report while the daemon is down', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(1000)
+    wiring.down = true
+    await clock.advance(31_000)
+    expect((await ui.find({ key: 'daemon' }))?.text).toBe('The daemon is not answering')
+    expect((await ui.find({ key: 'hist-spend-chart' }))?.type).toBe('Raster')
   })
 })

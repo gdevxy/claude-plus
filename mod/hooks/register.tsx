@@ -1,10 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 'claude-code'
 
-import type { ContextReport, Daemon, DaemonStatus, Local, Motion, PaneState, PlusView, Snapshot } from '../types'
+import type { Chart, ContextReport, Daemon, DaemonStatus, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
-import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
+import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
 import { contextScreen } from './context'
+import { historyScreen, metricLabel, nextMetric, nextRange, rangeLabel, shownMetric } from './history'
+import { paletteOf } from './palette'
 import {
   EMPTY_LOCAL,
   TICK_MS,
@@ -36,10 +38,15 @@ export const CONTEXT_POLL_MS = 10_000
 export const USAGE_GAP_MS = 60_000
 export const USAGE_IDLE_GAP_MS = 600_000
 export const USAGE_COLUMNS = 40
+export const HISTORY_POLL_MS = 30_000
+export const THEME_KEY = 'theme'
 
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
 const context = atom({ plugin: 'plus', key: 'context' } as const, null as ContextReport | null, { shape: 'context-1' })
+const history = atom({ plugin: 'plus', key: 'history' } as const, {} as Reports, { shape: 'history-1' })
+const chart = atom({ plugin: 'plus', key: 'chart' } as const, { range: '7d', metric: 'cost' } as Chart)
+const theme = atom({ plugin: 'plus', key: 'theme' } as const, 'auto')
 const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-2' })
 const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false, unasked: 'settled' } as PaneState)
 const daemon = atom({ plugin: 'plus', key: 'daemon' } as const, { status: 'starting', detail: null } as Daemon)
@@ -61,6 +68,8 @@ type Runtime = {
   sequence: number
   polledAtMs: number
   contextPolledAtMs: number
+  historyPolledAtMs: number
+  historyRunning: boolean
   usageDue: boolean
   usageRunning: boolean
   usageAtMs: number
@@ -82,6 +91,8 @@ function fresh(options: PluginOptions): Runtime {
     sequence: 0,
     polledAtMs: -Infinity,
     contextPolledAtMs: -Infinity,
+    historyPolledAtMs: -Infinity,
+    historyRunning: false,
     usageDue: false,
     usageRunning: false,
     usageAtMs: -Infinity,
@@ -145,11 +156,13 @@ async function tick($: EngineInterface): Promise<void> {
     if (at - runtime.polledAtMs >= POLL_MS) await poll($)
     const shownView = await read($, view)
     const usageWanted = runtime.usageDue && !runtime.usageRunning
-    const contextWanted = shownView === 'context' && at - runtime.contextPolledAtMs >= CONTEXT_POLL_MS
-    if ((usageWanted || contextWanted) && (await paneShown($))) {
+    const contextWanted = shownView !== 'live' && at - runtime.contextPolledAtMs >= CONTEXT_POLL_MS
+    const historyWanted = shownView === 'history' && !runtime.historyRunning && at - runtime.historyPolledAtMs >= HISTORY_POLL_MS
+    if ((usageWanted || contextWanted || historyWanted) && (await paneShown($))) {
       const usageGap = shownView === 'context' ? USAGE_GAP_MS : USAGE_IDLE_GAP_MS
       if (usageWanted && at - runtime.usageAtMs >= usageGap) quietly(collectUsage($))
       if (contextWanted) await pollContext($)
+      if (historyWanted) quietly(pollHistory($))
     }
     if (needsEnsure((await read($, daemon)).status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($))
   } catch {
@@ -249,6 +262,39 @@ async function pollContext($: EngineInterface): Promise<void> {
   await update($, context, () => reply.report)
 }
 
+async function pollHistory($: EngineInterface): Promise<void> {
+  runtime.historyRunning = true
+  try {
+    runtime.historyPolledAtMs = await $.clock.now()
+    await readTheme($)
+    const path = await socketOf($)
+    if (path === null) return
+    const range = (await read($, chart)).range
+    const reply = await fetchHistory(io($), path, range)
+    if (reply.kind !== 'history' || reply.report.range !== range) return
+    await update($, history, known => ({ ...known, [range]: reply.report }))
+  } finally {
+    runtime.historyRunning = false
+  }
+}
+
+async function readTheme($: EngineInterface): Promise<void> {
+  const rows = await $.config.list().catch(() => [])
+  const value = rows.find(row => row.key === THEME_KEY)?.value
+  if (typeof value === 'string') await update($, theme, () => value)
+}
+
+async function cycleRange($: EngineInterface): Promise<void> {
+  await update($, chart, known => ({ ...known, range: nextRange(known.range) }))
+  runtime.historyPolledAtMs = -Infinity
+  ensureTimers($)
+}
+
+async function cycleMetric($: EngineInterface): Promise<void> {
+  const reports = await read($, history)
+  await update($, chart, known => ({ ...known, metric: nextMetric(known.metric, reports[known.range] ?? null) }))
+}
+
 async function collectUsage($: EngineInterface): Promise<void> {
   runtime.usageRunning = true
   runtime.usageDue = false
@@ -271,8 +317,13 @@ async function collectUsage($: EngineInterface): Promise<void> {
 
 async function showView($: EngineInterface, next: PlusView): Promise<void> {
   await update($, view, () => next)
-  if (next !== 'context') return
+  if (next === 'live') return
   runtime.contextPolledAtMs = -Infinity
+  if (next === 'history') {
+    runtime.historyPolledAtMs = -Infinity
+    ensureTimers($)
+    return
+  }
   if ((await read($, local)).breakdown === null) runtime.usageDue = true
   ensureTimers($)
 }
@@ -367,6 +418,7 @@ export const register: Register = (on, options) => {
     const turns = await $.session.turns()
     await update($, local, known => ({ ...known, session: id, model, turns }))
     quietly(ensureDaemon($))
+    quietly(readTheme($))
     if ((await read($, pane)).session === id) return next(e)
     await update($, pane, (): PaneState => ({ session: id, asked: false, unasked: e.isInteractive ? 'waiting' : 'settled' }))
     quietly(forward($, 'session.start', { cwd: e.cwd, surface: e.surface, interactive: e.isInteractive }))
@@ -460,6 +512,15 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  on('config.set', { key: THEME_KEY }, async ($, e, next) => {
+    const result = await next(e)
+    if (result.deny === undefined && typeof result.value === 'string') {
+      const value = result.value
+      await update($, theme, () => value)
+    }
+    return result
+  })
+
   on('session.end', async ($, e, next) => {
     quietly(forward($, 'session.end', { reason: e.reason }, e.sessionId))
     return next(e)
@@ -478,28 +539,44 @@ export const register: Register = (on, options) => {
     const known = await read($, local)
     const status = await read($, daemon)
     const open = await read($, expanded)
+    const chosen = await read($, chart)
+    const reports = await read($, history)
     const lines =
       shownView === 'context'
         ? contextScreen({ width: e.props.bodyColumns, nowMs, report: await read($, context), local: known, daemon: status, expanded: open })
-        : screen({
-            width: e.props.bodyColumns,
-            nowMs,
-            animations: runtime.animations,
-            snapshot: await read($, snapshot),
-            local: known,
-            daemon: status,
-            expanded: open,
-            motions: await read($, motions),
-          })
+        : shownView === 'history'
+          ? historyScreen({ width: e.props.bodyColumns, range: chosen.range, metric: chosen.metric, reports, context: await read($, context), local: known, daemon: status, expanded: open })
+          : screen({
+              width: e.props.bodyColumns,
+              nowMs,
+              animations: runtime.animations,
+              snapshot: await read($, snapshot),
+              local: known,
+              daemon: status,
+              expanded: open,
+              motions: await read($, motions),
+            })
+    const ui = $.ui.resolve(e)
+    const shown = reports[chosen.range] ?? null
     return (
       <PaneBody
-        ui={$.ui.resolve(e)}
+        ui={ui}
         width={e.props.bodyColumns}
         lines={lines}
+        palette={e.surface === 'terminal' ? paletteOf(await read($, theme)) : null}
         tabs={[
           { key: 'tab-live', hotkey: '1', label: 'Live', isActive: shownView === 'live', onPress: () => quietly(showView($, 'live')) },
           { key: 'tab-context', hotkey: '2', label: 'Context', isActive: shownView === 'context', onPress: () => quietly(showView($, 'context')) },
+          { key: 'tab-history', hotkey: '3', label: 'History', isActive: shownView === 'history', onPress: () => quietly(showView($, 'history')) },
         ]}
+        controls={
+          shownView === 'history'
+            ? [
+                { key: 'range', hotkey: 'r', label: rangeLabel(chosen.range), onPress: () => quietly(cycleRange($)) },
+                { key: 'metric', hotkey: 'g', label: metricLabel(shownMetric(chosen.metric, shown)), onPress: () => quietly(cycleMetric($)) },
+              ]
+            : []
+        }
         onToggle={key => quietly(update($, expanded, list => toggled(list, key)))}
       />
     )
