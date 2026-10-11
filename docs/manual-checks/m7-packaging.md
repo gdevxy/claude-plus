@@ -61,6 +61,9 @@ Nothing in the plan pushed, tagged or published; these steps are yours.
 - [x] The `release` workflow ran `cargo test` before it built, and its Intel macOS job ran the binary under Rosetta.
 - [x] Download the draft's assets and check `shasum -a 256 -c SHA256SUMS`; publish the draft.
 - [x] Create `github.com/<owner>/homebrew-tap` and commit the draft's `claude-plus.rb` as `Formula/claude-plus.rb`.
+  From then on the `tap` workflow does this when a release is published, skipping prereleases.
+  It pushes with a deploy key: add its public half to `homebrew-tap` with write access and its private half to `claude-plus` as the `TAP_DEPLOY_KEY` secret.
+  To redo it for a release, run the `tap` workflow by hand with the release's tag.
 - [x] `brew install <owner>/tap/claude-plus` then `brew test claude-plus` and `brew audit --strict <owner>/tap/claude-plus` pass, and the caveats ask to run `claude-plus uninstall` before `brew uninstall`.
 - [x] `curl -fsSL https://github.com/<owner>/claude-plus/releases/latest/download/install.sh | sh` installs into `~/.local/bin` with the PATH hint when needed.
 - [x] `/plugin install plus --marketplace <owner>/claude-plus` at a Claude Code prompt finds the `plus` mod.

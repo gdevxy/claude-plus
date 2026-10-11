@@ -1,0 +1,37 @@
+name: tap
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release to put in the Homebrew tap, such as v1.2.0.
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: tap
+jobs:
+  formula:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Commit the release's formula to the tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: |
+          [ -n "$TAP_DEPLOY_KEY" ] || {
+            echo "tap: add the homebrew-tap deploy key as the TAP_DEPLOY_KEY secret" >&2
+            exit 1
+          }
+          key="$RUNNER_TEMP/tap-deploy-key"
+          (umask 077 && printf '%s\n' "$TAP_DEPLOY_KEY" > "$key")
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          sh .github/scripts/update-tap.sh "$TAG" "$GITHUB_REPOSITORY" "git@github.com:$GITHUB_REPOSITORY_OWNER/homebrew-tap.git"
