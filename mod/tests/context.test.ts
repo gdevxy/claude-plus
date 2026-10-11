@@ -54,7 +54,7 @@ describe('context screen', () => {
       'Not used in 14 days        2.3k a turn',
       '  Skill superpowers:brainstorming 2.3k',
       ' ',
-      'Largest tool results                  ',
+      'Largest tool results                 ?',
       '  Read                            ~12k',
       '  linear search                  ~4.2k',
       ' ',
@@ -225,6 +225,22 @@ describe('context screen', () => {
     const lines = contextScreen(input({ report: { ...report, tool_results: results } }))
     expect(text(line(lines, 'ctx-result-0'))).toBe(`  atlassian search${' '.repeat(38 - 21)}~1k`)
     expect(text(line(lines, 'ctx-result-1'))).toBe(`  paddle-docs find${' '.repeat(38 - 22)}~500`)
+  })
+
+  test('gives the used tokens the accent of the view', () => {
+    expect(line(contextScreen(input()), 'ctx-head').segments).toEqual([
+      { text: 'Context · Opus 5.5          ', bold: true },
+      { text: '46k', color: 'claude', bold: true },
+      { text: ' / 200k' },
+    ])
+  })
+
+  test('explains which tool results are listed once asked', () => {
+    const lines = contextScreen(input({ expanded: ['results'] }))
+    expect(line(lines, 'ctx-results').why).toBe('results')
+    expect(text(line(lines, 'explain-results'))).toBe(
+      'The largest tool outputs in the conversation since the last compaction, at 3.0 characters per token. Subagents keep theirs out of it.',
+    )
   })
 
   test('colors categories with Claude Code theme keys and falls back to text', () => {

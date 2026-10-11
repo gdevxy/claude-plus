@@ -108,7 +108,7 @@ export function contextScreen(input: ContextInput): Line[] {
     composition !== null ? categories(input, composition, width) : estimate(input, report, width),
     largest(input, report, composition !== null, width),
     unused(report, width),
-    toolResults(report, width),
+    toolResults(input, report, width),
     configured(input, report, width),
   ].filter(section => section.length > 0)
   return sections.flatMap((section, index) => (index === 0 ? section : [gap(index), ...section]))
@@ -123,9 +123,8 @@ function headline(input: ContextInput, composition: LiveContext | null, width: n
   const used = composition?.total_tokens ?? measure?.contextTokens ?? null
   const window = composition?.max_tokens ?? measure?.contextWindow ?? 0
   const fill = composition?.percentage ?? measure?.contextPercent ?? 0
-  const amount = used === null ? tokens(window) : `${tokens(used)} / ${tokens(window)}`
   const color: ThemeKey = fill >= CONTEXT_WARNING ? 'warning' : 'text'
-  const lines = [pair('ctx-head', title, amount, width, {}, { bold: true }), meter('ctx-bar', '', fill / 100, percent(fill).padStart(4), width, color)]
+  const lines = [amountLine(title, used, window, width), meter('ctx-bar', '', fill / 100, percent(fill).padStart(4), width, color)]
   const threshold = composition?.auto_compact_threshold ?? null
   if (threshold !== null && used !== null) {
     const due = used >= threshold
@@ -133,6 +132,15 @@ function headline(input: ContextInput, composition: LiveContext | null, width: n
     lines.push(prose('ctx-compact', text, due ? { color: 'warning' } : { dim: true }))
   }
   return lines
+}
+
+function amountLine(title: string, used: number | null, window: number, width: number): Line {
+  if (used === null) return pair('ctx-head', title, tokens(window), width, {}, { bold: true })
+  const accent = tokens(used)
+  const rest = ` / ${tokens(window)}`
+  const line = pair('ctx-head', title, `${accent}${rest}`, width, {}, { bold: true })
+  line.segments = [line.segments[0]!, { text: accent, color: 'claude', bold: true }, { text: rest }]
+  return line
 }
 
 function categories(input: ContextInput, composition: LiveContext, width: number): Line[] {
@@ -217,13 +225,20 @@ function unused(report: ContextReport | null, width: number): Line[] {
   return more === null ? lines : [...lines, more]
 }
 
-function toolResults(report: ContextReport | null, width: number): Line[] {
+function toolResults(input: ContextInput, report: ContextReport | null, width: number): Line[] {
   const results = report?.tool_results.slice(0, TOOL_RESULTS_SHOWN) ?? []
-  if (results.length === 0) return []
-  return [
-    heading('ctx-results', 'Largest tool results', width),
+  if (report === null || results.length === 0) return []
+  const lines = [
+    heading('ctx-results', 'Largest tool results', width, 'results'),
     ...results.map((result, index) => pair(`ctx-result-${index}`, `  ${toolName(result.tool)}`, `~${tokens(result.tokens)}`, width, {}, { dim: true })),
   ]
+  if (input.expanded.includes('results')) {
+    const ratio = report.ratios.code.toFixed(1)
+    lines.push(
+      prose('explain-results', `The largest tool outputs in the conversation since the last compaction, at ${ratio} characters per token. Subagents keep theirs out of it.`, { dim: true }),
+    )
+  }
+  return lines
 }
 
 function configured(input: ContextInput, report: ContextReport | null, width: number): Line[] {
