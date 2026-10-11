@@ -1,0 +1,188 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use serde_json::Value;
+
+use super::extensions::Plugin;
+use super::{Loading, Roots, Scope, Source, SourceKind, display, read_json};
+
+pub fn servers(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
+    let claude_json = read_json(&roots.claude_json);
+    let project_entry = roots.project.as_ref().and_then(|project| {
+        claude_json
+            .as_ref()?
+            .pointer("/projects")?
+            .get(project.to_string_lossy().as_ref())
+            .cloned()
+    });
+    let mut add = |scope: Scope,
+                   names: BTreeSet<String>,
+                   origin: &Path,
+                   plugin: Option<&str>,
+                   off: &BTreeSet<String>| {
+        for name in names {
+            sources.push(Source {
+                kind: SourceKind::McpServer,
+                scope,
+                loading: if off.contains(&name) {
+                    Loading::Off
+                } else {
+                    Loading::Unknown
+                },
+                name,
+                path: Some(display(origin)),
+                plugin: plugin.map(String::from),
+                chars: 0,
+                file_chars: 0,
+            });
+        }
+    };
+    let none = BTreeSet::new();
+    add(
+        Scope::User,
+        names_in(claude_json.as_ref()),
+        &roots.claude_json,
+        None,
+        &none,
+    );
+    add(
+        Scope::Local,
+        names_in(project_entry.as_ref()),
+        &roots.claude_json,
+        None,
+        &none,
+    );
+    if let Some(project) = &roots.project {
+        let file = project.join(".mcp.json");
+        let disabled = strings(project_entry.as_ref(), "disabledMcpjsonServers");
+        add(
+            Scope::Project,
+            names_in(read_json(&file).as_ref()),
+            &file,
+            None,
+            &disabled,
+        );
+    }
+    for plugin in plugins {
+        let manifest = read_json(&plugin.dir.join(".claude-plugin/plugin.json"));
+        let mut names = names_in(read_json(&plugin.dir.join(".mcp.json")).as_ref());
+        match manifest.as_ref().and_then(|m| m.get("mcpServers")) {
+            Some(Value::Object(inline)) => names.extend(inline.keys().cloned()),
+            Some(Value::String(relative)) => {
+                names.extend(names_in(read_json(&plugin.dir.join(relative)).as_ref()));
+            }
+            _ => {}
+        }
+        add(
+            Scope::Plugin,
+            names,
+            &plugin.dir,
+            Some(&plugin.short),
+            &none,
+        );
+    }
+}
+
+fn names_in(config: Option<&Value>) -> BTreeSet<String> {
+    config
+        .and_then(|config| config.get("mcpServers"))
+        .and_then(Value::as_object)
+        .map(|servers| servers.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn strings(config: Option<&Value>, key: &str) -> BTreeSet<String> {
+    config
+        .and_then(|config| config.get(key))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::fixture::Home;
+    use super::super::scan;
+    use super::*;
+
+    #[test]
+    fn servers_come_from_the_user_the_project_entry_the_mcp_file_and_plugins() {
+        let home = Home::new();
+        let app = home.path("work/app").display().to_string();
+        home.write(
+            "home/.claude.json",
+            &serde_json::json!({
+                "mcpServers": {"context7": {"command": "npx"}, "serena": {}},
+                "projects": {app.clone(): {"mcpServers": {"db": {}}, "disabledMcpjsonServers": ["legacy"]}}
+            })
+            .to_string(),
+        );
+        home.write(
+            "work/app/.mcp.json",
+            r#"{"mcpServers":{"legacy":{},"linear":{}}}"#,
+        );
+        home.write(
+            "home/.claude/plugins/installed_plugins.json",
+            &serde_json::json!({"plugins": {
+                "atlassian@official": [{"scope": "user", "installPath": home.path("plugins/atlassian")}],
+                "docs@official": [{"scope": "user", "installPath": home.path("plugins/docs")}]
+            }})
+            .to_string(),
+        );
+        home.write(
+            "home/.claude/settings.json",
+            r#"{"enabledPlugins":{"atlassian@official":true,"docs@official":true}}"#,
+        );
+        home.write(
+            "plugins/atlassian/.mcp.json",
+            r#"{"mcpServers":{"atlassian":{}}}"#,
+        );
+        home.write(
+            "plugins/atlassian/.claude-plugin/plugin.json",
+            r#"{"name":"atlassian","mcpServers":"./.mcp.json"}"#,
+        );
+        home.write(
+            "plugins/docs/.claude-plugin/plugin.json",
+            r#"{"name":"docs","mcpServers":{"docs-search":{}}}"#,
+        );
+        let found = scan(&home.roots(Some("work/app")));
+        let servers: Vec<(Scope, &str, Loading, Option<&str>)> = found
+            .sources
+            .iter()
+            .filter(|s| s.kind == SourceKind::McpServer)
+            .map(|s| (s.scope, s.name.as_str(), s.loading, s.plugin.as_deref()))
+            .collect();
+        assert_eq!(
+            servers,
+            vec![
+                (Scope::User, "context7", Loading::Unknown, None),
+                (Scope::User, "serena", Loading::Unknown, None),
+                (Scope::Local, "db", Loading::Unknown, None),
+                (Scope::Project, "legacy", Loading::Off, None),
+                (Scope::Project, "linear", Loading::Unknown, None),
+                (
+                    Scope::Plugin,
+                    "atlassian",
+                    Loading::Unknown,
+                    Some("atlassian")
+                ),
+                (Scope::Plugin, "docs-search", Loading::Unknown, Some("docs")),
+            ]
+        );
+    }
+
+    #[test]
+    fn unreadable_or_malformed_config_is_skipped() {
+        let home = Home::new();
+        home.write("home/.claude.json", "{not json");
+        home.write("work/app/.mcp.json", r#"{"mcpServers":[1,2]}"#);
+        let found = scan(&home.roots(Some("work/app")));
+        assert!(found.sources.is_empty());
+    }
+}

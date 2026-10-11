@@ -1,6 +1,7 @@
 pub mod api;
 pub mod cache_model;
 pub mod cli;
+pub mod config_scan;
 pub mod daemon;
 pub mod forecast;
 pub mod ingest;
