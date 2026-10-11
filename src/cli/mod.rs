@@ -65,6 +65,11 @@ enum Command {
             help = "Number of calendar days to show, today included"
         )]
         days: u32,
+        #[arg(
+            long,
+            help = "Account id or label, or all [default: the current account]"
+        )]
+        account: Option<String>,
     },
     #[command(about = "Print stored usage per day, project, account and model, importing first")]
     Export {
@@ -76,6 +81,11 @@ enum Command {
             help = "Number of calendar days to include, today included [default: all]"
         )]
         days: Option<u32>,
+        #[arg(
+            long,
+            help = "Account id or label, or all [default: the current account]"
+        )]
+        account: Option<String>,
     },
     #[command(about = "List the accounts claude-plus has seen, or rename one")]
     Accounts {
@@ -187,11 +197,15 @@ pub fn run() -> Result<ExitCode> {
             return daemon::ensure(&paths, policy);
         }
         Command::Import => import::run(&paths, &prices),
-        Command::Stats { days } => stats::run(&paths, &prices, days),
-        Command::Export { format, days } => export::run(&paths, &prices, format, days),
+        Command::Stats { days, account } => stats::run(&paths, &prices, days, account.as_deref()),
+        Command::Export {
+            format,
+            days,
+            account,
+        } => export::run(&paths, &prices, format, days, account.as_deref()),
         Command::Accounts { action } => accounts::accounts(&paths, &prices, action),
         Command::Budget { action } => accounts::budget(&paths, &prices, action),
-        Command::Doctor => doctor::run(&paths, &prices),
+        Command::Doctor => doctor::run(&paths, &prices, &user_prices),
         Command::Reindex => reindex::run(&paths, &prices),
         Command::Install { yes } => setup::install(&paths, yes),
         Command::Uninstall { purge, yes } => setup::uninstall(&paths, purge, yes),

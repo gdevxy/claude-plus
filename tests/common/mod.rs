@@ -154,6 +154,7 @@ pub fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
 }
 
 pub const STATS_TABLE: &str = "\
+Account: All accounts
 ┌────────────┬───────────────────────────┬──────────┬─────────┐
 │ Day        ┆ Model                     ┆ Requests ┆    Cost │
 ╞════════════╪═══════════════════════════╪══════════╪═════════╡

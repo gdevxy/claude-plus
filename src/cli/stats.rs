@@ -8,7 +8,7 @@ use crate::paths::Paths;
 use crate::pricing::PriceTable;
 use crate::store::DailyCost;
 
-pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
+pub fn run(paths: &Paths, prices: &PriceTable, days: u32, account: Option<&str>) -> Result<()> {
     let today = now()?.date_naive();
     let first_day = today
         .checked_sub_days(Days::new(u64::from(days - 1)))
@@ -28,7 +28,8 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
         eprintln!("{line}");
     }
     reconciled?;
-    let rows = store.daily_costs(since, until, &Local, None)?;
+    let (scope, label) = super::accounts::scope(&store, account)?;
+    let rows = store.daily_costs(since, until, &Local, scope.sessions(&store)?.as_ref())?;
     let total = Total::of(&rows);
     let decimals = column_decimals(
         &rows
@@ -66,6 +67,7 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
         Cell::new(costs.cells.last().map_or("", String::as_str))
             .set_alignment(CellAlignment::Right),
     ]);
+    println!("Account: {label}");
     println!("{}", with_total_separator(&table.to_string()));
     if total.reconciled_usd > 0.0 {
         println!(

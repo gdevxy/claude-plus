@@ -19,7 +19,13 @@ pub enum Format {
     Csv,
 }
 
-pub fn run(paths: &Paths, prices: &PriceTable, format: Format, days: Option<u32>) -> Result<()> {
+pub fn run(
+    paths: &Paths,
+    prices: &PriceTable,
+    format: Format,
+    days: Option<u32>,
+    account: Option<&str>,
+) -> Result<()> {
     let (since, until) = window(days)?;
     if let Some(notice) = super::missing_transcripts(paths) {
         eprintln!("{notice}");
@@ -30,10 +36,18 @@ pub fn run(paths: &Paths, prices: &PriceTable, format: Format, days: Option<u32>
         eprintln!("{line}");
     }
     reconciled?;
+    let (scope, _) = super::accounts::scope(&store, account)?;
+    let kept = scope.sessions(&store)?;
+    let mut requests = store.requests_between(since, until)?;
+    requests.retain(|request| scope.keeps(&kept, &request.session_id));
+    let mut adjustments = store.adjustments_between(since, until)?;
+    adjustments.retain(|adjustment| scope.keeps(&kept, &adjustment.session_id));
+    let mut sessions = store.sessions_spending_between(since, until)?;
+    sessions.retain(|session| scope.keeps(&kept, &session.id));
     let rows = export::rows(
-        &store.requests_between(since, until)?,
-        &store.adjustments_between(since, until)?,
-        &store.sessions_spending_between(since, until)?,
+        &requests,
+        &adjustments,
+        &sessions,
         &account_labels(&store)?,
         &Local,
     );

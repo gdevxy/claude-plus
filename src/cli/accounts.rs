@@ -7,8 +7,10 @@ use crate::accounts::{Auth, auth_account};
 use crate::limits::{SPEND_LIMIT, month_start_utc, monthly_pace, next_month_start_utc};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
+use crate::scope::Scope;
 use crate::store::{AccountInfo, AccountRow, Store};
 
+const ALL_ACCOUNTS: &str = "All accounts";
 const HOUR_SECONDS: i64 = 3600;
 const DAY_SECONDS: i64 = 24 * HOUR_SECONDS;
 
@@ -56,6 +58,23 @@ pub fn resolve(store: &Store, given: Option<&str>) -> Result<String> {
                 .join(", ")
         ),
     }
+}
+
+pub fn scope(store: &Store, given: Option<&str>) -> Result<(Scope, String)> {
+    if given == Some("all") {
+        return Ok((Scope::All, ALL_ACCOUNTS.to_string()));
+    }
+    let id = match resolve(store, given) {
+        Ok(id) => id,
+        Err(_) if given.is_none() => return Ok((Scope::All, ALL_ACCOUNTS.to_string())),
+        Err(error) => return Err(error),
+    };
+    let label = store
+        .accounts()?
+        .into_iter()
+        .find(|account| account.id == id)
+        .map_or_else(|| id.clone(), |account| account.label);
+    Ok((Scope::Account(id), label))
 }
 
 fn now_ms() -> Result<i64> {

@@ -1,17 +1,20 @@
+use std::path::Path;
+
 use anyhow::Result;
 
 use super::format::{duration, plural, usd};
 use super::labeled;
+use crate::accounts::{Login, read_login};
 use crate::api;
 use crate::daemon::control::{self, Status};
 use crate::ingest::discover;
 use crate::paths::Paths;
-use crate::pricing::PriceTable;
+use crate::pricing::{PriceTable, UserPrices};
 use crate::setup::bundle::{self, PLUGIN_ID};
 use crate::setup::claude::{self, ClaudeCode, Plugin};
 use crate::store::Store;
 
-pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
+pub fn run(paths: &Paths, prices: &PriceTable, user_prices: &UserPrices) -> Result<()> {
     let files = discover(&paths.projects_dir())?;
     println!("✻ claude-plus doctor");
     println!(
@@ -46,10 +49,52 @@ pub fn run(paths: &Paths, prices: &PriceTable) -> Result<()> {
     let (claude_code, plus) = setup(&ClaudeCode::default());
     println!("{}", labeled("Claude Code:", &claude_code));
     println!("{}", labeled("Mod:", &plus));
+    println!("{}", labeled("Account:", &account_line(paths)));
+    println!("{}", labeled("Login:", &login_line(&paths.claude_json)));
+    println!("{}", labeled("Prices:", &prices_line(user_prices)));
 
     match readable_store(paths)? {
         Some(store) => print_database(&store, &status),
         None => Ok(()),
+    }
+}
+
+fn account_line(paths: &Paths) -> String {
+    let current = Store::open_read_only(&paths.database())
+        .ok()
+        .and_then(|store| {
+            let id = store
+                .latest_session_account()
+                .ok()?
+                .or(store.open_account().ok()?)?;
+            let label = store
+                .accounts()
+                .ok()?
+                .into_iter()
+                .find(|account| account.id == id)
+                .map_or_else(|| id.clone(), |account| account.label);
+            Some(format!("{label} ({id})"))
+        });
+    current.unwrap_or_else(|| "none seen yet".into())
+}
+
+fn login_line(claude_json: &Path) -> String {
+    match read_login(claude_json) {
+        Ok(Login::SignedIn(_)) => "signed in".into(),
+        Ok(Login::SignedOut) => "signed out".into(),
+        Err(error) => format!(
+            "cannot read {}: {}",
+            claude_json.display(),
+            error.root_cause()
+        ),
+    }
+}
+
+fn prices_line(user_prices: &UserPrices) -> String {
+    match user_prices {
+        UserPrices::Absent => "Anthropic's".into(),
+        UserPrices::Loaded => "Anthropic's, with your prices.toml".into(),
+        UserPrices::Invalid(message) => format!("Anthropic's; {message}"),
     }
 }
 
@@ -315,6 +360,28 @@ mod tests {
             mod_state(Some(&plus("0.0.9", true))),
             format!("plus v0.0.9, run claude-plus install to match this v{this}")
         );
+    }
+
+    #[test]
+    fn prices_and_login_lines_say_what_is_used() {
+        assert_eq!(prices_line(&UserPrices::Absent), "Anthropic's");
+        assert_eq!(
+            prices_line(&UserPrices::Loaded),
+            "Anthropic's, with your prices.toml"
+        );
+        assert_eq!(
+            prices_line(&UserPrices::Invalid("bad".into())),
+            "Anthropic's; bad"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".claude.json");
+        assert!(login_line(&file).starts_with("cannot read"));
+        std::fs::write(&file, "{}").unwrap();
+        assert_eq!(login_line(&file), "signed out");
+        std::fs::write(&file, r#"{"oauthAccount":{"accountUuid":"w"}}"#).unwrap();
+        assert_eq!(login_line(&file), "signed in");
+        std::fs::write(&file, "{broken").unwrap();
+        assert!(login_line(&file).starts_with("cannot read"));
     }
 
     #[test]
