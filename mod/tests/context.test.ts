@@ -43,7 +43,7 @@ describe('context screen', () => {
       '  Free space                      121k',
       '  Autocompact buffer               33k',
       '+ 8.4k of tool schemas load on demand',
-      '~12.4k injected since your first request · 1 compaction',
+      '~12.4k injected later · 1 compaction',
       ' ',
       'Largest items                        ?',
       '  MCP linear · 2 tools            4.1k',
@@ -89,7 +89,7 @@ describe('context screen', () => {
       '▸ Memory files     ▍░░░░░░░░░░   ~1.5k',
       '▸ Skills           ▌░░░░░░░░░░     ~2k',
       '  Messages         ██████▏░░░░  ~25.6k',
-      '~12.4k injected since your first request · 1 compaction',
+      '~12.4k injected later · 1 compaction',
       'Text Claude Code injected, at 3.5 characters per token (estimated until Claude Code counts your memory files), fitted to the 20k tokens of your first request. The rest of each request is messages.',
       ' ',
     ])

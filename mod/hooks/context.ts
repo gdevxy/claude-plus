@@ -193,7 +193,7 @@ function categories(input: ContextInput, composition: LiveContext, width: number
   })
   const deferred = composition.categories.filter(category => category.kind === 'deferred').reduce((sum, category) => sum + category.tokens, 0)
   if (deferred > 0) lines.push(prose('ctx-deferred', `+ ${tokens(deferred)} of tool schemas load on demand`, { dim: true }))
-  lines.push(...injected(reportOf(input)?.history ?? null))
+  lines.push(...injected(reportOf(input)?.history ?? null, width))
   if (input.expanded.includes('categories')) {
     const ago = duration(Math.max(0, input.nowMs - composition.ts_ms))
     lines.push(prose('explain-categories', `Claude Code's own /context breakdown, counted ${ago} ago after a turn. Bars share what is in use; free space and the compaction buffer are the window left. A row with ▸ opens its items.`, { dim: true }))
@@ -212,7 +212,7 @@ function estimate(input: ContextInput, report: ContextReport | null, width: numb
     kind: PART_KINDS[share.part],
   }))
   const drill = { items: report.items, expanded: input.expanded }
-  const lines = [heading('ctx-estimate', 'Estimated from the transcript', width, 'estimate'), ...shareRows(rows, width, true, drill), ...injected(history)]
+  const lines = [heading('ctx-estimate', 'Estimated from the transcript', width, 'estimate'), ...shareRows(rows, width, true, drill), ...injected(history, width)]
   if (input.expanded.includes('estimate')) {
     const ratio = report.ratios.prose.toFixed(1)
     const how = report.ratios.calibrated
@@ -229,11 +229,13 @@ function estimate(input: ContextInput, report: ContextReport | null, width: numb
   return lines
 }
 
-function injected(history: History | null): Line[] {
+function injected(history: History | null, width: number): Line[] {
   if (history === null || (history.injected_later_tokens === 0 && history.compactions === 0)) return []
-  const parts = [`~${tokens(history.injected_later_tokens)} injected since your first request`]
-  if (history.compactions > 0) parts.push(`${history.compactions} compaction${history.compactions === 1 ? '' : 's'}`)
-  return [prose('ctx-injected', parts.join(' · '), { dim: true })]
+  const amount = `~${tokens(history.injected_later_tokens)}`
+  const compactions = history.compactions > 0 ? [`${history.compactions} compaction${history.compactions === 1 ? '' : 's'}`] : []
+  const long = [`${amount} injected since your first request`, ...compactions].join(' · ')
+  const short = [`${amount} injected later`, ...compactions].join(' · ')
+  return [prose('ctx-injected', long.length <= width ? long : short, { dim: true })]
 }
 
 function largest(input: ContextInput, report: ContextReport | null, exact: boolean, width: number): Line[] {
