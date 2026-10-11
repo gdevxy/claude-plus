@@ -1438,7 +1438,7 @@ mod tests {
     fn snapshot(store: &Store) -> Snapshot {
         (
             store.totals().unwrap(),
-            store.daily_costs(0, i64::MAX, &chrono::Utc).unwrap(),
+            store.daily_costs(0, i64::MAX, &chrono::Utc, None).unwrap(),
         )
     }
 

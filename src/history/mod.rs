@@ -7,10 +7,12 @@ use anyhow::Result;
 use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::AccountRef;
 use crate::cache_model::{self, Causes, Rebuild, RebuildCause};
 use crate::forecast::family;
 use crate::limits::{self, Fit, PAIRS_NEEDED};
 use crate::pricing::{PriceTable, normalize_model};
+use crate::scope::Scope;
 use crate::store::{
     CompactionPoint, LimitSample, RequestPoint, SessionInfo, SpentAdjustment, SpentRequest, Store,
 };
@@ -154,6 +156,8 @@ pub struct HistoryReport {
     pub generated_at_ms: i64,
     pub since_ms: i64,
     pub until_ms: i64,
+    pub account: Option<String>,
+    pub accounts: Vec<AccountRef>,
     pub calibration: Calibration,
     pub totals: Totals,
     pub buckets: Vec<Bucket>,
@@ -251,13 +255,30 @@ pub fn read<Tz: TimeZone>(
     range: Range,
     now_ms: i64,
     tz: &Tz,
+    scope: &Scope,
 ) -> Result<HistoryReport>
 where
     Tz::Offset: std::fmt::Display,
 {
     let spans = calendar::spans(range, now_ms.div_euclid(1000), tz)?;
     let (since, until) = (spans.since(), spans.until);
-    let requests = store.requests_between(since, until)?;
+    let kept = scope.sessions(store)?;
+    let requests: Vec<SpentRequest> = store
+        .requests_between(since, until)?
+        .into_iter()
+        .filter(|r| scope.keeps(&kept, &r.session_id))
+        .collect();
+    let adjustments: Vec<SpentAdjustment> = store
+        .adjustments_between(since, until)?
+        .into_iter()
+        .filter(|a| scope.keeps(&kept, &a.session_id))
+        .collect();
+    let spending = store.sessions_spending_between(since, until)?;
+    let accounts = accounts_in(store, &spending, scope)?;
+    let sessions: Vec<SessionInfo> = spending
+        .into_iter()
+        .filter(|s| scope.keeps(&kept, &s.id))
+        .collect();
     let mut previous = HashMap::new();
     for session in sessions_of(&requests) {
         if let Some(point) = store.last_main_request_before(session, since)? {
@@ -275,27 +296,57 @@ where
         .into_iter()
         .filter(|rebuild| rebuild.ts_ms >= since * 1000)
         .collect::<Vec<_>>();
-    let samples = store.limit_samples_between(FIVE_HOUR, since * 1000, until * 1000)?;
+    let (samples, fits) = match scope.account() {
+        None => (Vec::new(), Vec::new()),
+        Some(account) => (
+            store
+                .limit_samples_between(FIVE_HOUR, since * 1000, until * 1000)?
+                .into_iter()
+                .filter(|s| s.account_id.as_deref() == Some(account))
+                .collect(),
+            limits::fits_of(&limits::stored_fit(store)?, Some(account)),
+        ),
+    };
     let in_range: Vec<CompactionPoint> = causes
         .into_values()
         .flat_map(|causes| causes.compactions)
         .filter(|compaction| compaction.ts >= since)
         .collect();
-    Ok(build(
+    let report = build(
         range,
         &spans,
         &Inputs {
             requests: &requests,
-            adjustments: &store.adjustments_between(since, until)?,
-            sessions: &store.sessions_spending_between(since, until)?,
+            adjustments: &adjustments,
+            sessions: &sessions,
             rebuilds: &rebuilds,
             samples: &samples,
             compactions: &in_range,
-            fits: &limits::stored_fit(store)?,
+            fits: &fits,
             prices,
         },
         now_ms,
-    ))
+    );
+    Ok(HistoryReport {
+        account: scope.account().map(String::from),
+        accounts,
+        ..report
+    })
+}
+
+fn accounts_in(store: &Store, spending: &[SessionInfo], scope: &Scope) -> Result<Vec<AccountRef>> {
+    let attributed = store.session_accounts()?;
+    let mut shown: HashSet<&str> = spending
+        .iter()
+        .filter_map(|s| attributed.get(&s.id).map(String::as_str))
+        .collect();
+    shown.extend(scope.account());
+    Ok(store
+        .accounts()?
+        .into_iter()
+        .filter(|account| shown.contains(account.id.as_str()))
+        .map(AccountRef::from)
+        .collect())
 }
 
 fn sessions_of(requests: &[SpentRequest]) -> BTreeSet<&str> {
@@ -534,6 +585,8 @@ pub fn build(range: Range, spans: &Spans, inputs: &Inputs, now_ms: i64) -> Histo
         generated_at_ms: now_ms,
         since_ms: spans.since() * 1000,
         until_ms: spans.until * 1000,
+        account: None,
+        accounts: Vec::new(),
         calibration: Calibration {
             calibrated: rates.fallback.is_some(),
             pairs: rates.pairs,

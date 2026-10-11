@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 
 use anyhow::{Context, Result};
@@ -8,10 +9,11 @@ use crate::history::calendar::local_midnight;
 use crate::history::export;
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
+use crate::store::Store;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Format {
-    #[value(help = "One object {\"v\":1,\"rows\":[...]}, costs to 6 decimals")]
+    #[value(help = "One object {\"v\":2,\"rows\":[...]}, costs to 6 decimals")]
     Json,
     #[value(help = "A header row, RFC 4180 quoting, LF line ends and costs to 6 decimals")]
     Csv,
@@ -32,9 +34,23 @@ pub fn run(paths: &Paths, prices: &PriceTable, format: Format, days: Option<u32>
         &store.requests_between(since, until)?,
         &store.adjustments_between(since, until)?,
         &store.sessions_spending_between(since, until)?,
+        &account_labels(&store)?,
         &Local,
     );
     print(format, &rows)
+}
+
+fn account_labels(store: &Store) -> Result<HashMap<String, String>> {
+    let labels: HashMap<String, String> = store
+        .accounts()?
+        .into_iter()
+        .map(|account| (account.id, account.label))
+        .collect();
+    Ok(store
+        .session_accounts()?
+        .into_iter()
+        .filter_map(|(session, account)| Some((session, labels.get(&account)?.clone())))
+        .collect())
 }
 
 fn print(format: Format, rows: &[export::ExportRow]) -> Result<()> {

@@ -17,6 +17,7 @@ use crate::context_model::{self, Uses, breakdown, items};
 use crate::history::{Range, Rates, calendar};
 use crate::limits;
 use crate::pricing::PriceTable;
+use crate::scope::Scope;
 use crate::store::{
     CompactionPoint, PrefixChange, PromptPoint, SpentAdjustment, SpentRequest, Store,
 };
@@ -185,14 +186,31 @@ where
     let now_s = request.now_ms.div_euclid(1000);
     let spans = calendar::spans(Range::Quarter, now_s, tz)?;
     let since = now_s - WINDOW_DAYS * DAY_S;
-    let quarter = store.requests_between(spans.since().min(since), spans.until)?;
-    let reconciled = store.adjustments_between(spans.since(), spans.until)?;
+    let scope = match store.session_account(request.session)? {
+        Some(id) => Scope::Account(id),
+        None => Scope::All,
+    };
+    let kept = scope.sessions(store)?;
+    let quarter: Vec<SpentRequest> = store
+        .requests_between(spans.since().min(since), spans.until)?
+        .into_iter()
+        .filter(|r| scope.keeps(&kept, &r.session_id))
+        .collect();
+    let reconciled: Vec<SpentAdjustment> = store
+        .adjustments_between(spans.since(), spans.until)?
+        .into_iter()
+        .filter(|a| scope.keeps(&kept, &a.session_id))
+        .collect();
     let calendar_days = days(&spans, &quarter, &reconciled, prices);
     let requests: Vec<SpentRequest> = quarter
         .into_iter()
         .filter(|r| r.point.ts >= since && r.point.ts < spans.until)
         .collect();
-    let sessions = store.sessions_spending_between(since, spans.until)?;
+    let sessions: Vec<_> = store
+        .sessions_spending_between(since, spans.until)?
+        .into_iter()
+        .filter(|s| scope.keeps(&kept, &s.id))
+        .collect();
     let (rebuilds, compactions) =
         rebuilds(store, prices, &requests, since, spans.until, request.now_ms)?;
     let project = store.session_project(request.session)?;
@@ -226,7 +244,19 @@ where
     let dead_weight = items::dead_weight(&all, live.as_ref());
     let month_items = items::items(live.as_ref(), request.scan, &ratios, &monthly);
     let memory = memory_texts(request.scan);
-    let rates = Rates::of(&limits::stored_fit(store)?);
+    let rates = Rates::of(&limits::fits_of(
+        &limits::stored_fit(store)?,
+        scope.account(),
+    ));
+    let prompts: Vec<PromptPoint> = prompts_of(store, &requests, since, spans.until)?
+        .into_iter()
+        .filter(|p| scope.keeps(&kept, &p.session_id))
+        .collect();
+    let tool_results: Vec<_> = store
+        .large_tool_results_between(since, spans.until, LARGE_RESULT_CHARS)?
+        .into_iter()
+        .filter(|r| scope.keeps(&kept, &r.session_id))
+        .collect();
     let ctx = InsightContext {
         now_ms: request.now_ms,
         since_ts: since,
@@ -235,9 +265,9 @@ where
         requests: &requests,
         sessions: &sessions,
         project: project.as_deref(),
-        prompts: &prompts_of(store, &requests, since, spans.until)?,
+        prompts: &prompts,
         rebuilds: &rebuilds,
-        tool_results: &store.large_tool_results_between(since, spans.until, LARGE_RESULT_CHARS)?,
+        tool_results: &tool_results,
         compactions: &compactions,
         dead_weight: &dead_weight,
         month_items: &month_items,
@@ -360,7 +390,9 @@ mod tests {
     use super::*;
     use crate::config_scan::Roots;
     use crate::insights::RuleId;
-    use crate::store::{AttachmentRow, PromptRow, RequestPoint, RequestRow, SessionRow};
+    use crate::store::{
+        AttachmentRow, AttributionSource, PromptRow, RequestPoint, RequestRow, SessionRow,
+    };
     use crate::transcript::TokenCounts;
 
     const OPUS: &str = "claude-opus-5-5";
@@ -747,6 +779,79 @@ mod tests {
             (saving - (100_000.0 - 20_000.0) * 4.8 / 1e6 / 2.0).abs() < 1e-9,
             "{saving}"
         );
+    }
+
+    #[test]
+    fn insights_count_only_the_sessions_of_the_requesting_session_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let scan = config_scan::scan(&Roots {
+            home: temp.path().join("home"),
+            claude_dir: temp.path().join("claude"),
+            claude_json: temp.path().join("claude.json"),
+            project: None,
+        });
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let spending = [
+            ("s1", "oauth:me", &["2026-10-10T10:00:00Z"][..]),
+            (
+                "s2",
+                "oauth:work",
+                &["2026-10-10T11:00:00Z", "2026-10-10T11:01:00Z"][..],
+            ),
+        ];
+        for (session, account, times) in spending {
+            w.session(&SessionRow {
+                id: session.into(),
+                project: "-work".into(),
+                cwd: None,
+                ts: Some(utc("2026-10-10T09:00:00Z")),
+            })
+            .unwrap();
+            w.attribute(session, account, AttributionSource::Start)
+                .unwrap();
+            for (index, at) in times.iter().enumerate() {
+                let request = spent(at, 0, 1_000);
+                w.request(&RequestRow {
+                    key: format!("{session}-{index}"),
+                    session_id: session.into(),
+                    ts: request.point.ts,
+                    sent_ts: None,
+                    model: request.point.model,
+                    tokens: request.point.tokens,
+                    cost_usd: request.cost_usd,
+                    is_sidechain: false,
+                    agent_id: None,
+                    skill: None,
+                    mcp_server: None,
+                    effort: None,
+                })
+                .unwrap();
+            }
+        }
+        w.commit().unwrap();
+        let insights = |session: &str| {
+            read(
+                &store,
+                &PriceTable::bundled(),
+                &Request {
+                    session,
+                    scan: &scan,
+                    retention_days: Some(90),
+                    now_ms: utc("2026-10-11T12:00:00Z") * 1000,
+                },
+                &Utc,
+            )
+            .unwrap()
+        };
+        let one = spent("2026-10-10T10:00:00Z", 0, 1_000).cost_usd.unwrap();
+        let mine = insights("s1");
+        assert_eq!((mine.requests, mine.sessions), (1, 1));
+        assert!((mine.recap.unwrap().cost_usd - one).abs() < 1e-9);
+        let work = insights("s2");
+        assert_eq!((work.requests, work.sessions), (2, 1));
+        let unattributed = insights("s3");
+        assert_eq!((unattributed.requests, unattributed.sessions), (3, 2));
     }
 
     #[test]

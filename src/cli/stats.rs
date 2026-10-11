@@ -28,7 +28,7 @@ pub fn run(paths: &Paths, prices: &PriceTable, days: u32) -> Result<()> {
         eprintln!("{line}");
     }
     reconciled?;
-    let rows = store.daily_costs(since, until, &Local)?;
+    let rows = store.daily_costs(since, until, &Local, None)?;
     let total = Total::of(&rows);
     let decimals = column_decimals(
         &rows

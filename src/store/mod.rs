@@ -11,7 +11,7 @@ mod session;
 mod timeline;
 mod writer;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -266,9 +266,10 @@ impl Store {
         since_ts: i64,
         until_ts: i64,
         tz: &Tz,
+        sessions: Option<&HashSet<String>>,
     ) -> Result<Vec<DailyCost>> {
         let mut grouped = BTreeMap::new();
-        for (ts, model, cost) in self.costs_between("requests", since_ts, until_ts)? {
+        for (ts, model, cost) in self.costs_between("requests", since_ts, until_ts, sessions)? {
             let day = daily_entry(&mut grouped, ts, model, tz)?;
             day.requests += 1;
             match cost {
@@ -276,7 +277,7 @@ impl Store {
                 None => day.unpriced += 1,
             }
         }
-        for (ts, model, cost) in self.costs_between("adjustments", since_ts, until_ts)? {
+        for (ts, model, cost) in self.costs_between("adjustments", since_ts, until_ts, sessions)? {
             if let Some(usd) = cost {
                 let day = daily_entry(&mut grouped, ts, model, tz)?;
                 day.cost_usd += usd;
@@ -291,14 +292,22 @@ impl Store {
         table: &str,
         since_ts: i64,
         until_ts: i64,
+        sessions: Option<&HashSet<String>>,
     ) -> Result<Vec<(i64, String, Option<f64>)>> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT ts, model, cost_usd FROM {table} WHERE ts >= ?1 AND ts < ?2"
+            "SELECT ts, model, cost_usd, session_id FROM {table} WHERE ts >= ?1 AND ts < ?2"
         ))?;
         let rows = statement.query_map([since_ts, until_ts], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?))
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut kept = Vec::new();
+        for row in rows {
+            let (ts, model, cost, session) = row?;
+            if sessions.is_none_or(|only| only.contains(&session)) {
+                kept.push((ts, model, cost));
+            }
+        }
+        Ok(kept)
     }
 
     pub fn unpriced_models(&self) -> Result<Vec<(String, u64)>> {
@@ -906,7 +915,7 @@ mod tests {
             .unwrap();
         w.commit().unwrap();
 
-        let utc = store.daily_costs(0, i64::MAX, &chrono::Utc).unwrap();
+        let utc = store.daily_costs(0, i64::MAX, &chrono::Utc, None).unwrap();
         assert_eq!(utc.len(), 2);
         assert_eq!(utc[0].day, NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
         assert_eq!(
@@ -920,6 +929,7 @@ mod tests {
                 0,
                 i64::MAX,
                 &chrono::FixedOffset::east_opt(2 * 3600).unwrap(),
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -949,8 +959,39 @@ mod tests {
         w.request(&request("a", 100, "m", Some(1.0))).unwrap();
         w.request(&request("b", 200, "m", Some(1.0))).unwrap();
         w.commit().unwrap();
-        let rows = store.daily_costs(0, 200, &chrono::Utc).unwrap();
+        let rows = store.daily_costs(0, 200, &chrono::Utc, None).unwrap();
         assert_eq!(rows[0].requests, 1);
+    }
+
+    #[test]
+    fn daily_costs_keep_only_the_sessions_asked_for() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.request(&request("a", 100, "m", Some(1.0))).unwrap();
+        w.request(&RequestRow {
+            session_id: "s2".into(),
+            ..request("b", 110, "m", Some(4.0))
+        })
+        .unwrap();
+        w.adjustment(&SpentAdjustment {
+            session_id: "s2".into(),
+            ts: 120,
+            model: "m".into(),
+            tokens: TokenCounts::default(),
+            cost_usd: Some(0.5),
+        })
+        .unwrap();
+        w.commit().unwrap();
+        let kept = HashSet::from(["s2".to_string()]);
+        let rows = store
+            .daily_costs(0, 200, &chrono::Utc, Some(&kept))
+            .unwrap();
+        assert_eq!(
+            (rows[0].requests, rows[0].cost_usd, rows[0].reconciled_usd),
+            (1, 4.5, 0.5)
+        );
+        let all = store.daily_costs(0, 200, &chrono::Utc, None).unwrap();
+        assert_eq!((all[0].requests, all[0].cost_usd), (2, 5.5));
     }
 
     #[test]

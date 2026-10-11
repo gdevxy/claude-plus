@@ -2,9 +2,35 @@ use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use super::*;
-use crate::store::{CompactionRow, RequestRow, SessionRow};
+use crate::store::{
+    AccountKind, AccountRow, AttributionSource, CompactionRow, RequestRow, SessionRow,
+};
 
 const OPUS: &str = "claude-opus-5-5";
+const ME: &str = "oauth:me";
+const WORK: &str = "oauth:work";
+
+fn now_ms() -> i64 {
+    utc("2026-10-11T09:00:00Z") * 1000
+}
+
+fn me() -> Scope {
+    Scope::Account(ME.into())
+}
+
+fn account(w: &mut crate::store::Writer, id: &str, label: &str, first_seen: &str) {
+    w.upsert_account(
+        &AccountRow {
+            id: id.into(),
+            kind: AccountKind::Oauth,
+            label: label.into(),
+            organization_type: None,
+            billing_type: None,
+        },
+        utc(first_seen) * 1000,
+    )
+    .unwrap();
+}
 
 fn utc(text: &str) -> i64 {
     DateTime::parse_from_rfc3339(text).unwrap().timestamp()
@@ -47,6 +73,10 @@ pub(super) fn fixture() -> Store {
         .unwrap();
     }
     w.title("s1", "Fix the cache countdown", false).unwrap();
+    account(&mut w, ME, "Me", "2026-09-01T00:00:00Z");
+    for session in ["s1", "s2"] {
+        w.attribute(session, ME, AttributionSource::Start).unwrap();
+    }
     let spent = [
         Spent {
             key: "r0",
@@ -156,7 +186,7 @@ pub(super) fn fixture() -> Store {
         w.limit_sample(&LimitSample {
             ts_ms: utc(at) * 1000,
             session_id: "s1".into(),
-            account_id: None,
+            account_id: Some(ME.into()),
             model: Some(OPUS.into()),
             window: FIVE_HOUR.into(),
             used_pct,
@@ -166,7 +196,7 @@ pub(super) fn fixture() -> Store {
     }
     w.set_meta(
         limits::FIT_KEY,
-        r#"[{"window":"five_hour","family":"opus","pairs":25,"pct_per_usd":2.0},{"window":"five_hour","family":"sonnet","pairs":5,"pct_per_usd":9.0}]"#,
+        r#"[{"account":"oauth:me","window":"five_hour","family":"opus","pairs":25,"pct_per_usd":2.0},{"account":"oauth:me","window":"five_hour","family":"sonnet","pairs":5,"pct_per_usd":9.0}]"#,
     )
     .unwrap();
     w.commit().unwrap();
@@ -178,8 +208,9 @@ fn report(range: Range) -> HistoryReport {
         &fixture(),
         &PriceTable::bundled(),
         range,
-        utc("2026-10-11T09:00:00Z") * 1000,
+        now_ms(),
         &Utc,
+        &me(),
     )
     .unwrap()
 }
@@ -215,6 +246,8 @@ fn the_week_report_matches_the_contract() {
             "generated_at_ms": utc("2026-10-11T09:00:00Z") * 1000,
             "since_ms": oct5,
             "until_ms": oct5 + 7 * day,
+            "account": "oauth:me",
+            "accounts": [{"id": "oauth:me", "label": "Me", "kind": "oauth"}],
             "calibration": {"calibrated": true, "pairs": 25, "needed": 20},
             "totals": {"requests": 6, "unpriced": 1, "cost_usd": 6.0, "reconciled_usd": 0.25, "tokens": 165_930, "pct_5h": 12.0, "sessions": 2, "hit_ratio": 0.308204, "saved_usd": 0.19, "rebuilds": 2, "rebuild_usd": 0.7878, "idle_rebuilds": 2, "compactions": 1, "peak_5h_pct": 30.5},
             "buckets": [
@@ -290,7 +323,7 @@ fn without_a_calibrated_five_hour_fit_no_percent_is_shown() {
     let mut w = store.writer().unwrap();
     w.set_meta(
         limits::FIT_KEY,
-        r#"[{"window":"five_hour","family":"opus","pairs":12,"pct_per_usd":2.0}]"#,
+        r#"[{"account":"oauth:me","window":"five_hour","family":"opus","pairs":12,"pct_per_usd":2.0}]"#,
     )
     .unwrap();
     w.commit().unwrap();
@@ -298,8 +331,9 @@ fn without_a_calibrated_five_hour_fit_no_percent_is_shown() {
         &store,
         &PriceTable::bundled(),
         Range::Week,
-        utc("2026-10-11T09:00:00Z") * 1000,
+        now_ms(),
         &Utc,
+        &me(),
     )
     .unwrap();
     assert_eq!(
@@ -331,8 +365,9 @@ fn an_empty_store_reports_every_span_with_nothing_in_it() {
         &Store::open_in_memory().unwrap(),
         &PriceTable::bundled(),
         Range::Month,
-        utc("2026-10-11T09:00:00Z") * 1000,
+        now_ms(),
         &Utc,
+        &Scope::All,
     )
     .unwrap();
     assert_eq!(report.buckets.len(), 30);
@@ -377,4 +412,130 @@ fn ranges_read_and_write_as_the_api_names_them() {
     assert_eq!(Range::parse("30d"), Some(Range::Month));
     assert_eq!(Range::parse("1y"), None);
     assert_eq!(serde_json::to_string(&Range::Quarter).unwrap(), r#""90d""#);
+}
+
+fn two_account_store() -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut w = store.writer().unwrap();
+    account(&mut w, "oauth:gone", "Gone", "2026-01-01T00:00:00Z");
+    account(&mut w, ME, "Me", "2026-09-01T00:00:00Z");
+    account(&mut w, WORK, "Work", "2026-09-15T00:00:00Z");
+    let spent = [
+        (
+            "mine",
+            ME,
+            ["2026-10-06T10:00:00Z", "2026-10-07T10:00:00Z"].as_slice(),
+        ),
+        (
+            "work",
+            WORK,
+            [
+                "2026-10-08T10:00:00Z",
+                "2026-10-09T10:00:00Z",
+                "2026-10-10T10:00:00Z",
+            ]
+            .as_slice(),
+        ),
+    ];
+    for (session, id, times) in spent {
+        w.session(&SessionRow {
+            id: session.into(),
+            project: format!("-{session}"),
+            cwd: Some(format!("/{session}")),
+            ts: Some(utc("2026-10-06T00:00:00Z")),
+        })
+        .unwrap();
+        w.attribute(session, id, AttributionSource::Start).unwrap();
+        for (index, at) in times.iter().enumerate() {
+            w.request(&RequestRow {
+                key: format!("{session}-{index}"),
+                session_id: session.into(),
+                ts: utc(at),
+                sent_ts: None,
+                model: OPUS.into(),
+                tokens: tokens(10, 100, 0, 0, 0),
+                cost_usd: Some(1.0),
+                is_sidechain: false,
+                agent_id: None,
+                skill: None,
+                mcp_server: None,
+                effort: None,
+            })
+            .unwrap();
+        }
+    }
+    w.limit_sample(&LimitSample {
+        ts_ms: utc("2026-10-10T10:00:00Z") * 1000,
+        session_id: "work".into(),
+        account_id: Some(WORK.into()),
+        model: Some(OPUS.into()),
+        window: FIVE_HOUR.into(),
+        used_pct: 40.0,
+        resets_at_ms: None,
+    })
+    .unwrap();
+    w.set_meta(
+        limits::FIT_KEY,
+        r#"[{"account":"oauth:work","window":"five_hour","family":"opus","pairs":25,"pct_per_usd":2.0}]"#,
+    )
+    .unwrap();
+    w.commit().unwrap();
+    store
+}
+
+#[test]
+fn history_of_one_account_counts_only_its_sessions_and_lists_both() {
+    let store = two_account_store();
+    let prices = PriceTable::bundled();
+    let work = read(
+        &store,
+        &prices,
+        Range::Week,
+        now_ms(),
+        &Utc,
+        &Scope::Account(WORK.into()),
+    )
+    .unwrap();
+    assert_eq!(work.totals.spend.requests, 3);
+    assert_eq!(work.totals.sessions, 1);
+    assert_eq!(work.account.as_deref(), Some(WORK));
+    assert_eq!(
+        work.accounts
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![ME, WORK]
+    );
+    assert!(work.calibration.calibrated);
+    assert_eq!(work.totals.peak_5h_pct, Some(40.0));
+    assert_eq!(work.totals.spend.pct_5h, Some(6.0));
+    let all = read(&store, &prices, Range::Week, now_ms(), &Utc, &Scope::All).unwrap();
+    assert_eq!(all.totals.spend.requests, 5);
+    assert_eq!(all.account, None);
+    assert_eq!(all.accounts, work.accounts);
+    assert!(!all.calibration.calibrated);
+    assert_eq!(all.totals.peak_5h_pct, None);
+    assert_eq!(all.totals.spend.pct_5h, None);
+}
+
+#[test]
+fn an_account_with_nothing_spent_still_lists_itself() {
+    let store = two_account_store();
+    let gone = read(
+        &store,
+        &PriceTable::bundled(),
+        Range::Week,
+        now_ms(),
+        &Utc,
+        &Scope::Account("oauth:gone".into()),
+    )
+    .unwrap();
+    assert_eq!(gone.totals.spend.requests, 0);
+    assert_eq!(
+        gone.accounts
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["oauth:gone", ME, WORK]
+    );
 }

@@ -574,7 +574,7 @@ mod tests {
         assert!(close(totals.reconciled_usd, 0.0111), "{totals:?}");
         assert!(close(totals.priced_cost_usd, 0.01225), "{totals:?}");
 
-        let daily = store.daily_costs(0, i64::MAX, &chrono::Utc).unwrap();
+        let daily = store.daily_costs(0, i64::MAX, &chrono::Utc, None).unwrap();
         assert_eq!(daily.len(), 2);
         assert_eq!(
             (daily[0].model.as_str(), daily[0].requests),

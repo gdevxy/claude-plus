@@ -65,7 +65,7 @@ enum Command {
         )]
         days: u32,
     },
-    #[command(about = "Print stored usage per day, project and model, importing first")]
+    #[command(about = "Print stored usage per day, project, account and model, importing first")]
     Export {
         #[arg(long, value_enum, help = "Output format")]
         format: export::Format,

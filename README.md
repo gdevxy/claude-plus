@@ -109,7 +109,7 @@ Run `claude-plus uninstall` before you remove the binary with `brew uninstall cl
 | `claude-plus install` | Add the pane to Claude Code and start the daemon. |
 | `claude-plus uninstall [--purge]` | Remove the pane and stop the daemon, and with `--purge` delete the data. |
 | `claude-plus stats [--days N]` | Print daily cost per model. |
-| `claude-plus export --format json\|csv` | Print stored usage per day, project and model. |
+| `claude-plus export --format json\|csv` | Print stored usage per day, project, account and model. |
 | `claude-plus doctor` | Check the binary, daemon, mod, Claude Code version and transcript retention. |
 | `claude-plus import` | Read new transcripts into the store, with progress. |
 | `claude-plus reindex` | Rebuild derived tables from stored records. |

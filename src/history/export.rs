@@ -8,13 +8,15 @@ use super::project_names;
 use crate::store::{SessionInfo, SpentAdjustment, SpentRequest};
 use crate::transcript::TokenCounts;
 
-pub const EXPORT_VERSION: u32 = 1;
-pub const CSV_HEADER: &str = "day,project,model,requests,unpriced,input,output,cache_read,cache_write_5m,cache_write_1h,cost_usd,reconciled_usd";
+pub const EXPORT_VERSION: u32 = 2;
+pub const UNKNOWN_ACCOUNT: &str = "Unknown";
+pub const CSV_HEADER: &str = "day,project,account,model,requests,unpriced,input,output,cache_read,cache_write_5m,cache_write_1h,cost_usd,reconciled_usd";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExportRow {
     pub day: String,
     pub project: String,
+    pub account: String,
     pub model: String,
     pub requests: u64,
     pub unpriced: u64,
@@ -37,6 +39,7 @@ pub fn rows<Tz: TimeZone>(
     requests: &[SpentRequest],
     adjustments: &[SpentAdjustment],
     sessions: &[SessionInfo],
+    accounts: &HashMap<String, String>,
     tz: &Tz,
 ) -> Vec<ExportRow> {
     let names = project_names(sessions);
@@ -56,7 +59,11 @@ pub fn rows<Tz: TimeZone>(
             .date_naive()
             .to_string();
         let project = projects.get(session).cloned().unwrap_or_default();
-        Some((day, project, model.to_string()))
+        let account = accounts
+            .get(session)
+            .map_or(UNKNOWN_ACCOUNT, String::as_str)
+            .to_string();
+        Some((day, project, account, model.to_string()))
     };
     for request in requests {
         let Some(key) = key(&request.session_id, request.point.ts, &request.point.model) else {
@@ -94,15 +101,16 @@ fn to_six_decimals(usd: f64) -> f64 {
     (usd * 1e6).round() / 1e6
 }
 
-type Key = (String, String, String);
+type Key = (String, String, String, String);
 type Grouped = BTreeMap<Key, ExportRow>;
 
 fn row_of(grouped: &mut Grouped, key: Key) -> &mut ExportRow {
     grouped
         .entry(key)
-        .or_insert_with_key(|(day, project, model)| ExportRow {
+        .or_insert_with_key(|(day, project, account, model)| ExportRow {
             day: day.clone(),
             project: project.clone(),
+            account: account.clone(),
             model: model.clone(),
             ..Default::default()
         })
@@ -129,6 +137,7 @@ pub fn csv(rows: &[ExportRow]) -> String {
         let fields = [
             row.day.clone(),
             field(&row.project),
+            field(&row.account),
             field(&row.model),
             row.requests.to_string(),
             row.unpriced.to_string(),
@@ -186,6 +195,13 @@ mod tests {
         }
     }
 
+    fn accounts() -> HashMap<String, String> {
+        HashMap::from([
+            ("s1".to_string(), "Me".to_string()),
+            ("s2".to_string(), "Work, Inc".to_string()),
+        ])
+    }
+
     fn sessions() -> Vec<SessionInfo> {
         vec![
             SessionInfo {
@@ -222,13 +238,14 @@ mod tests {
             },
             cost_usd: Some(0.25),
         }];
-        let utc = rows(&requests, &adjustments, &sessions(), &Utc);
-        let keys: Vec<(&str, &str, &str, u64)> = utc
+        let utc = rows(&requests, &adjustments, &sessions(), &accounts(), &Utc);
+        let keys: Vec<(&str, &str, &str, &str, u64)> = utc
             .iter()
             .map(|r| {
                 (
                     r.day.as_str(),
                     r.project.as_str(),
+                    r.account.as_str(),
                     r.model.as_str(),
                     r.requests,
                 )
@@ -237,9 +254,9 @@ mod tests {
         assert_eq!(
             keys,
             [
-                ("2026-10-10", "a,b \"x\"", "claude-opus-5-5", 1),
-                ("2026-10-10", "app", "claude-mystery-1", 1),
-                ("2026-10-10", "app", "claude-opus-5-5", 2),
+                ("2026-10-10", "a,b \"x\"", "Work, Inc", "claude-opus-5-5", 1),
+                ("2026-10-10", "app", "Me", "claude-mystery-1", 1),
+                ("2026-10-10", "app", "Me", "claude-opus-5-5", 2),
             ]
         );
         let opus = &utc[2];
@@ -254,7 +271,7 @@ mod tests {
         );
         assert_eq!(utc[1].unpriced, 1);
         let zurich = FixedOffset::east_opt(2 * 3600).unwrap();
-        let later = rows(&requests, &adjustments, &sessions(), &zurich);
+        let later = rows(&requests, &adjustments, &sessions(), &accounts(), &zurich);
         assert!(later.iter().all(|row| row.day == "2026-10-11"));
     }
 
@@ -275,6 +292,7 @@ mod tests {
                 cost_usd: Some(0.1 + 0.2),
             }],
             &sessions(),
+            &accounts(),
             &Utc,
         );
         let json = json(&rows).unwrap();
@@ -291,18 +309,33 @@ mod tests {
             &[request("s2", OCT_10_23H, "claude-opus-5-5", Some(2.0))],
             &[],
             &sessions(),
+            &accounts(),
             &Utc,
         );
         assert_eq!(
             csv(&rows),
             format!(
-                "{CSV_HEADER}\n2026-10-10,\"a,b \"\"x\"\"\",claude-opus-5-5,1,0,1,2,3,4,5,2.000000,0.000000\n"
+                "{CSV_HEADER}\n2026-10-10,\"a,b \"\"x\"\"\",\"Work, Inc\",claude-opus-5-5,1,0,1,2,3,4,5,2.000000,0.000000\n"
             )
         );
         assert_eq!(
             json(&rows).unwrap(),
-            r#"{"v":1,"rows":[{"day":"2026-10-10","project":"a,b \"x\"","model":"claude-opus-5-5","requests":1,"unpriced":0,"input":1,"output":2,"cache_read":3,"cache_write_5m":4,"cache_write_1h":5,"cost_usd":2.0,"reconciled_usd":0.0}]}"#
+            r#"{"v":2,"rows":[{"day":"2026-10-10","project":"a,b \"x\"","account":"Work, Inc","model":"claude-opus-5-5","requests":1,"unpriced":0,"input":1,"output":2,"cache_read":3,"cache_write_5m":4,"cache_write_1h":5,"cost_usd":2.0,"reconciled_usd":0.0}]}"#
         );
         assert_eq!(csv(&[]), format!("{CSV_HEADER}\n"));
+        assert!(CSV_HEADER.starts_with("day,project,account,model,"));
+    }
+
+    #[test]
+    fn a_session_without_an_account_exports_as_unknown() {
+        let rows = rows(
+            &[request("s1", OCT_10_23H, "claude-opus-5-5", Some(1.0))],
+            &[],
+            &sessions(),
+            &HashMap::new(),
+            &Utc,
+        );
+        assert_eq!(rows[0].account, "Unknown");
+        assert!(csv(&rows).contains("\n2026-10-10,app,Unknown,claude-opus-5-5,"));
     }
 }

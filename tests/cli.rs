@@ -635,7 +635,7 @@ fn help_describes_every_command() {
         "  uninstall  Remove the claude-plus pane from Claude Code and stop the daemon\n",
         "  import     Read new Claude Code transcripts into the local store\n",
         "  stats      Show daily cost per model, importing first\n",
-        "  export     Print stored usage per day, project and model, importing first\n",
+        "  export     Print stored usage per day, project, account and model, importing first\n",
         "  doctor     Check the setup and compare totals with Claude Code; claude-plus only reads\n",
         "  reindex    Rebuild every derived table from the stored records\n",
         "  daemon     Run the daemon that keeps the store live, in the foreground\n",
@@ -669,12 +669,12 @@ fn an_interrupted_reindex_is_reported_and_finished_by_the_next_import() {
 }
 
 const EXPORT_CSV: &str = "\
-day,project,model,requests,unpriced,input,output,cache_read,cache_write_5m,cache_write_1h,cost_usd,reconciled_usd
-2026-10-01,demo,claude-opus-5-5,1,0,10,1000,20000,0,5000,0.064040,0.000000
-2026-10-02,demo,claude-haiku-4-5-20251001,1,0,100,62,0,0,0,0.000410,0.000000
-2026-10-02,demo,claude-sonnet-5-5,1,0,5,200,0,1000,0,0.004510,0.000000
-2026-10-03,demo,claude-haiku-4-5-20251001,0,0,1000,20,0,0,0,0.001100,0.001100
-2026-10-03,demo,claude-sonnet-5-5,2,0,10,1105,1000,0,0,0.011170,0.010000
+day,project,account,model,requests,unpriced,input,output,cache_read,cache_write_5m,cache_write_1h,cost_usd,reconciled_usd
+2026-10-01,demo,Unknown,claude-opus-5-5,1,0,10,1000,20000,0,5000,0.064040,0.000000
+2026-10-02,demo,Unknown,claude-haiku-4-5-20251001,1,0,100,62,0,0,0,0.000410,0.000000
+2026-10-02,demo,Unknown,claude-sonnet-5-5,1,0,5,200,0,1000,0,0.004510,0.000000
+2026-10-03,demo,Unknown,claude-haiku-4-5-20251001,0,0,1000,20,0,0,0,0.001100,0.001100
+2026-10-03,demo,Unknown,claude-sonnet-5-5,2,0,10,1105,1000,0,0,0.011170,0.010000
 ";
 
 #[test]
@@ -687,10 +687,10 @@ fn export_csv_is_exact_and_matches_stats() {
     for line in export.lines().skip(1) {
         let fields: Vec<&str> = line.split(',').collect();
         let entry = exported
-            .entry((fields[0].to_string(), fields[2].to_string()))
+            .entry((fields[0].to_string(), fields[3].to_string()))
             .or_default();
-        entry.0 += fields[3].parse::<u64>().unwrap();
-        entry.1 += fields[10].parse::<f64>().unwrap();
+        entry.0 += fields[4].parse::<u64>().unwrap();
+        entry.1 += fields[11].parse::<f64>().unwrap();
     }
     let exported: Vec<(String, String, String, String)> = exported
         .into_iter()
@@ -729,7 +729,7 @@ fn export_json_carries_the_same_rows() {
     let env = env();
     let json: serde_json::Value =
         serde_json::from_str(&stdout_of(&env, &["export", "--format", "json"])).unwrap();
-    assert_eq!(json["v"], 1);
+    assert_eq!(json["v"], 2);
     let rows = json["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 5);
     let total: f64 = rows
@@ -766,7 +766,7 @@ fn export_without_transcripts_prints_an_empty_export_and_the_notice_on_stderr() 
             "csv",
             format!("{}\n", claude_plus::history::export::CSV_HEADER),
         ),
-        ("json", "{\"v\":1,\"rows\":[]}\n".to_string()),
+        ("json", "{\"v\":2,\"rows\":[]}\n".to_string()),
     ] {
         Command::cargo_bin("claude-plus")
             .unwrap()
@@ -785,7 +785,7 @@ fn export_help_names_what_each_format_prints() {
     let env = env();
     let help = stdout_of(&env, &["export", "--help"]);
     assert!(
-        help.contains("- json: One object {\"v\":1,\"rows\":[...]}, costs to 6 decimals\n"),
+        help.contains("- json: One object {\"v\":2,\"rows\":[...]}, costs to 6 decimals\n"),
         "{help}"
     );
     assert!(
