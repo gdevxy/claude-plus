@@ -377,6 +377,14 @@ describe('live screen', () => {
     expect(line(cold, 'next-cold').segments[1]?.dim).toBeUndefined()
   })
 
+  test('names what changed when the injected context rewrote the cache', () => {
+    const cache = snapshot().live.cache
+    const changed = snapshot({ cache: { ...cache, last_rebuild: { ts_ms: NOW_MS - 40 * MINUTE_MS, cause: 'prefix_changed', tokens: 51_000, extra_usd: 0.4 } } })
+    expect(text(line(screen(input({ snapshot: changed, expanded: ['rebuilds'] })), 'explain-rebuilds'))).toBe(
+      'The last rebuild, 40m ago, wrote the prompt again because the MCP tools, CLAUDE.md, skills or agents changed.',
+    )
+  })
+
   test('explains each number once its question mark is pressed', () => {
     const lines = screen(input({ expanded: ['cache', 'rebuilds', 'forecast', 'limits'] }))
     expect(text(line(lines, 'explain-cache'))).toBe(

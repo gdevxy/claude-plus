@@ -474,7 +474,7 @@ function rebuildWhy(cause: string, agoMs: number): string {
   const reasons: Record<string, string> = {
     idle: 'the cache expired during an idle gap',
     model_switch: 'the model changed, and each model keeps its own cache',
-    prefix_changed: 'the injected context changed (tools, skills or memory)',
+    prefix_changed: 'the MCP tools, CLAUDE.md, skills or agents changed',
     unknown: 'no cause could be told from the transcript',
   }
   return `The last rebuild, ${duration(agoMs)} ago, wrote the prompt again because ${reasons[cause] ?? reasons.unknown}.`
