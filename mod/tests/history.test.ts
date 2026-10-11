@@ -1,13 +1,16 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { HistoryInput } from '../hooks/history'
-import { amount, hitFloor, historyScreen, metricsOf, nextMetric, nextRange, shownMetric } from '../hooks/history'
+import { MODEL_COLORS, OTHER_COLOR, amount, hitFloor, historyScreen, metricsOf, nextMetric, nextRange, shownMetric } from '../hooks/history'
 import type { Line } from '../hooks/state'
 import type { HistoryReport } from '../types'
 import { DAY_MS, OCT_5_MS, OPUS, bucket, contextReport, dayReport, historyReport, local, spend } from './fixtures'
+import { colorOf, paletteOf } from '../hooks/palette'
 import { overflows, painted, trimmed } from './paint'
+import { VISIONS, distance } from './vision'
 
 const OK = { status: 'ok', detail: null } as const
+const MIN_SERIES_DISTANCE = 20
 
 function input(overrides: Partial<HistoryInput> = {}): HistoryInput {
   return { width: 40, range: '7d', metric: 'cost', reports: { '7d': historyReport(), '24h': dayReport() }, context: contextReport(), local: local(), daemon: OK, expanded: [], ...overrides }
@@ -102,6 +105,24 @@ describe('history screen', () => {
     expect(new Set(peak)).toEqual(new Set([null, 'permission', 'warning']))
   })
 
+  test('every model color and Other stay apart under deuteranopia and protanopia in each color theme', () => {
+    const series = [...MODEL_COLORS, OTHER_COLOR]
+    const close = ['dark', 'light', 'dark-daltonized', 'light-daltonized'].flatMap(theme => {
+      const palette = paletteOf(theme)
+      if (palette === null) throw new Error(`no ${theme} palette`)
+      return Object.entries(VISIONS).flatMap(([vision, matrix]) =>
+        series.flatMap((first, index) =>
+          series.slice(index + 1).flatMap(second => {
+            const apart = distance(colorOf(palette, first), colorOf(palette, second), matrix)
+            return apart < MIN_SERIES_DISTANCE ? [`${theme} ${vision} ${first}/${second} ${apart.toFixed(1)}`] : []
+          }),
+        ),
+      )
+    })
+    expect(close).toEqual([])
+    expect(new Set(series).size).toBe(6)
+  })
+
   test('models beyond the top five are drawn together as Other', () => {
     const names = ['opus-5-5', 'sonnet-5-5', 'haiku-4-5', 'opus-5-1', 'sonnet-5-1', 'haiku-4-1'].map(name => `claude-${name}`)
     const spent = names.map((name, index): [string, number] => [name, index === 5 ? 10 : 6 - index])
@@ -112,8 +133,8 @@ describe('history screen', () => {
     })
     const lines = historyScreen(input({ reports: { '7d': report } }))
     expect(text(line(lines, 'hist-model-5'))).toBe('  █ Other' + ' '.repeat(23) + '$10.00')
-    expect(line(lines, 'hist-model-5').segments[1]).toEqual({ text: '█', color: 'inactive' })
-    expect(line(lines, 'hist-spend-chart').chart?.cells[0]?.some(cell => cell.bg === 'inactive' || cell.fg === 'inactive')).toBe(true)
+    expect(line(lines, 'hist-model-5').segments[1]).toEqual({ text: '█', color: 'subtle' })
+    expect(line(lines, 'hist-spend-chart').chart?.cells[0]?.some(cell => cell.bg === 'subtle' || cell.fg === 'subtle')).toBe(true)
   })
 
   test('ninety days at 40 columns merge three days into each bar', () => {

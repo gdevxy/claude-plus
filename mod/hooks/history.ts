@@ -16,8 +16,8 @@ export const PEAK_ROWS = 3
 export const GROWTH_ROWS = 3
 export const TOP_SHOWN = 5
 export const HIT_FLOOR_CAP = 0.9
-export const MODEL_COLORS: readonly ThemeKey[] = ['claude', 'permission', 'planMode', 'autoAccept', 'bashBorder']
-export const OTHER_COLOR: ThemeKey = 'inactive'
+export const MODEL_COLORS: readonly ThemeKey[] = ['claude', 'permission', 'planMode', 'ide', 'text']
+export const OTHER_COLOR: ThemeKey = 'subtle'
 export const INDENT = '  '
 
 const RANGE_LABELS: Readonly<Record<HistoryRange, string>> = { '24h': '24 hours', '7d': '7 days', '30d': '30 days', '90d': '90 days' }
