@@ -75,7 +75,7 @@ enum Command {
         )]
         days: Option<u32>,
     },
-    #[command(about = "Check the setup and compare totals with Claude Code, read-only")]
+    #[command(about = "Check the setup and compare totals with Claude Code, writing nothing")]
     Doctor,
     #[command(about = "Rebuild every derived table from the stored records")]
     Reindex,

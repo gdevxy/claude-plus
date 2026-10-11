@@ -159,7 +159,7 @@ fn confirm_settings(
     let typed = stdin.is_terminal();
     if !confirm(&lines, &mut stdin.lock(), &mut std::io::stderr(), typed)? {
         bail!(
-            "{command} cancelled, nothing was changed; claude-plus {command} --yes agrees without asking"
+            "{command} cancelled, claude-plus changed nothing; claude-plus {command} --yes agrees without asking"
         );
     }
     Ok(())

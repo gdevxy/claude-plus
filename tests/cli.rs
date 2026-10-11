@@ -636,7 +636,7 @@ fn help_describes_every_command() {
         "  import     Read new Claude Code transcripts into the local store\n",
         "  stats      Show daily cost per model, importing first\n",
         "  export     Print stored usage per day, project and model, importing first\n",
-        "  doctor     Check the setup and compare totals with Claude Code, read-only\n",
+        "  doctor     Check the setup and compare totals with Claude Code, writing nothing\n",
         "  reindex    Rebuild every derived table from the stored records\n",
         "  daemon     Run the daemon that keeps the store live, in the foreground\n",
     ] {

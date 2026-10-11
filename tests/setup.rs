@@ -85,7 +85,7 @@ fn install_asks_before_claude_code_records_anything_in_its_settings() {
         .failure()
         .stdout("")
         .stderr(format!(
-            "claude-plus install will:\n  run claude plugin marketplace add {}\n  run claude plugin install plus@claude-plus\n  which Claude Code records in {}\nContinue? [y/N] n\nclaude-plus: install cancelled, nothing was changed; claude-plus install --yes agrees without asking\n",
+            "claude-plus install will:\n  run claude plugin marketplace add {}\n  run claude plugin install plus@claude-plus\n  which Claude Code records in {}\nContinue? [y/N] n\nclaude-plus: install cancelled, claude-plus changed nothing; claude-plus install --yes agrees without asking\n",
             marketplace(&env).display(),
             settings.display()
         ));
