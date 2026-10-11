@@ -1128,7 +1128,7 @@ mod tests {
                 })
                 .collect();
             for open in opens {
-                assert_eq!(open.join().unwrap().unwrap(), 12);
+                assert_eq!(open.join().unwrap().unwrap(), 13);
             }
         });
     }
@@ -1161,8 +1161,8 @@ mod tests {
     #[test]
     fn a_new_store_is_at_the_latest_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
-        assert_eq!(Store::latest_schema_version(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(Store::latest_schema_version(), 13);
         assert!(!store.reindex_pending().unwrap());
     }
 
@@ -1185,7 +1185,7 @@ mod tests {
             )
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
         assert_eq!(store.totals().unwrap().requests, 1);
         assert!(store.reindex_pending().unwrap());
         assert_eq!(store.dump("events"), Vec::<String>::new());

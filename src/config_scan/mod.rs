@@ -90,9 +90,23 @@ pub struct Scan {
 }
 
 pub fn scan(roots: &Roots) -> Scan {
+    scan_with(roots, Nested::Walk)
+}
+
+pub fn scan_quick(roots: &Roots) -> Scan {
+    scan_with(roots, Nested::Skip)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nested {
+    Walk,
+    Skip,
+}
+
+fn scan_with(roots: &Roots, nested: Nested) -> Scan {
     let mut scan = Scan::default();
     let mut seen = Seen::default();
-    instructions::claude_md(roots, &mut seen, &mut scan.sources);
+    instructions::claude_md(roots, nested, &mut seen, &mut scan.sources);
     instructions::memory(roots, &mut seen, &mut scan);
     let settings = Settings::read(roots);
     let plugins = extensions::plugins(roots, &settings, &mut scan.sources);

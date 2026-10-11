@@ -151,6 +151,14 @@ CREATE TABLE live_breakdowns (
 );
 CREATE INDEX live_breakdowns_by_ts ON live_breakdowns(ts_ms);
 "#,
+    r#"
+CREATE INDEX attachments_by_session ON attachments(session_id, ts);
+CREATE INDEX compactions_by_session ON compactions(session_id, ts);
+CREATE INDEX tool_results_by_session ON tool_results(session_id, chars);
+CREATE INDEX tool_uses_by_session ON tool_uses(session_id, name);
+CREATE INDEX tool_uses_mcp_by_ts ON tool_uses(ts, name) WHERE name >= 'mcp__' AND name < 'mcp_`';
+CREATE INDEX requests_skill_by_ts ON requests(ts, skill) WHERE skill IS NOT NULL;
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {

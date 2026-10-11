@@ -123,6 +123,7 @@ pub fn listen(socket: &Path) -> Result<UnixListener> {
 pub async fn serve(listener: UnixListener, state: Arc<State>) -> Result<()> {
     let listener = tokio::net::UnixListener::from_std(listener)?;
     let graceful = GracefulShutdown::new();
+    let warming = tokio::spawn(context::warm(state.clone()));
     let mut writer_exited = false;
     loop {
         tokio::select! {
@@ -153,6 +154,7 @@ pub async fn serve(listener: UnixListener, state: Arc<State>) -> Result<()> {
             }
         }
     }
+    warming.abort();
     state.writer.cancel();
     let _ = tokio::time::timeout(DRAIN, graceful.shutdown()).await;
     if writer_exited {

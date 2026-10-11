@@ -98,10 +98,10 @@ pub fn read(store: &Store, request: &Request) -> Result<ContextReport> {
     );
     let since = request.now_ms / 1000 - RECENT_DAYS * DAY_S;
     let uses = Uses {
-        session_skills: store.skill_uses(Some(session), 0)?,
-        recent_skills: store.skill_uses(None, since)?,
-        session_tools: store.mcp_tool_uses(Some(session), 0)?,
-        recent_tools: store.mcp_tool_uses(None, since)?,
+        session_skills: store.skill_uses_in_session(session)?,
+        recent_skills: store.skill_uses_since(since)?,
+        session_tools: store.mcp_tool_uses_in_session(session)?,
+        recent_tools: store.mcp_tool_uses_since(since)?,
     };
     let all = items::items(live.as_ref(), request.scan, &ratios, &uses);
     let tool_results = store

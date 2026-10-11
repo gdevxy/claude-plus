@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    Loading, MemoryDir, Roots, Scan, Scope, Seen, Source, SourceKind, display, is_markdown,
+    Loading, MemoryDir, Nested, Roots, Scan, Scope, Seen, Source, SourceKind, display, is_markdown,
     read_text, sorted_entries,
 };
 
@@ -20,7 +20,7 @@ const SKIPPED_DIRS: &[&str] = &[
 ];
 const NESTED_NAMES: &[&str] = &["CLAUDE.md", "CLAUDE.local.md"];
 
-pub fn claude_md(roots: &Roots, seen: &mut Seen, sources: &mut Vec<Source>) {
+pub fn claude_md(roots: &Roots, walk: Nested, seen: &mut Seen, sources: &mut Vec<Source>) {
     let mut add = |scope: Scope, name: String, path: &Path, loading: Loading| {
         if !seen.first(path) {
             return;
@@ -74,6 +74,9 @@ pub fn claude_md(roots: &Roots, seen: &mut Seen, sources: &mut Vec<Source>) {
                 Loading::Always,
             );
         }
+    }
+    if walk == Nested::Skip {
+        return;
     }
     for path in nested(project) {
         add(
@@ -239,6 +242,7 @@ mod tests {
         let mut sources = Vec::new();
         claude_md(
             &home.roots(Some("work/app")),
+            Nested::Walk,
             &mut Seen::default(),
             &mut sources,
         );
@@ -268,6 +272,7 @@ mod tests {
         let mut sources = Vec::new();
         claude_md(
             &home.roots(Some("home/work")),
+            Nested::Walk,
             &mut Seen::default(),
             &mut sources,
         );

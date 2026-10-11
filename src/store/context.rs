@@ -26,12 +26,7 @@ pub struct ToolResultPoint {
 
 impl Store {
     pub fn main_attachments(&self, session_id: &str) -> Result<Vec<AttachmentPoint>> {
-        let sql = format!(
-            "SELECT a.ts, a.kind, a.chars FROM attachments a JOIN files f ON f.id = a.file_id
-             WHERE a.session_id = ?1 AND a.ts IS NOT NULL AND {MAIN_THREAD}
-             ORDER BY a.ts, a.file_id, a.line_no"
-        );
-        let mut statement = self.conn.prepare_cached(&sql)?;
+        let mut statement = self.conn.prepare_cached(&main_attachments_sql())?;
         let rows = statement.query_map([session_id], |r| {
             Ok(AttachmentPoint {
                 ts: r.get(0)?,
@@ -43,11 +38,7 @@ impl Store {
     }
 
     pub fn main_compactions(&self, session_id: &str) -> Result<Vec<i64>> {
-        let sql = format!(
-            "SELECT c.ts FROM compactions c JOIN files f ON f.id = c.file_id
-             WHERE c.session_id = ?1 AND c.ts IS NOT NULL AND {MAIN_THREAD} ORDER BY c.ts"
-        );
-        let mut statement = self.conn.prepare_cached(&sql)?;
+        let mut statement = self.conn.prepare_cached(&main_compactions_sql())?;
         let rows = statement.query_map([session_id], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -97,35 +88,25 @@ impl Store {
             .and_then(|data| data.get("cwd")?.as_str().map(String::from)))
     }
 
-    pub fn skill_uses(
-        &self,
-        session_id: Option<&str>,
-        since_ts: i64,
-    ) -> Result<BTreeMap<String, u64>> {
-        let mut statement = self.conn.prepare_cached(
-            "SELECT skill, COUNT(*) FROM requests
-             WHERE skill IS NOT NULL AND ts >= ?2 AND (?1 IS NULL OR session_id = ?1)
-             GROUP BY skill",
-        )?;
-        let rows = statement.query_map(params![session_id, since_ts], |r| {
-            Ok((r.get(0)?, r.get::<_, i64>(1)? as u64))
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    pub fn skill_uses_in_session(&self, session_id: &str) -> Result<BTreeMap<String, u64>> {
+        self.counted(SKILL_USES_IN_SESSION, params![session_id])
     }
 
-    pub fn mcp_tool_uses(
-        &self,
-        session_id: Option<&str>,
-        since_ts: i64,
-    ) -> Result<BTreeMap<String, u64>> {
-        let mut statement = self.conn.prepare_cached(
-            "SELECT name, COUNT(*) FROM tool_uses
-             WHERE name LIKE 'mcp\\_\\_%' ESCAPE '\\' AND ts >= ?2 AND (?1 IS NULL OR session_id = ?1)
-             GROUP BY name",
-        )?;
-        let rows = statement.query_map(params![session_id, since_ts], |r| {
-            Ok((r.get(0)?, r.get::<_, i64>(1)? as u64))
-        })?;
+    pub fn skill_uses_since(&self, since_ts: i64) -> Result<BTreeMap<String, u64>> {
+        self.counted(SKILL_USES_SINCE, params![since_ts])
+    }
+
+    pub fn mcp_tool_uses_in_session(&self, session_id: &str) -> Result<BTreeMap<String, u64>> {
+        self.counted(MCP_TOOL_USES_IN_SESSION, params![session_id])
+    }
+
+    pub fn mcp_tool_uses_since(&self, since_ts: i64) -> Result<BTreeMap<String, u64>> {
+        self.counted(MCP_TOOL_USES_SINCE, params![since_ts])
+    }
+
+    fn counted(&self, sql: &str, params: impl rusqlite::Params) -> Result<BTreeMap<String, u64>> {
+        let mut statement = self.conn.prepare_cached(sql)?;
+        let rows = statement.query_map(params, |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -134,11 +115,7 @@ impl Store {
         session_id: &str,
         limit: usize,
     ) -> Result<Vec<ToolResultPoint>> {
-        let mut statement = self.conn.prepare_cached(
-            "SELECT u.name, r.ts, r.chars, r.images FROM tool_results r
-             LEFT JOIN tool_uses u ON u.id = r.tool_use_id
-             WHERE r.session_id = ?1 ORDER BY r.chars DESC, r.ts LIMIT ?2",
-        )?;
+        let mut statement = self.conn.prepare_cached(LARGEST_TOOL_RESULTS)?;
         let rows = statement.query_map(params![session_id, limit as i64], |r| {
             Ok(ToolResultPoint {
                 tool: r.get(0)?,
@@ -150,6 +127,50 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
+
+fn main_attachments_sql() -> String {
+    format!(
+        "SELECT a.ts, a.kind, a.chars FROM attachments a JOIN files f ON f.id = a.file_id
+         WHERE a.session_id = ?1 AND a.ts IS NOT NULL AND {MAIN_THREAD}
+         ORDER BY a.ts, a.file_id, a.line_no"
+    )
+}
+
+fn main_compactions_sql() -> String {
+    format!(
+        "SELECT c.ts FROM compactions c JOIN files f ON f.id = c.file_id
+         WHERE c.session_id = ?1 AND c.ts IS NOT NULL AND {MAIN_THREAD} ORDER BY c.ts"
+    )
+}
+
+#[cfg(test)]
+fn context_statements() -> Vec<String> {
+    vec![
+        main_attachments_sql(),
+        main_compactions_sql(),
+        SKILL_USES_IN_SESSION.to_string(),
+        SKILL_USES_SINCE.to_string(),
+        MCP_TOOL_USES_IN_SESSION.to_string(),
+        MCP_TOOL_USES_SINCE.to_string(),
+        LARGEST_TOOL_RESULTS.to_string(),
+    ]
+}
+
+const SKILL_USES_IN_SESSION: &str = "SELECT skill, COUNT(*) FROM requests
+     WHERE session_id = ?1 AND skill IS NOT NULL GROUP BY skill";
+
+const SKILL_USES_SINCE: &str = "SELECT skill, COUNT(*) FROM requests
+     WHERE ts >= ?1 AND skill IS NOT NULL GROUP BY skill";
+
+const MCP_TOOL_USES_IN_SESSION: &str = "SELECT name, COUNT(*) FROM tool_uses
+     WHERE session_id = ?1 AND name >= 'mcp__' AND name < 'mcp_`' GROUP BY name";
+
+const MCP_TOOL_USES_SINCE: &str = "SELECT name, COUNT(*) FROM tool_uses
+     WHERE ts >= ?1 AND name >= 'mcp__' AND name < 'mcp_`' GROUP BY name";
+
+const LARGEST_TOOL_RESULTS: &str = "SELECT u.name, r.ts, r.chars, r.images FROM tool_results r
+     LEFT JOIN tool_uses u ON u.id = r.tool_use_id
+     WHERE r.session_id = ?1 ORDER BY r.chars DESC, r.ts LIMIT ?2";
 
 #[cfg(test)]
 mod tests {
@@ -217,6 +238,29 @@ mod tests {
             ]
         );
         assert_eq!(store.main_compactions("s1").unwrap(), vec![30]);
+    }
+
+    fn plan(store: &Store, sql: &str) -> String {
+        let mut statement = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let nulls = vec![rusqlite::types::Null; statement.parameter_count()];
+        let details: Vec<String> = statement
+            .query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        details.join("; ")
+    }
+
+    #[test]
+    fn the_context_reads_search_indexes_instead_of_scanning_tables() {
+        let store = Store::open_in_memory().unwrap();
+        for sql in context_statements() {
+            let plan = plan(&store, &sql);
+            assert!(!plan.contains("SCAN"), "{sql}\n=> {plan}");
+        }
     }
 
     #[test]
@@ -331,19 +375,19 @@ mod tests {
         }
         w.commit().unwrap();
         assert_eq!(
-            store.skill_uses(Some("s1"), 0).unwrap(),
+            store.skill_uses_in_session("s1").unwrap(),
             BTreeMap::from([("tidy".to_string(), 2)])
         );
         assert_eq!(
-            store.skill_uses(None, 100).unwrap(),
+            store.skill_uses_since(100).unwrap(),
             BTreeMap::from([("tidy".to_string(), 3)])
         );
         assert_eq!(
-            store.mcp_tool_uses(Some("s1"), 0).unwrap(),
+            store.mcp_tool_uses_in_session("s1").unwrap(),
             BTreeMap::from([("mcp__linear__create".to_string(), 2)])
         );
         assert_eq!(
-            store.mcp_tool_uses(None, 100).unwrap(),
+            store.mcp_tool_uses_since(100).unwrap(),
             BTreeMap::from([
                 ("mcp__docs__find".to_string(), 1),
                 ("mcp__linear__create".to_string(), 2)
