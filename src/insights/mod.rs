@@ -209,6 +209,22 @@ impl InsightContext<'_> {
             .unwrap_or(0.0)
     }
 
+    pub fn rewrite_premium(&self, request: &SpentRequest, tokens: u64) -> f64 {
+        let read = TokenCounts {
+            cache_read: tokens,
+            ..Default::default()
+        };
+        let warm = self
+            .prices
+            .cost_within(
+                &request.point.model,
+                &read,
+                request.point.tokens.prompt_total(),
+            )
+            .unwrap_or(0.0);
+        self.carried_usd(request, tokens) - warm
+    }
+
     pub fn carrying_usd(&self, tokens: u64) -> f64 {
         self.main_requests()
             .filter(|r| self.in_project(&r.session_id))

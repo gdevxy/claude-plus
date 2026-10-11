@@ -6,7 +6,7 @@ use super::{
     WEEKS_IN_WINDOW, median,
 };
 use crate::cache_model::RebuildCause;
-use crate::store::PrefixChange;
+use crate::store::{PrefixChange, SpentRequest};
 
 pub const SETUP_KINDS: &[&str] = &[
     "skill_listing",
@@ -53,6 +53,7 @@ impl Rule for IdleRebuilds {
             return Vec::new();
         };
         let usd: f64 = idle.iter().filter_map(|r| r.rebuild.extra_usd).sum();
+        let avoidable: f64 = idle.iter().map(|r| avoidable_usd(ctx, r)).sum();
         let sessions: BTreeSet<&str> = idle.iter().map(|r| r.session_id.as_str()).collect();
         let rewritten = idle.iter().map(|r| r.rebuild.tokens).sum::<u64>() / idle.len() as u64;
         let ttl = most_common(idle.iter().map(|r| r.ttl_ms));
@@ -76,13 +77,32 @@ impl Rule for IdleRebuilds {
             confidence: Confidence::High,
             how: format!(
                 "Counts main-thread requests that rewrote the cache after a gap longer than its {} lifetime in the last 14 days. \
-                 The saving is what those rewrites cost above a warm cache read. \
-                 Coming back with /clear or a new session rebuilds only a small context.",
+                 The saving is what those rewrites cost above a warm cache read, \
+                 less rewriting the smallest context each session had, which /clear or a new session still writes.",
                 duration(ttl)
             ),
         };
-        ctx.priced(draft, usd).into_iter().collect()
+        ctx.priced(draft, avoidable).into_iter().collect()
     }
+}
+
+fn avoidable_usd(ctx: &InsightContext, rebuilt: &Rebuilt) -> f64 {
+    let extra = rebuilt.rebuild.extra_usd.unwrap_or(0.0);
+    let ts = rebuilt.rebuild.ts_ms.div_euclid(1000);
+    let session: Vec<&SpentRequest> = ctx
+        .main_requests()
+        .filter(|r| r.session_id == rebuilt.session_id)
+        .collect();
+    let Some(request) = session.iter().find(|r| r.point.ts == ts) else {
+        return extra;
+    };
+    let base = session
+        .iter()
+        .map(|r| r.point.tokens.cache_read + r.point.tokens.cache_write())
+        .min()
+        .unwrap_or(0)
+        .min(rebuilt.rebuild.tokens);
+    (extra - ctx.rewrite_premium(request, base)).max(0.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -218,6 +238,9 @@ mod tests {
     #[test]
     fn idle_rebuilds_report_their_cost_typical_break_and_size() {
         let mut fixture = Fixture::new();
+        fixture.request("s1", SINCE + 10, OPUS, counts(0, 0, 20_000, 10));
+        fixture.request("s1", SINCE + 3_600, OPUS, counts(0, 0, 80_000, 10));
+        fixture.request("s2", SINCE + 3_600, OPUS, counts(0, 0, 80_000, 10));
         fixture.rebuilt("s1", RebuildCause::Idle, 0.40, 12 * 60_000, &[]);
         fixture.rebuilt("s1", RebuildCause::Idle, 0.30, 14 * 60_000, &[]);
         fixture.rebuilt("s2", RebuildCause::Idle, 0.50, 90 * 60_000, &[]);
@@ -226,7 +249,11 @@ mod tests {
         assert_eq!(findings.len(), 1);
         let finding = &findings[0];
         assert_eq!(finding.rule, RuleId::IdleRebuilds);
-        assert_eq!(finding.saving_usd, Some(0.6));
+        let base_rewrite = |tokens: f64| tokens * (5.0 - 0.2) / 1e6;
+        let s1 = (0.40 - base_rewrite(20_000.0)) + (0.30 - base_rewrite(20_000.0));
+        let s2 = 0.50 - base_rewrite(80_000.0);
+        let saving = finding.saving_usd.unwrap();
+        assert!((saving - (s1 + s2) / 2.0).abs() < 1e-9, "{saving}");
         assert_eq!(finding.confidence, Confidence::High);
         assert_eq!(
             finding.evidence,

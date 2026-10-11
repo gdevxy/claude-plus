@@ -532,8 +532,9 @@ mod tests {
         })
         .unwrap();
         for (key, request) in [
-            ("r1", spent("2026-10-10T10:00:00Z", 0, 100_000)),
-            ("r2", spent("2026-10-10T10:20:00Z", 0, 100_000)),
+            ("r1", spent("2026-10-10T10:00:00Z", 0, 20_000)),
+            ("r1b", spent("2026-10-10T10:00:30Z", 20_000, 80_000)),
+            ("r2", spent("2026-10-10T10:20:30Z", 0, 100_000)),
             ("r3", spent("2026-10-10T10:21:00Z", 100_000, 0)),
             ("r0", spent("2026-09-20T10:00:00Z", 0, 100_000)),
         ] {
@@ -574,11 +575,15 @@ mod tests {
         })
         .unwrap();
         w.commit().unwrap();
-        let paid: f64 = ["2026-10-10T10:00:00Z", "2026-10-10T10:20:00Z"]
-            .iter()
-            .map(|at| spent(at, 0, 100_000).cost_usd.unwrap())
-            .sum::<f64>()
-            + spent("2026-10-10T10:21:00Z", 100_000, 0).cost_usd.unwrap();
+        let paid: f64 = [
+            spent("2026-10-10T10:00:00Z", 0, 20_000),
+            spent("2026-10-10T10:00:30Z", 20_000, 80_000),
+            spent("2026-10-10T10:20:30Z", 0, 100_000),
+            spent("2026-10-10T10:21:00Z", 100_000, 0),
+        ]
+        .iter()
+        .map(|r| r.cost_usd.unwrap())
+        .sum();
         let report = read(
             &store,
             &PriceTable::bundled(),
@@ -591,7 +596,7 @@ mod tests {
             &Utc,
         )
         .unwrap();
-        assert_eq!((report.v, report.requests, report.sessions), (1, 3, 1));
+        assert_eq!((report.v, report.requests, report.sessions), (1, 4, 1));
         assert_eq!(report.since_ms, utc("2026-09-27T12:00:00Z") * 1000);
         let rules: Vec<RuleId> = report.findings.iter().map(|f| f.rule).collect();
         assert_eq!(
@@ -603,12 +608,14 @@ mod tests {
             "Typical break 20m, the cache lasts 5m"
         );
         assert!(
-            (report.findings[1].saving_usd.unwrap() - 100_000.0 * 4.8 / 1e6 / 2.0).abs() < 1e-9
+            (report.findings[1].saving_usd.unwrap() - (100_000.0 - 20_000.0) * 4.8 / 1e6 / 2.0)
+                .abs()
+                < 1e-9
         );
         let recap = report.recap.unwrap();
         assert_eq!(recap.day, "Yesterday");
         assert!((recap.cost_usd - (paid + 0.84)).abs() < 1e-9);
-        assert_eq!(recap.win.as_deref(), Some("cache hits saved you $0.38"));
+        assert_eq!(recap.win.as_deref(), Some("cache hits saved you $0.46"));
         assert_eq!(report.wins.hit_streak_days, 0);
     }
 
