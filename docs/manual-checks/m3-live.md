@@ -32,6 +32,7 @@ Check at 40, 60 and 100 columns of pane width (resize the terminal; the pane doc
   With a fresh plugin store (the first session with the mod, or after moving the plus mod's store file aside; it lies under your Claude Code configuration directory), start a session in a main-screen terminal (tmux, or `CLAUDE_CODE_NO_FLICKER=0`) at least 144 columns wide: the pane stays closed.
   Run `/plus`: it answers `✻ claude-plus is open above the prompt`.
   Restart the session and confirm the pane stays closed until you run `/plus` again.
+  Then run `/plus` in a fullscreen session, and start the next session on the main screen: the pane does not flash inline, not even for one frame.
 - [ ] Plugin options reach a `--plugin-dir` mod.
   Try `echo '{"animations":"false"}' | claude plugin configure plus --values-stdin`, or Claude Code's plugin settings, then restart the session.
   If neither reaches the mod, note it, because the mod installed in M7 is the one users configure.

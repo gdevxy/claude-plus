@@ -35,7 +35,7 @@ export const ENSURE_RETRY_MS = 30_000
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
 const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-1' })
-const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false } as PaneState)
+const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false, unasked: 'settled' } as PaneState)
 const daemon = atom({ plugin: 'plus', key: 'daemon' } as const, { status: 'starting', detail: null } as Daemon)
 const now = atom({ plugin: 'plus', key: 'now' } as const, 0)
 const expanded = atom({ plugin: 'plus', key: 'expanded' } as const, [] as string[])
@@ -275,6 +275,13 @@ function refusal(error: unknown): string {
   return message.replace(/^.*\$\.ui\.open:\s*/, '')
 }
 
+async function openUnasked($: EngineInterface, fullscreen: boolean): Promise<void> {
+  const known = await read($, pane)
+  if (known.unasked !== 'waiting') return
+  await update($, pane, (): PaneState => ({ ...known, unasked: 'settled' }))
+  if (fullscreen && (await $.store.get(FULLSCREEN_KEY)) !== false) await open($, true)
+}
+
 async function closeUnasked($: EngineInterface): Promise<void> {
   if ((await read($, pane)).asked) return
   await $.store.set(FULLSCREEN_KEY, false)
@@ -293,9 +300,8 @@ export const register: Register = (on, options) => {
     await update($, local, known => ({ ...known, session: id, model, turns }))
     quietly(ensureDaemon($))
     if ((await read($, pane)).session === id) return next(e)
-    await update($, pane, (): PaneState => ({ session: id, asked: false }))
+    await update($, pane, (): PaneState => ({ session: id, asked: false, unasked: e.isInteractive ? 'waiting' : 'settled' }))
     quietly(forward($, 'session.start', { cwd: e.cwd, surface: e.surface, interactive: e.isInteractive }))
-    if (e.isInteractive && (await $.store.get(FULLSCREEN_KEY)) === true) quietly(open($, true))
     return next(e)
   })
 
@@ -386,6 +392,12 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     quietly(forward($, 'session.end', { reason: e.reason }, e.sessionId))
+    return next(e)
+  })
+
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const fullscreen = e.viewport?.isFullscreen
+    if (fullscreen !== undefined && (await read($, pane)).unasked === 'waiting') $.clock.after(0, () => quietly(openUnasked($, fullscreen)))
     return next(e)
   })
 

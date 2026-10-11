@@ -166,6 +166,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     const body = e.url.includes('/snapshot') ? JSON.stringify(servedBody(wiring)) : '{"accepted":1,"rejected":[]}'
     return { value: { status: 200, ok: true, headers: {}, text: body } }
   })
+  on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', props: {}, children: ['? for shortcuts'] }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.measure', ($, e) => ({ changed: e.changed }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -185,6 +186,18 @@ function servedBody(wiring: Wiring): unknown {
 
 async function start($: Engine): Promise<void> {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+}
+
+async function hint($: Engine, fullscreen: boolean): Promise<void> {
+  const drawn = await $.ui.mount({
+    plugin: 'plus',
+    surface: 'terminal',
+    component: 'PromptHint',
+    requestId: 'hint',
+    props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+    viewport: { columns: 160, rows: 50, isFullscreen: fullscreen },
+  })
+  await drawn.unmount()
 }
 
 async function mount($: Engine, columns: number, fullscreen = true) {
@@ -216,12 +229,15 @@ function kinds(wiring: Wiring): string[] {
 }
 
 describe('plus mod', () => {
-  test('a session start ensures the daemon, registers /plus and opens the pane', { options: { binaryPath: '/opt/bin/claude-plus' } }, async ($, on) => {
+  test('a session start ensures the daemon, registers /plus and opens the pane once the layout is fullscreen', { options: { binaryPath: '/opt/bin/claude-plus' } }, async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
-    const wiring = wire(on)
+    const wiring = wire(on, {}, {})
     await start($)
     await clock.settle()
     expect(wiring.ran).toEqual([['/opt/bin/claude-plus', 'daemon', '--ensure']])
+    expect(wiring.opened).toEqual([])
+    await hint($, true)
+    await clock.settle()
     expect(wiring.opened).toEqual(['plus'])
     expect(wiring.fetched[0]?.init?.socketPath).toBe('/Users/me/.claude-plus/daemon.sock')
     expect(kinds(wiring)).toEqual(['session.start'])
@@ -253,10 +269,22 @@ describe('plus mod', () => {
     expect(wiring.opened).toEqual([])
   })
 
-  test('a pane opened unasked that lands on the main screen closes and stays closed', async ($, on) => {
+  test('a main-screen session never opens the pane unasked, even after a fullscreen one', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)
     await start($)
+    await hint($, false)
+    await clock.advance(1000)
+    await hint($, true)
+    await clock.settle()
+    expect(wiring.opened).toEqual([])
+  })
+
+  test('a pane opened unasked that a surface still seats inline closes and stays closed', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await hint($, true)
     await clock.advance(1000)
     const ui = await mount($, 60, false)
     await clock.settle()
@@ -264,6 +292,7 @@ describe('plus mod', () => {
     await ui.unmount()
     wiring.session = 's2'
     await start($)
+    await hint($, true)
     await clock.settle()
     expect(wiring.opened).toEqual(['plus'])
   })
@@ -282,8 +311,10 @@ describe('plus mod', () => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)
     await start($)
+    await hint($, true)
     await clock.advance(1000)
     await start($)
+    await hint($, true)
     await clock.advance(1000)
     expect(wiring.opened).toEqual(['plus'])
     expect(kinds(wiring)).toEqual(['session.start'])

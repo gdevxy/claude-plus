@@ -169,7 +169,7 @@ Mod (TypeScript, files under `mod/`):
 
 | File | Responsibility |
 |---|---|
-| `register.tsx` | Wire events: `session.start` opens the pane, registers `/plus`, starts the 1 s clock and ensures the daemon; `session.measure`, `turn.step`, `turn.complete`, `session.compact` forward to the daemon and update atoms. |
+| `register.tsx` | Wire events: `session.start` registers `/plus`, the first `PromptHint` drawing that reports a fullscreen layout opens the pane unasked (never on the main screen, so no inline frame is drawn), `session.start` also starts the 1 s clock and ensures the daemon; `session.measure`, `turn.step`, `turn.complete`, `session.compact` forward to the daemon and update atoms. |
 | `client.ts` | Daemon client over `$.http.fetch` with `socketPath`, short timeouts, never throws to callers. |
 | `state.ts` | Atoms: latest snapshot, live measure, active view, daemon health. |
 | `views/*.tsx` | One file per view (live, context, history, insights) plus shared widgets (bar, sparkline raster). |

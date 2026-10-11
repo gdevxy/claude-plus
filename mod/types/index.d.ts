@@ -116,7 +116,7 @@ export type Daemon = { status: DaemonStatus; detail: string | null }
 
 export type Motion = { from: number; to: number; startMs: number }
 
-export type PaneState = { session: string | null; asked: boolean }
+export type PaneState = { session: string | null; asked: boolean; unasked: 'waiting' | 'settled' }
 
 declare module 'claude-code' {
   interface PluginState {
