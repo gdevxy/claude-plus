@@ -36,6 +36,8 @@ const LARGE_RESULTS_BETWEEN: &str = "SELECT r.session_id, r.ts, r.chars, u.name,
      WHERE r.ts >= ?1 AND r.ts < ?2 AND r.chars >= ?3 AND r.is_sidechain = 0
      ORDER BY r.session_id, r.ts, r.tool_use_id";
 
+const LAST_PROMPT_BEFORE: &str = "SELECT session_id, ts FROM prompts WHERE session_id = ?1 AND ts < ?2 ORDER BY ts DESC, uuid DESC LIMIT 1";
+
 const SESSION_PROJECT: &str = "SELECT project FROM sessions WHERE id = ?1";
 
 fn prefix_kinds_sql() -> String {
@@ -51,6 +53,7 @@ fn prefix_kinds_sql() -> String {
 fn insights_statements() -> Vec<String> {
     vec![
         PROMPTS_BETWEEN.to_string(),
+        LAST_PROMPT_BEFORE.to_string(),
         LARGE_RESULTS_BETWEEN.to_string(),
         prefix_kinds_sql(),
         SESSION_PROJECT.to_string(),
@@ -67,6 +70,23 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn last_prompt_before(
+        &self,
+        session_id: &str,
+        before_ts: i64,
+    ) -> Result<Option<PromptPoint>> {
+        Ok(self
+            .conn
+            .prepare_cached(LAST_PROMPT_BEFORE)?
+            .query_row(params![session_id, before_ts], |r| {
+                Ok(PromptPoint {
+                    session_id: r.get(0)?,
+                    ts: r.get(1)?,
+                })
+            })
+            .optional()?)
     }
 
     pub fn large_tool_results_between(
@@ -191,6 +211,14 @@ mod tests {
             read,
             [("s1".into(), 100), ("s1".into(), 120), ("s2".into(), 150)]
         );
+        assert_eq!(
+            store.last_prompt_before("s1", 100).unwrap(),
+            Some(PromptPoint {
+                session_id: "s1".into(),
+                ts: 90
+            })
+        );
+        assert_eq!(store.last_prompt_before("s2", 150).unwrap(), None);
     }
 
     #[test]

@@ -176,6 +176,7 @@ INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXI
 "#,
     r#"
 ALTER TABLE attachments ADD COLUMN removed_names TEXT NOT NULL DEFAULT '[]';
+CREATE INDEX prompts_by_session ON prompts(session_id, ts);
 INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM attachments);
 "#,
 ];

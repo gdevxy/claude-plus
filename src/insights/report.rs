@@ -18,7 +18,9 @@ use crate::context_model::{self, Uses, breakdown, items};
 use crate::history::{Range, Rates, calendar};
 use crate::limits;
 use crate::pricing::PriceTable;
-use crate::store::{CompactionPoint, PrefixChange, SpentAdjustment, SpentRequest, Store};
+use crate::store::{
+    CompactionPoint, PrefixChange, PromptPoint, SpentAdjustment, SpentRequest, Store,
+};
 use crate::timeline::{Thread, Timeline};
 
 pub const MONTH_DAYS: i64 = 30;
@@ -182,12 +184,12 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let now_s = request.now_ms.div_euclid(1000);
-    let spans = calendar::spans(Range::Month, now_s, tz)?;
+    let spans = calendar::spans(Range::Quarter, now_s, tz)?;
     let since = now_s - WINDOW_DAYS * DAY_S;
-    let month = store.requests_between(spans.since().min(since), spans.until)?;
+    let quarter = store.requests_between(spans.since().min(since), spans.until)?;
     let reconciled = store.adjustments_between(spans.since(), spans.until)?;
-    let calendar_days = days(&spans, &month, &reconciled, prices);
-    let requests: Vec<SpentRequest> = month
+    let calendar_days = days(&spans, &quarter, &reconciled, prices);
+    let requests: Vec<SpentRequest> = quarter
         .into_iter()
         .filter(|r| r.point.ts >= since && r.point.ts < spans.until)
         .collect();
@@ -234,7 +236,7 @@ where
         requests: &requests,
         sessions: &sessions,
         project: project.as_deref(),
-        prompts: &store.prompts_between(since, spans.until)?,
+        prompts: &prompts_of(store, &requests, since, spans.until)?,
         rebuilds: &rebuilds,
         tool_results: &store.large_tool_results_between(since, spans.until, LARGE_RESULT_CHARS)?,
         compactions: &compactions,
@@ -255,6 +257,21 @@ where
         wins: wins(&calendar_days),
         recap: recap(&calendar_days),
     })
+}
+
+fn prompts_of(
+    store: &Store,
+    requests: &[SpentRequest],
+    since: i64,
+    until: i64,
+) -> Result<Vec<PromptPoint>> {
+    let mut prompts = store.prompts_between(since, until)?;
+    let sessions: BTreeSet<&str> = requests.iter().map(|r| r.session_id.as_str()).collect();
+    for session in sessions {
+        prompts.extend(store.last_prompt_before(session, since)?);
+    }
+    prompts.sort_by(|a, b| a.session_id.cmp(&b.session_id).then(a.ts.cmp(&b.ts)));
+    Ok(prompts)
 }
 
 fn rebuilds(
@@ -688,5 +705,108 @@ mod tests {
         assert_eq!(subagent.rebuild.cause, cache_model::RebuildCause::Unknown);
         let added = rebuilt_after(&[("2026-10-10T10:01:00Z", "main", &["mcp__b__y"])]);
         assert!(added.mcp_changed);
+    }
+
+    #[test]
+    fn the_hit_streak_is_read_past_a_month() {
+        let temp = tempfile::tempdir().unwrap();
+        let scan = config_scan::scan(&Roots {
+            home: temp.path().join("home"),
+            claude_dir: temp.path().join("claude"),
+            claude_json: temp.path().join("claude.json"),
+            project: None,
+        });
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let now = utc("2026-10-11T12:00:00Z");
+        for day in 1..=40 {
+            let request = spent("2026-10-11T10:00:00Z", 95_000, 5_000);
+            w.request(&RequestRow {
+                key: format!("r{day}"),
+                session_id: request.session_id,
+                ts: request.point.ts - day * DAY_S,
+                sent_ts: None,
+                model: request.point.model,
+                tokens: request.point.tokens,
+                cost_usd: request.cost_usd,
+                is_sidechain: false,
+                agent_id: None,
+                skill: None,
+                mcp_server: None,
+                effort: None,
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        let report = read(
+            &store,
+            &PriceTable::bundled(),
+            &Request {
+                session: "s1",
+                scan: &scan,
+                retention_days: Some(90),
+                now_ms: now * 1000,
+            },
+            &Utc,
+        )
+        .unwrap();
+        assert_eq!(report.wins.hit_streak_days, 40);
+    }
+
+    #[test]
+    fn a_task_that_started_before_the_window_keeps_its_requests_in_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let scan = config_scan::scan(&Roots {
+            home: temp.path().join("home"),
+            claude_dir: temp.path().join("claude"),
+            claude_json: temp.path().join("claude.json"),
+            project: None,
+        });
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let now = utc("2026-10-11T12:00:00Z");
+        w.prompt(&PromptRow {
+            uuid: "p1".into(),
+            session_id: "s1".into(),
+            ts: now - 15 * DAY_S,
+        })
+        .unwrap();
+        for (key, minutes) in [("r1", 1), ("r2", 2)] {
+            let tokens = TokenCounts {
+                input: 200_000,
+                output: 500,
+                ..Default::default()
+            };
+            w.request(&RequestRow {
+                key: key.into(),
+                session_id: "s1".into(),
+                ts: now - DAY_S + minutes * 60,
+                sent_ts: None,
+                model: OPUS.into(),
+                cost_usd: PriceTable::bundled().cost(OPUS, &tokens),
+                tokens,
+                is_sidechain: false,
+                agent_id: None,
+                skill: None,
+                mcp_server: None,
+                effort: None,
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        let report = read(
+            &store,
+            &PriceTable::bundled(),
+            &Request {
+                session: "s1",
+                scan: &scan,
+                retention_days: Some(90),
+                now_ms: now * 1000,
+            },
+            &Utc,
+        )
+        .unwrap();
+        let rules: Vec<RuleId> = report.findings.iter().map(|f| f.rule).collect();
+        assert_eq!(rules, [RuleId::ModelFit]);
     }
 }
