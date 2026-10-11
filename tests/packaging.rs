@@ -302,6 +302,65 @@ fn release_assets_hold_checksums_a_formula_and_an_installer_for_the_owner() {
 }
 
 #[test]
+fn an_archive_of_the_same_binary_is_the_same_bytes() {
+    let temp = scratch();
+    let binary = temp.path().join("claude-plus");
+    std::fs::copy(env!("CARGO_BIN_EXE_claude-plus"), &binary).unwrap();
+    if cfg!(target_os = "macos") {
+        let tagged = run(Command::new("xattr")
+            .args(["-w", "com.apple.metadata:kMDItemWhereFroms", "test"])
+            .arg(&binary));
+        assert!(tagged.status.success(), "{}", text(&tagged.stderr));
+    }
+    let archive = |name: &str| {
+        let dist = temp.path().join(name);
+        let packaged = run(Command::new("sh")
+            .arg(script("package.sh"))
+            .arg("aarch64-apple-darwin")
+            .arg(&binary)
+            .arg(&dist)
+            .env("USER", name));
+        assert!(packaged.status.success(), "{}", text(&packaged.stderr));
+        dist.join("claude-plus-aarch64-apple-darwin.tar.gz")
+    };
+    let first = archive("first");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = archive("second");
+    assert!(
+        std::fs::read(&first).unwrap() == std::fs::read(&second).unwrap(),
+        "two archives of the same binary differ"
+    );
+    let listing = run(Command::new("tar").arg("-tvzf").arg(&first));
+    let listing = text(&listing.stdout);
+    assert_eq!(listing.lines().count(), 3, "{listing}");
+    assert!(!listing.contains("._"), "{listing}");
+}
+
+#[test]
+fn release_assets_refuse_to_leave_a_placeholder_unfilled() {
+    let temp = scratch();
+    let dist = temp.path().join("dist");
+    for target in TARGETS {
+        let packaged = run(Command::new("sh")
+            .arg(script("package.sh"))
+            .args([target, env!("CARGO_BIN_EXE_claude-plus")])
+            .arg(&dist));
+        assert!(packaged.status.success(), "{}", text(&packaged.stderr));
+    }
+    let assets = run(Command::new("sh")
+        .arg(script("release-assets.sh"))
+        .args([VERSION, "@OWNER@"])
+        .arg(&dist));
+    assert!(!assets.status.success());
+    assert!(
+        text(&assets.stderr)
+            .ends_with("release-assets.sh: a placeholder above was left unfilled\n"),
+        "{}",
+        text(&assets.stderr)
+    );
+}
+
+#[test]
 fn release_assets_need_all_four_builds() {
     let temp = scratch();
     let dist = temp.path().join("dist");
