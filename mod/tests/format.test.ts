@@ -38,6 +38,19 @@ describe('format', () => {
     ])
   })
 
+  test('tokens past a million scale on to B and T', () => {
+    expect([999_960_000, 1_178_000_000, 3_379_000_000, 18_408_000_000, 124_500_000_000, 999_960_000_000, 2_400_000_000_000, 1_234_000_000_000_000].map(tokens)).toEqual([
+      '1B',
+      '1.2B',
+      '3.4B',
+      '18.4B',
+      '125B',
+      '1T',
+      '2.4T',
+      '1234T',
+    ])
+  })
+
   test('percent rounds and never shows a used window as zero', () => {
     expect([0, 0.4, 54.4, 54.5, 100].map(percent)).toEqual(['0%', '<1%', '54%', '55%', '100%'])
     expect([0, 0.04, 0.42, 9.94, 12.4].map(finePercent)).toEqual(['0.0%', '<0.1%', '0.4%', '9.9%', '12%'])

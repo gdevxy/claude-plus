@@ -3,6 +3,7 @@ const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
 const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
 const FAMILIES = ['opus', 'sonnet', 'haiku', 'fable', 'mythos']
+const TOKEN_UNITS = ['k', 'M', 'B', 'T']
 const WINDOWS: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'Spend' }
 
 export const FULL_BLOCK = '█'
@@ -18,8 +19,7 @@ export function money(usd: number): string {
 
 export function tokens(count: number): string {
   if (count < 1000) return String(Math.round(count))
-  if (count < 1_000_000) return scaled(count / 1000, 'k')
-  return scaled(count / 1_000_000, 'M')
+  return scaled(count / 1000, 0)
 }
 
 export function percent(value: number): string {
@@ -87,10 +87,10 @@ export function bar(fraction: number, width: number): BarCells {
   return { filled, track: TRACK.repeat(width - filled.length) }
 }
 
-function scaled(value: number, unit: string): string {
+function scaled(value: number, step: number): string {
   const rounded = value < 100 ? Math.round(value * 10) / 10 : Math.round(value)
-  if (rounded >= 1000 && unit === 'k') return scaled(value / 1000, 'M')
-  return `${String(rounded)}${unit}`
+  if (rounded >= 1000 && step < TOKEN_UNITS.length - 1) return scaled(value / 1000, step + 1)
+  return `${String(rounded)}${TOKEN_UNITS[step] ?? ''}`
 }
 
 function grouped(value: number): string {
