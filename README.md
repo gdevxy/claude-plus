@@ -4,6 +4,8 @@ Token, cache and cost visibility for Claude Code.
 claude-plus draws a live pane beside the conversation with what each session costs, what fills its context, when its cache goes cold, how fast it uses your subscription windows, and tips that save tokens.
 A local daemon reads your Claude Code transcripts and keeps their history; nothing leaves your machine.
 
+![The live view of the claude-plus pane docked beside a Claude Code conversation](docs/assets/live.png)
+
 ## Install
 
 claude-plus runs on macOS and Linux and needs Claude Code 2.1.296 or newer.
@@ -43,12 +45,33 @@ The mod alone can also be installed from Claude Code's prompt; it still needs th
 
 The pane has four views, and the keys 1 to 4 switch between them.
 
-| Key | View | What it shows |
-|---|---|---|
-| 1 | Live | The current session: cost, cache countdown, subscription windows and their pace. |
-| 2 | Context | What fills the context window, and how close it is to auto-compact. |
-| 3 | History | Charts of cost, cache hit ratio and limit usage over time; `r` cycles the range and `g` the metric. |
-| 4 | Insights | Ranked tips with the weekly saving each one promises. |
+### 1. Live
+
+The current session at a glance: what it costs, how long the cache stays warm, and how fast you use your 5h and 7d subscription windows.
+Next prompt compares what your next message would cost on each model, with the cache warm and after it expires, so you know what a model switch really costs.
+
+![Live view: cost, cache countdown, next prompt price per model and plan limits](docs/assets/live.png)
+
+### 2. Context
+
+What fills the context window, by category, and how far you are from auto-compact.
+It lists the largest items and the skills, tools and memory files you configured but have not used in 14 days, with what each costs every turn.
+
+![Context view: context by category, largest items and unused skills](docs/assets/context.png)
+
+### 3. History
+
+Cost per day and model, cache hit ratio, what the cache saved you, and your top projects and sessions.
+`r` cycles the range between 24h, 7d, 30d and 90d, and `g` switches between cost and tokens.
+
+![History view: cost by day, cache hit ratio and top projects](docs/assets/history.png)
+
+### 4. Insights
+
+Ranked tips drawn from your own sessions, each with the weekly saving it promises and how confident claude-plus is.
+Each tip names the sessions and files behind it, so you can see where the tokens went.
+
+![Insights view: ranked tips with the weekly saving each one promises](docs/assets/insights.png)
 
 ### Alerts
 
