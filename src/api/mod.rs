@@ -2,6 +2,7 @@ pub mod client;
 pub mod context;
 pub mod events;
 pub mod history;
+pub mod insights;
 pub mod live;
 pub mod wire;
 
@@ -46,6 +47,7 @@ const ROUTES: &[(&str, Method)] = &[
     ("/snapshot", Method::GET),
     ("/context", Method::GET),
     ("/history", Method::GET),
+    ("/insights", Method::GET),
     ("/events", Method::POST),
     ("/import", Method::POST),
     ("/reindex", Method::POST),
@@ -80,6 +82,7 @@ pub struct State {
     pub writer: WriterHandle,
     pub reader: Mutex<Store>,
     pub history_reader: Mutex<Store>,
+    pub insights_reader: Mutex<Store>,
     pub prices: PriceTable,
     pub started: Instant,
     pub home: PathBuf,
@@ -181,6 +184,7 @@ where
         (&Method::GET, "/snapshot") => snapshot(state, request.uri().query()).await,
         (&Method::GET, "/context") => context::context(state, request.uri().query()).await,
         (&Method::GET, "/history") => history::history(state, request.uri().query()).await,
+        (&Method::GET, "/insights") => insights::insights(state, request.uri().query()).await,
         (&Method::POST, "/events") => events(state, request.into_body()).await,
         (&Method::POST, "/import") => {
             state.log.info("import requested over the socket");

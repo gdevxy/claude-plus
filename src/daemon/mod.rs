@@ -62,6 +62,7 @@ fn run_locked(
     prune_breakdowns(&mut store, paths, log)?;
     let reader = Store::open_read_only(&paths.database())?;
     let history_reader = Store::open_read_only(&paths.database())?;
+    let insights_reader = Store::open_read_only(&paths.database())?;
     let listener = api::listen(&paths.socket())?;
     let (writer, writer_thread) =
         writer::spawn(store, prices.clone(), paths.projects_dir(), log.clone())?;
@@ -69,6 +70,7 @@ fn run_locked(
         writer: writer.clone(),
         reader: Mutex::new(reader),
         history_reader: Mutex::new(history_reader),
+        insights_reader: Mutex::new(insights_reader),
         prices,
         started: Instant::now(),
         home: paths.home.clone(),

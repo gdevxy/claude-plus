@@ -14,6 +14,7 @@ use super::wire::{ErrorBody, EventsAccepted, Health, ImportOutcome, Snapshot};
 use crate::context_model::ContextReport;
 use crate::history::{HistoryReport, Range};
 use crate::ingest::Rebuilt;
+use crate::insights::InsightsReport;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 const LONG_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -79,6 +80,15 @@ impl Client {
         self.call(
             Method::GET,
             &format!("/history?range={}", range.as_str()),
+            None,
+            self.timeout,
+        )
+    }
+
+    pub fn insights(&self, session: &str) -> Result<InsightsReport, ClientError> {
+        self.call(
+            Method::GET,
+            &format!("/insights?session={session}"),
             None,
             self.timeout,
         )

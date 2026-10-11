@@ -43,6 +43,7 @@ impl Server {
         prepare(&mut store);
         let reader = Store::open_read_only(&database).unwrap();
         let history_reader = Store::open_read_only(&database).unwrap();
+        let insights_reader = Store::open_read_only(&database).unwrap();
         let log = Arc::new(Log::open(&temp.path().join("daemon.log"), false).unwrap());
         let (writer, _) =
             writer::spawn(store, PriceTable::bundled(), projects, log.clone()).unwrap();
@@ -53,6 +54,7 @@ impl Server {
             writer: writer.clone(),
             reader: Mutex::new(reader),
             history_reader: Mutex::new(history_reader),
+            insights_reader: Mutex::new(insights_reader),
             prices: PriceTable::bundled(),
             started: Instant::now(),
             home: temp.path().join("home"),
@@ -480,6 +482,68 @@ fn the_history_route_reports_the_asked_range_in_local_time() {
 }
 
 #[test]
+fn the_insights_route_answers_with_ranked_findings_wins_and_a_recap() {
+    let server = Server::start();
+    std::fs::write(
+        server.temp.path().join("claude/settings.json"),
+        r#"{"cleanupPeriodDays": 30}"#,
+    )
+    .unwrap();
+    server.client().import().unwrap();
+    let report = server.client().insights(SESSION).unwrap();
+    assert_eq!((report.v, report.session.as_str()), (1, SESSION));
+    assert_eq!(
+        report.findings.last().map(|f| f.rule),
+        Some(crate::insights::RuleId::Retention)
+    );
+    let (status, body) = server.raw(Method::GET, &format!("/insights?session={SESSION}"), "");
+    assert_eq!(status, 200);
+    let keys = |value: &serde_json::Value| {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(
+        keys(&body),
+        [
+            "findings",
+            "generated_at_ms",
+            "recap",
+            "requests",
+            "session",
+            "sessions",
+            "since_ms",
+            "v",
+            "wins"
+        ]
+    );
+    assert_eq!(keys(&body["wins"]), ["hit_streak_days", "saved_usd_7d"]);
+    let retention = body["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["rule"] == "retention")
+        .unwrap();
+    assert_eq!(
+        keys(retention),
+        [
+            "confidence",
+            "evidence",
+            "how",
+            "rule",
+            "saving_pct_5h",
+            "saving_usd",
+            "tip"
+        ]
+    );
+    assert_eq!(
+        (&retention["confidence"], &retention["saving_usd"]),
+        (&json!("high"), &json!(null))
+    );
+    assert_eq!(retention["evidence"][0], "cleanupPeriodDays is 30");
+}
+
+#[test]
 fn bad_requests_are_answered_with_a_reason() {
     let server = Server::start();
     let cases = [
@@ -520,6 +584,14 @@ fn bad_requests_are_answered_with_a_reason() {
             "range must be 24h, 7d, 30d or 90d",
         ),
         (Method::POST, "/history", "", 405, "use GET for /history"),
+        (
+            Method::GET,
+            "/insights",
+            "",
+            400,
+            "session query parameter is required",
+        ),
+        (Method::POST, "/insights", "", 405, "use GET for /insights"),
         (
             Method::POST,
             "/events",
@@ -634,13 +706,40 @@ fn a_history_report_does_not_wait_for_a_snapshot() {
 }
 
 #[test]
+fn a_snapshot_answers_at_once_while_an_insights_report_is_being_built() {
+    let server = Server::start();
+    let building = server.state.insights_reader.lock().unwrap();
+    let started = Instant::now();
+    let snapshot = server
+        .client()
+        .with_timeout(Duration::from_millis(500))
+        .snapshot(SESSION);
+    let waited = started.elapsed();
+    drop(building);
+    assert!(snapshot.is_ok(), "{snapshot:?}");
+    assert!(waited < Duration::from_millis(100), "{waited:?}");
+}
+
+#[test]
+fn an_insights_report_does_not_wait_for_a_snapshot() {
+    let server = Server::start();
+    let held = server.state.reader.lock().unwrap();
+    let insights = server
+        .client()
+        .with_timeout(Duration::from_millis(500))
+        .insights(SESSION);
+    drop(held);
+    assert!(insights.is_ok(), "{insights:?}");
+}
+
+#[test]
 fn snapshots_and_context_are_refused_while_the_store_is_being_rebuilt() {
     let server = Server::start_with(|store| {
         let mut writer = store.writer().unwrap();
         writer.mark_reindex_pending(true).unwrap();
         writer.commit().unwrap();
     });
-    for route in ["snapshot", "context", "history"] {
+    for route in ["snapshot", "context", "history", "insights"] {
         assert_eq!(
             server.raw(Method::GET, &format!("/{route}?session={SESSION}"), ""),
             (503, json!({"error": "the store is being rebuilt"})),

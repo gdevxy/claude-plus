@@ -56,10 +56,7 @@ impl Paths {
     pub const DEFAULT_RETENTION_DAYS: u64 = 30;
 
     pub fn retention_days(&self) -> Option<u64> {
-        std::fs::read_to_string(self.settings_file())
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|settings| settings.get("cleanupPeriodDays")?.as_u64())
+        retention_days_in(&self.claude_dir)
     }
 
     pub fn settings_file(&self) -> PathBuf {
@@ -99,6 +96,13 @@ impl Paths {
             .with_context(|| format!("cannot create {}", self.data_dir.display()))?;
         Ok(())
     }
+}
+
+pub fn retention_days_in(claude_dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(claude_dir.join("settings.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|settings| settings.get("cleanupPeriodDays")?.as_u64())
 }
 
 #[cfg(test)]
