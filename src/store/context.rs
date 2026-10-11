@@ -157,11 +157,15 @@ fn context_statements() -> Vec<String> {
     ]
 }
 
-const SKILL_USES_IN_SESSION: &str = "SELECT skill, COUNT(*) FROM requests
-     WHERE session_id = ?1 AND skill IS NOT NULL GROUP BY skill";
+const SKILL_USES_IN_SESSION: &str = "SELECT skill, COUNT(*) FROM (
+         SELECT skill, LAG(skill) OVER (PARTITION BY agent_id ORDER BY ts, key) AS before
+         FROM requests WHERE session_id = ?1
+     ) WHERE skill IS NOT NULL AND before IS NOT skill GROUP BY skill";
 
-const SKILL_USES_SINCE: &str = "SELECT skill, COUNT(*) FROM requests
-     WHERE ts >= ?1 AND skill IS NOT NULL GROUP BY skill";
+const SKILL_USES_SINCE: &str = "SELECT skill, COUNT(*) FROM (
+         SELECT skill, LAG(skill) OVER (PARTITION BY session_id, agent_id ORDER BY ts, key) AS before
+         FROM requests WHERE ts >= ?1
+     ) WHERE skill IS NOT NULL AND before IS NOT skill GROUP BY skill";
 
 const MCP_TOOL_USES_IN_SESSION: &str = "SELECT name, COUNT(*) FROM tool_uses
      WHERE session_id = ?1 AND name >= 'mcp__' AND name < 'mcp_`' GROUP BY name";
@@ -242,18 +246,17 @@ mod tests {
         assert_eq!(store.main_compactions("s1").unwrap(), vec![30]);
     }
 
-    fn plan(store: &Store, sql: &str) -> String {
+    fn plan(store: &Store, sql: &str) -> Vec<String> {
         let mut statement = store
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap();
         let nulls = vec![rusqlite::types::Null; statement.parameter_count()];
-        let details: Vec<String> = statement
+        statement
             .query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3))
             .unwrap()
             .map(Result::unwrap)
-            .collect();
-        details.join("; ")
+            .collect()
     }
 
     #[test]
@@ -261,7 +264,10 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         for sql in context_statements() {
             let plan = plan(&store, &sql);
-            assert!(!plan.contains("SCAN"), "{sql}\n=> {plan}");
+            let scanned = plan
+                .iter()
+                .any(|step| step.starts_with("SCAN ") && !step.starts_with("SCAN ("));
+            assert!(!scanned, "{sql}\n=> {plan:?}");
         }
     }
 
@@ -350,6 +356,33 @@ mod tests {
     }
 
     #[test]
+    fn a_skill_counts_once_per_run_of_requests_it_is_active_in() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        for (key, ts, skill, agent) in [
+            ("a", 100, Some("tidy"), None),
+            ("b", 110, Some("tidy"), None),
+            ("c", 120, None, None),
+            ("d", 130, Some("tidy"), None),
+            ("e", 112, Some("tidy"), Some("a1")),
+            ("f", 114, Some("tidy"), Some("a1")),
+            ("g", 140, Some("deploy"), None),
+            ("h", 150, Some("tidy"), None),
+        ] {
+            w.request(&RequestRow {
+                agent_id: agent.map(String::from),
+                is_sidechain: agent.is_some(),
+                ..request(key, "s1", ts, skill)
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        let expected = BTreeMap::from([("deploy".to_string(), 1), ("tidy".to_string(), 4)]);
+        assert_eq!(store.skill_uses_in_session("s1").unwrap(), expected);
+        assert_eq!(store.skill_uses_since(0).unwrap(), expected);
+    }
+
+    #[test]
     fn skill_and_mcp_tool_uses_are_counted_per_session_or_everywhere_since_a_time() {
         let mut store = Store::open_in_memory().unwrap();
         let mut w = store.writer().unwrap();
@@ -378,11 +411,11 @@ mod tests {
         w.commit().unwrap();
         assert_eq!(
             store.skill_uses_in_session("s1").unwrap(),
-            BTreeMap::from([("tidy".to_string(), 2)])
+            BTreeMap::from([("tidy".to_string(), 1)])
         );
         assert_eq!(
             store.skill_uses_since(100).unwrap(),
-            BTreeMap::from([("tidy".to_string(), 3)])
+            BTreeMap::from([("tidy".to_string(), 2)])
         );
         assert_eq!(
             store.mcp_tool_uses_in_session("s1").unwrap(),
