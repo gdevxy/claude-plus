@@ -20,7 +20,7 @@ use crate::api::client::{Client, ClientError};
 use crate::api::wire::Health;
 use crate::daemon::control::{self, Status, Stop};
 use crate::paths::Paths;
-use crate::pricing::PriceTable;
+use crate::pricing::{PriceTable, UserPrices};
 use crate::store::Store;
 
 const PROGRESS_POLL: Duration = Duration::from_millis(100);
@@ -125,7 +125,15 @@ pub fn run() -> Result<ExitCode> {
         end_quietly_when_the_reader_goes_away();
     }
     let paths = Paths::from_env()?;
-    let prices = PriceTable::bundled();
+    let (prices, user_prices) = PriceTable::with_user_file(&paths.user_prices());
+    if let UserPrices::Invalid(message) = &user_prices
+        && !matches!(
+            cli.command,
+            Command::Install { .. } | Command::Uninstall { .. }
+        )
+    {
+        eprintln!("warning: {message}, using Anthropic's prices");
+    }
     match cli.command {
         Command::Daemon {
             ensure: true,

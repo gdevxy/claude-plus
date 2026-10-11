@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -10,6 +11,7 @@ const PER_MILLION: f64 = 1_000_000.0;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PriceTable {
+    #[serde(default = "local_version")]
     version: String,
     cache_write_5m_multiplier: Option<f64>,
     cache_write_1h_multiplier: Option<f64>,
@@ -40,6 +42,10 @@ struct Rates {
     cache_read: f64,
 }
 
+fn local_version() -> String {
+    "local".into()
+}
+
 const DEFAULT_WRITE_5M: f64 = 1.25;
 const DEFAULT_WRITE_1H: f64 = 2.0;
 
@@ -50,7 +56,34 @@ fn check_rate(name: &str, value: f64) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserPrices {
+    Absent,
+    Loaded,
+    Invalid(String),
+}
+
 impl PriceTable {
+    pub fn with_user_file(path: &Path) -> (Self, UserPrices) {
+        let bundled = Self::bundled();
+        match std::fs::read_to_string(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (bundled, UserPrices::Absent)
+            }
+            Err(error) => (
+                bundled,
+                UserPrices::Invalid(format!("cannot read {}: {error}", path.display())),
+            ),
+            Ok(text) => match Self::from_toml(&text) {
+                Ok(overrides) => (bundled.merged_with(overrides), UserPrices::Loaded),
+                Err(error) => (
+                    bundled,
+                    UserPrices::Invalid(format!("{}: {error:#}", path.display())),
+                ),
+            },
+        }
+    }
+
     pub fn bundled() -> Self {
         Self::from_toml(BUNDLED).expect("bundled price table is valid")
     }
@@ -175,13 +208,30 @@ impl Rates {
 }
 
 pub fn normalize_model(model: &str) -> &str {
-    let without_bracket = model.split('[').next().unwrap_or(model);
-    match without_bracket.rsplit_once('-') {
-        Some((base, suffix)) if suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_digit()) => {
-            base
-        }
-        _ => without_bracket,
+    let model = model.split('[').next().unwrap_or(model);
+    let model = model.rsplit_once('/').map_or(model, |(_, name)| name);
+    let model = model.split_once('@').map_or(model, |(name, _)| name);
+    let model = model
+        .find("anthropic.")
+        .map_or(model, |at| &model[at + "anthropic.".len()..]);
+    let model = strip_suffix_where(model, |suffix| {
+        suffix
+            .strip_prefix('v')
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(major, minor)| is_digits(major) && is_digits(minor))
+    });
+    strip_suffix_where(model, |suffix| suffix.len() == 8 && is_digits(suffix))
+}
+
+fn strip_suffix_where(model: &str, matches: impl Fn(&str) -> bool) -> &str {
+    match model.rsplit_once('-') {
+        Some((base, suffix)) if matches(suffix) => base,
+        _ => model,
     }
+}
+
+fn is_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -207,6 +257,51 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn cloud_and_gateway_model_ids_find_their_price() {
+        for id in [
+            "us.anthropic.claude-opus-5-5-20260901-v1:0",
+            "global.anthropic.claude-opus-5-5-v1:0",
+            "anthropic.claude-opus-5-5-20260901-v2:0",
+            "claude-opus-5-5@20260901",
+            "anthropic/claude-opus-5-5",
+            "bedrock/us.anthropic.claude-opus-5-5-20260901-v1:0",
+            "claude-opus-5-5-20260901[1m]",
+        ] {
+            assert_eq!(normalize_model(id), "claude-opus-5-5", "{id}");
+        }
+        assert_eq!(normalize_model("gpt-5"), "gpt-5");
+    }
+
+    #[test]
+    fn the_user_file_is_optional_merged_and_reported_when_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prices.toml");
+        let (table, state) = PriceTable::with_user_file(&path);
+        assert_eq!(state, UserPrices::Absent);
+        assert_eq!(table.version(), PriceTable::bundled().version());
+        std::fs::write(
+            &path,
+            "[models.claude-opus-5-5]\ninput = 3\noutput = 15\ncache_read = 0.1\n",
+        )
+        .unwrap();
+        let (table, state) = PriceTable::with_user_file(&path);
+        assert_eq!(state, UserPrices::Loaded);
+        let cost = table
+            .cost("claude-opus-5-5", &tokens(1_000_000, 0, 0, 0, 0))
+            .unwrap();
+        assert!(close(cost, 3.0), "{cost}");
+        assert!(table.knows("claude-haiku-5-5"));
+        std::fs::write(
+            &path,
+            "[models.x]\ninput = -1\noutput = 1\ncache_read = 1\n",
+        )
+        .unwrap();
+        let (table, state) = PriceTable::with_user_file(&path);
+        assert!(matches!(state, UserPrices::Invalid(_)));
+        assert_eq!(table.version(), PriceTable::bundled().version());
     }
 
     #[test]

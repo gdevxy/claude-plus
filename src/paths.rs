@@ -61,6 +61,10 @@ impl Paths {
         self.claude_dir.join("projects")
     }
 
+    pub fn user_prices(&self) -> PathBuf {
+        self.data_dir.join("prices.toml")
+    }
+
     pub fn database(&self) -> PathBuf {
         self.data_dir.join("data.db")
     }
