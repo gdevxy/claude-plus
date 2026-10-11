@@ -223,6 +223,7 @@ impl Rule for Retention {
                 confidence: Confidence::High,
                 how: format!(
                     "Add \"cleanupPeriodDays\": {WANTED_RETENTION_DAYS} to ~/.claude/settings.json. \
+                     This reads that file alone, so a managed or project setting may already keep more. \
                      claude-plus keeps its own copy of what it has read either way."
                 ),
             }
@@ -372,6 +373,12 @@ mod tests {
             "keep 90\u{a0}days of transcripts to match the History range"
         );
         assert_eq!(finding.evidence[0], "cleanupPeriodDays is 30, the default");
+        assert_eq!(
+            finding.how,
+            "Add \"cleanupPeriodDays\": 90 to ~/.claude/settings.json. \
+             This reads that file alone, so a managed or project setting may already keep more. \
+             claude-plus keeps its own copy of what it has read either way."
+        );
         fixture.retention_days = Some(45);
         assert_eq!(
             Retention.evaluate(&fixture.ctx())[0].evidence[0],
