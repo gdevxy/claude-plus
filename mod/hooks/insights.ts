@@ -6,6 +6,8 @@ import { MIN_CONTENT, PADDING, WHY_COLUMNS, fitting, gap, notice, pair, plain, p
 export const STREAK_SHOWN = 2
 export const INDENT = 2
 export const RETRY_SECONDS = 60
+export const WEEKLY_SHARE = 'of a 5h window a week'
+export const SHORT_WEEKLY_SHARE = 'of 5h/wk'
 
 const CONFIDENCE: Readonly<Record<Finding['confidence'], string>> = { high: 'high confidence', medium: 'medium confidence', low: 'low confidence' }
 
@@ -63,8 +65,9 @@ function headline(input: InsightsInput, report: InsightsReport | null, width: nu
   const count = report.findings.length
   const tips = `${count} ${count === 1 ? 'tip' : 'tips'} from your last 14 days`
   const shares = priced.map(found => found.saving_pct_5h).filter((pct): pct is number => pct !== null)
-  const share = shares.length > 0 ? ` · ~${percent(shares.reduce((sum, pct) => sum + pct, 0))} of 5h` : ''
-  lines.push(plain('ins-sub', fitting(width, `${tips}${share}`, tips), { dim: true }))
+  const share = percent(shares.reduce((sum, pct) => sum + pct, 0))
+  const summary = shares.length > 0 ? fitting(width, `${tips} · ~${share} ${WEEKLY_SHARE}`, `${tips} · ~${share} ${SHORT_WEEKLY_SHARE}`, tips) : tips
+  lines.push(plain('ins-sub', summary, { dim: true }))
   if (input.failure !== null) lines.push(prose('ins-stale', `Could not refresh: ${input.failure.reason}`, { dim: true }))
   if (input.expanded.includes('ins-total')) {
     lines.push(
@@ -111,7 +114,9 @@ function findingLines(input: InsightsInput, found: Finding): Line[] {
       : { key, segments: [{ text: `Save ${weekly(found.saving_usd)}`, color: 'success', bold: true }, { text: `: ${found.tip}` }], wrap: true }
   const lines: Line[] = [title, ...found.evidence.map((text, line) => prose(`${key}-${line}`, text, { dim: true }, INDENT))]
   const confidence = CONFIDENCE[found.confidence]
-  const meta = found.saving_pct_5h === null ? confidence : `~${percent(found.saving_pct_5h)} of 5h · ${confidence}`
+  const room = input.width - 2 * PADDING - WHY_COLUMNS - INDENT
+  const share = found.saving_pct_5h === null ? null : `~${percent(found.saving_pct_5h)}`
+  const meta = share === null ? confidence : fitting(room, `${share} ${WEEKLY_SHARE} · ${confidence}`, `${share} ${SHORT_WEEKLY_SHARE} · ${confidence}`)
   lines.push({ key: `${key}-meta`, segments: [{ text: `${' '.repeat(INDENT)}${meta}`, dim: true }], why: key })
   if (input.expanded.includes(key)) lines.push(prose(`explain-${key}`, found.how, { dim: true }, INDENT))
   return lines

@@ -39,7 +39,7 @@ describe('insights screen', () => {
       '   Typical break 14m, the cache lasts',
       '   5m',
       '   Each rebuild rewrote ~86k tokens',
-      '   ~8% of 5h · high confidence        ?',
+      '   ~8% of 5h/wk · high confidence     ?',
       '',
       ' Save ~$1.35/week: turn off the linear',
       ' MCP server, unused for 14 days',
@@ -47,7 +47,7 @@ describe('insights screen', () => {
       '   unused for 30 days',
       '   Carried on 1,180 requests in this',
       '   project over 14 days',
-      '   ~3% of 5h · high confidence        ?',
+      '   ~3% of 5h/wk · high confidence     ?',
       '',
       ' Break your biggest asks into smaller',
       ' steps',
@@ -69,7 +69,8 @@ describe('insights screen', () => {
 
   test('wider panes keep the 5h share on the summary and the week on the win', () => {
     const lines = insightsScreen(input({ width: 60 }))
-    expect(text(line(lines, 'ins-sub'))).toBe('3 tips from your last 14 days · ~11% of 5h')
+    expect(text(line(lines, 'ins-sub'))).toBe('3 tips from your last 14 days · ~11% of a 5h window a week')
+    expect(text(line(lines, 'ins-idle_rebuilds-meta'))).toBe('  ~8% of a 5h window a week · high confidence')
     expect(text(line(lines, 'ins-win-saved'))).toBe('✻ Cache hits saved you $21.40 this week')
   })
 
