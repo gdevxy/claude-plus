@@ -649,15 +649,15 @@ fn setting_the_version_names_it_in_the_crate_its_lock_and_the_mod() {
     }
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-    let metadata = run(Command::new(env!("CARGO")).current_dir(temp.path()).args([
-        "metadata",
+    let tree = run(Command::new(env!("CARGO")).current_dir(temp.path()).args([
+        "tree",
         "--locked",
         "--offline",
-        "--format-version",
-        "1",
+        "--depth",
+        "0",
     ]));
-    assert!(metadata.status.success(), "{}", text(&metadata.stderr));
-    assert!(text(&metadata.stdout).contains("\"version\":\"12.3.45\""));
+    assert!(tree.status.success(), "{}", text(&tree.stderr));
+    assert!(text(&tree.stdout).starts_with("claude-plus v12.3.45 "));
 }
 
 #[test]
