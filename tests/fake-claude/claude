@@ -26,7 +26,9 @@ case "$*" in
     printf '%s (Claude Code)\n' "${FAKE_CLAUDE_VERSION:-2.1.296}"
     ;;
   "plugin marketplace list --json")
-    if [ -f "$state/marketplace" ]; then
+    if [ -f "$state/marketplace-repo" ]; then
+      printf '[{"name":"claude-plus","source":"github","repo":"%s"}]\n' "$(cat "$state/marketplace-repo")"
+    elif [ -f "$state/marketplace" ]; then
       printf '[{"name":"claude-plus","source":"directory","path":"%s"}]\n' "$(cat "$state/marketplace")"
     else
       echo '[]'
@@ -36,18 +38,23 @@ case "$*" in
     path="$4"
     [ -d "$path" ] || failed marketplace-add "Path does not exist: $path" invalid_source
     printf '%s' "$path" > "$state/marketplace"
+    rm -f "$state/marketplace-repo"
     ok marketplace-add "Successfully added marketplace: claude-plus"
     ;;
   "plugin marketplace remove claude-plus --json")
-    [ -f "$state/marketplace" ] || failed marketplace-remove "Marketplace 'claude-plus' not found" not_configured
-    rm "$state/marketplace"
+    [ -f "$state/marketplace" ] || [ -f "$state/marketplace-repo" ] ||
+      failed marketplace-remove "Marketplace 'claude-plus' not found" not_configured
+    rm -f "$state/marketplace" "$state/marketplace-repo"
     ok marketplace-remove "Successfully removed marketplace: claude-plus"
     ;;
   "plugin list --json")
-    if [ -f "$state/plugin" ]; then
+    if [ -f "$state/plugin" ] && [ -f "$state/marketplace" ]; then
       printf '[{"id":"plus@claude-plus","version":"%s","scope":"user","enabled":%s,"readFromFolder":"%s/mod","folderVersion":"%s"}]\n' \
         "$(cat "$state/plugin")" "$(cat "$state/enabled" 2>/dev/null || echo true)" \
         "$(cat "$state/marketplace")" "$(manifest_version)"
+    elif [ -f "$state/plugin" ]; then
+      printf '[{"id":"plus@claude-plus","version":"%s","scope":"user","enabled":%s}]\n' \
+        "$(cat "$state/plugin")" "$(cat "$state/enabled" 2>/dev/null || echo true)"
     else
       echo '[]'
     fi

@@ -125,7 +125,7 @@ fn a_marketplace_of_that_name_elsewhere_is_pointed_here_after_asking() {
     let env = env();
     let _daemon = Daemon(&env);
     std::fs::create_dir_all(env.claude_state()).unwrap();
-    std::fs::write(env.claude_state().join("marketplace"), "/elsewhere").unwrap();
+    std::fs::write(env.claude_state().join("marketplace-repo"), "ada/claude-plus").unwrap();
     std::fs::write(env.claude_state().join("plugin"), VERSION).unwrap();
     cmd(&env, &["install"])
         .write_stdin("y\n")
@@ -136,7 +136,7 @@ fn a_marketplace_of_that_name_elsewhere_is_pointed_here_after_asking() {
             marketplace(&env).display()
         )))
         .stdout(predicate::str::contains(format!(
-            "✻ Pointed the claude-plus marketplace at {} (was /elsewhere)\n✻ The plus mod v{VERSION} is installed\n",
+            "✻ Pointed the claude-plus marketplace at {} (was ada/claude-plus)\n✻ The plus mod v{VERSION} is installed\n",
             marketplace(&env).display()
         )));
 }
