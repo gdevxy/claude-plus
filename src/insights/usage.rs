@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
+use super::sources::{Argument, COMMAND_TOOLS, Source};
 use super::words::{count, grouped, model_name, money, tokens};
 use super::{Confidence, Draft, Finding, InsightContext, Rule, RuleId, is_main, listed, median};
 use crate::context_model::TextKind;
 use crate::forecast::{alternative_for, family};
-use crate::store::{LargeResult, SpentRequest};
+use crate::store::SpentRequest;
 
 pub const LARGE_RESULT_CHARS: u64 = 20_000;
 pub const KEPT_RESULT_CHARS: u64 = 10_000;
@@ -17,7 +18,6 @@ pub const TOP_TIER: &[&str] = &["opus", "fable", "mythos"];
 pub const MIN_TASKS: usize = 10;
 pub const OUTLIER_FACTOR: f64 = 5.0;
 pub const MIN_OUTLIER_USD: f64 = 1.0;
-pub const TARGET_CHARS: usize = 30;
 
 pub struct Task<'a> {
     pub session_id: &'a str,
@@ -76,7 +76,7 @@ pub fn tasks<'a>(ctx: &InsightContext<'a>) -> Vec<Task<'a>> {
 pub struct LargeToolResults;
 
 #[derive(Default)]
-struct Source {
+struct Carried {
     results: u64,
     tokens: u64,
     usd: f64,
@@ -84,7 +84,7 @@ struct Source {
 
 impl Rule for LargeToolResults {
     fn evaluate(&self, ctx: &InsightContext) -> Vec<Finding> {
-        let mut sources: BTreeMap<(String, String), Source> = BTreeMap::new();
+        let mut sources: BTreeMap<Source, Carried> = BTreeMap::new();
         for result in ctx.tool_results {
             let kept = ctx.ratios.tokens(
                 result.chars.saturating_sub(KEPT_RESULT_CHARS),
@@ -103,44 +103,43 @@ impl Rule for LargeToolResults {
                 .filter(|r| r.point.ts > result.ts && r.point.ts < until)
                 .map(|r| ctx.carried_usd(r, kept))
                 .sum();
-            let tool = result.tool.clone().unwrap_or_else(|| "A tool".into());
-            let source = sources.entry((tool, target_of(ctx, result))).or_default();
-            source.results += 1;
-            source.tokens += ctx.ratios.tokens(result.chars, TextKind::Code);
-            source.usd += usd;
+            let cwd = ctx
+                .session(&result.session_id)
+                .and_then(|s| s.cwd.as_deref());
+            let source = Source::of(result.tool.as_deref(), result.target.as_deref(), cwd);
+            let carried = sources.entry(source).or_default();
+            carried.results += 1;
+            carried.tokens += ctx.ratios.tokens(result.chars, TextKind::Code);
+            carried.usd += usd;
         }
-        let mut ordered: Vec<(&(String, String), &Source)> = sources.iter().collect();
+        let mut ordered: Vec<(&Source, &Carried)> = sources.iter().collect();
         ordered.sort_by(|a, b| b.1.usd.total_cmp(&a.1.usd).then_with(|| a.0.cmp(b.0)));
-        let Some(((top, _), _)) = ordered.first() else {
+        let Some((top, _)) = ordered
+            .iter()
+            .find(|(source, _)| !matches!(source, Source::Unnamed { .. }))
+            .or(ordered.first())
+        else {
             return Vec::new();
         };
-        let tip = match top.as_str() {
-            "Read" => "read big files in parts instead of whole",
-            "Bash" => "trim long command output with head, tail or grep",
-            _ => "ask for smaller tool results",
-        };
-        let usd = ordered.iter().map(|(_, source)| source.usd).sum();
+        let usd = ordered.iter().map(|(_, carried)| carried.usd).sum();
         let draft = Draft {
             rule: RuleId::LargeToolResults,
-            tip: tip.into(),
+            tip: tip_for(top),
             evidence: listed(
                 &ordered,
-                |((tool, target), source)| {
-                    let what = match target.is_empty() {
-                        true => tool.clone(),
-                        false => format!("{tool} {target}"),
-                    };
-                    format!(
-                        "{what}: {}, ~{} tokens each",
-                        count(source.results, "result", "results"),
-                        tokens(source.tokens / source.results)
-                    )
+                |(source, carried)| {
+                    let size = tokens(carried.tokens / carried.results);
+                    match carried.results {
+                        1 => format!("{}: 1 result, ~{size} tokens", source.label()),
+                        n => format!("{}: {n} results, ~{size} tokens each", source.label()),
+                    }
                 },
                 "sources",
             ),
             confidence: Confidence::Medium,
             how: format!(
-                "Looks at main-thread tool results of {} characters or more in the last 14 days. \
+                "Looks at main-thread tool results of {} characters or more in the last 14 days, \
+                 grouped by file, or by a command's program and its first file or argument. \
                  Everything past the first {} characters is priced on each later request until the next compaction, \
                  at what each request paid for the front of its prompt: a cache read while the cache was warm, a cache write when it was rewritten.",
                 grouped(LARGE_RESULT_CHARS),
@@ -151,29 +150,24 @@ impl Rule for LargeToolResults {
     }
 }
 
-fn target_of(ctx: &InsightContext, result: &LargeResult) -> String {
-    let Some(target) = result.target.as_deref() else {
-        return String::new();
-    };
-    let cwd = ctx
-        .session(&result.session_id)
-        .and_then(|s| s.cwd.as_deref())
-        .map(|cwd| format!("{}/", cwd.trim_end_matches('/')));
-    let relative = cwd
-        .and_then(|cwd| target.strip_prefix(cwd.as_str()).map(String::from))
-        .unwrap_or_else(|| target.to_string());
-    let line = relative.lines().next().unwrap_or("").trim();
-    let chars: Vec<char> = line.chars().collect();
-    if chars.len() <= TARGET_CHARS {
-        return line.to_string();
+fn tip_for(source: &Source) -> String {
+    if let Some(file) = source.file() {
+        let name = file.rsplit('/').next().unwrap_or(file);
+        return format!("read big files like {name} in parts instead of whole");
     }
-    let kept = TARGET_CHARS - 1;
-    match line.contains(' ') {
-        true => format!("{}…", chars[..kept].iter().collect::<String>().trim_end()),
-        false => format!(
-            "…{}",
-            chars[chars.len() - kept..].iter().collect::<String>()
-        ),
+    match source {
+        Source::Command {
+            program,
+            argument: Some(Argument::Word(word)),
+            ..
+        } => format!("trim the output of {program} {word} with head, tail or grep"),
+        Source::Command { program, .. } => {
+            format!("trim the output of {program} with head, tail or grep")
+        }
+        Source::Unnamed { tool } if COMMAND_TOOLS.contains(&tool.as_str()) => {
+            "trim long command output with head, tail or grep".into()
+        }
+        other => format!("ask {} for smaller results", other.tool()),
     }
 }
 
@@ -428,52 +422,77 @@ mod tests {
             SINCE + 505,
             31_000,
             "Bash",
-            Some("cargo test --workspace --all-features -- --nocapture --test-threads 1"),
+            Some("cd /work/demo/sdd/open-edition && sed -n 1,200p progress.md"),
+        );
+        fixture.large(
+            "s1",
+            SINCE + 515,
+            31_000,
+            "Bash",
+            Some("cd /work/demo/sdd/open-edition; cat lane-rules.md"),
         );
         fixture.compaction("s1", SINCE + 600);
         let finding = &LargeToolResults.evaluate(&fixture.ctx())[0];
-        assert_eq!(finding.tip, "read big files in parts instead of whole");
+        assert_eq!(
+            finding.tip,
+            "read big files like big.rs in parts instead of whole"
+        );
         assert_eq!(
             finding.evidence,
             [
                 "Read src/big.rs: 2 results, ~13.3k tokens each",
-                "Bash cargo test --workspace --all-…: 1 result, ~10.3k tokens each",
+                "Bash sed …/open-edition/progress.md: 1 result, ~10.3k tokens",
+                "Bash cat …pen-edition/lane-rules.md: 1 result, ~10.3k tokens",
             ]
         );
         let read = 10_000.0 * (59.0 + 39.0) * 0.2 / 1e6;
-        let bash = 7_000.0 * 9.0 * 0.2 / 1e6;
-        close(finding.saving_usd, (read + bash) / 2.0);
+        let sed = 7_000.0 * 9.0 * 0.2 / 1e6;
+        let cat = 7_000.0 * 8.0 * 0.2 / 1e6;
+        close(finding.saving_usd, (read + sed + cat) / 2.0);
     }
 
     #[test]
-    fn long_targets_keep_the_head_of_a_command_and_the_tail_of_a_path() {
+    fn the_tip_names_the_file_or_command_that_costs_most() {
+        let tip_for = |tool: &str, target: Option<&str>| {
+            let mut fixture = Fixture::new();
+            fixture.session("s1", PROJECT, None);
+            for n in 1..=100 {
+                fixture.request("s1", SINCE + n * 10, OPUS, counts(0, 100_000, 0, 10));
+            }
+            fixture.large("s1", SINCE + 5, 80_000, tool, target);
+            LargeToolResults.evaluate(&fixture.ctx())[0].tip.clone()
+        };
+        assert_eq!(
+            tip_for("Bash", Some("cd /work/demo && sed -n 1,900p docs/plan.md")),
+            "read big files like plan.md in parts instead of whole"
+        );
+        assert_eq!(
+            tip_for("Bash", Some("cargo test --workspace -- --nocapture")),
+            "trim the output of cargo test with head, tail or grep"
+        );
+        assert_eq!(
+            tip_for("Bash", None),
+            "trim long command output with head, tail or grep"
+        );
         let mut fixture = Fixture::new();
         fixture.session("s1", PROJECT, None);
-        for target in [
-            "/work/demo/docs/plans/2026-10-11-m6-insights-and-alerts.md",
-            "/elsewhere/src/main.rs",
-            "rg --files-with-matches --hidden 'fn main' /work/demo",
-        ] {
-            fixture.large("s1", SINCE, 20_000, "Read", Some(target));
+        for n in 1..=100 {
+            fixture.request("s1", SINCE + n * 10, OPUS, counts(0, 100_000, 0, 10));
         }
-        let ctx = fixture.ctx();
-        let shown: Vec<String> = fixture
-            .tool_results
-            .iter()
-            .map(|result| target_of(&ctx, result))
-            .collect();
+        fixture.large("s1", SINCE + 5, 90_000, "Bash", None);
+        fixture.large("s1", SINCE + 5, 60_000, "Read", Some("/work/demo/notes.md"));
+        let finding = &LargeToolResults.evaluate(&fixture.ctx())[0];
         assert_eq!(
-            shown,
-            [
-                "…-11-m6-insights-and-alerts.md",
-                "/elsewhere/src/main.rs",
-                "rg --files-with-matches --hid…",
-            ]
+            finding.tip,
+            "read big files like notes.md in parts instead of whole"
         );
-        assert!(
-            shown
-                .iter()
-                .all(|target| target.chars().count() <= TARGET_CHARS)
+        assert_eq!(
+            finding.evidence[0],
+            "Bash commands too long to name: 1 result, ~30k tokens"
+        );
+        assert_eq!(
+            tip_for("mcp__linear__search", Some("open bugs")),
+            "ask linear search for smaller results"
         );
     }
 

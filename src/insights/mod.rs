@@ -1,6 +1,7 @@
 mod cache;
 mod report;
 mod setup;
+pub mod sources;
 mod usage;
 pub mod words;
 
