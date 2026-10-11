@@ -11,7 +11,9 @@ use crate::pricing::PriceTable;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Format {
+    #[value(help = "One object {\"v\":1,\"rows\":[...]}, costs to 6 decimals")]
     Json,
+    #[value(help = "A header row, RFC 4180 quoting, LF line ends and costs to 6 decimals")]
     Csv,
 }
 

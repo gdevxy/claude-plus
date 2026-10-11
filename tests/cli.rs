@@ -732,6 +732,22 @@ fn export_without_transcripts_prints_an_empty_export_and_the_notice_on_stderr() 
 }
 
 #[test]
+fn export_help_names_what_each_format_prints() {
+    let env = env();
+    let help = stdout_of(&env, &["export", "--help"]);
+    assert!(
+        help.contains("- json: One object {\"v\":1,\"rows\":[...]}, costs to 6 decimals\n"),
+        "{help}"
+    );
+    assert!(
+        help.contains(
+            "- csv:  A header row, RFC 4180 quoting, LF line ends and costs to 6 decimals\n"
+        ),
+        "{help}"
+    );
+}
+
+#[test]
 fn export_rejects_an_unknown_format() {
     let env = env();
     cmd(&env, &["export", "--format", "xml"])
