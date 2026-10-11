@@ -76,8 +76,13 @@ fn run_locked(
     let history_reader = Store::open_read_only(&paths.database())?;
     let insights_reader = Store::open_read_only(&paths.database())?;
     let listener = api::listen(&paths.socket())?;
-    let (writer, writer_thread) =
-        writer::spawn(store, prices.clone(), paths.projects_dir(), log.clone())?;
+    let (writer, writer_thread) = writer::spawn(
+        store,
+        prices.clone(),
+        paths.projects_dir(),
+        paths.claude_json.clone(),
+        log.clone(),
+    )?;
     let state = Arc::new(State {
         writer: writer.clone(),
         reader: Mutex::new(reader),

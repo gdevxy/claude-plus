@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -13,6 +14,7 @@ pub const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 pub struct Log {
     file: Mutex<LogFile>,
     echo: bool,
+    warned: Mutex<HashSet<&'static str>>,
 }
 
 struct LogFile {
@@ -63,6 +65,7 @@ impl Log {
         Ok(Self {
             file: Mutex::new(LogFile::open(path)?),
             echo,
+            warned: Mutex::default(),
         })
     }
 
@@ -72,6 +75,17 @@ impl Log {
 
     pub fn warn(&self, message: impl Display) {
         self.write("warn", message);
+    }
+
+    pub fn warn_once(&self, key: &'static str, message: impl Display) {
+        let first = self
+            .warned
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key);
+        if first {
+            self.warn(message);
+        }
     }
 
     pub fn error(&self, message: impl Display) {
@@ -157,6 +171,22 @@ mod tests {
         drop(log);
         Log::open(&path, false).unwrap().info("third");
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+    }
+
+    #[test]
+    fn a_warning_once_is_written_only_the_first_time_per_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.log");
+        let log = Log::open(&path, false).unwrap();
+        log.warn_once("login", "first");
+        log.warn_once("login", "again");
+        log.warn_once("other", "other");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let messages: Vec<&str> = text
+            .lines()
+            .map(|l| l.rsplit(' ').next().unwrap())
+            .collect();
+        assert_eq!(messages, vec!["first", "other"]);
     }
 
     #[test]

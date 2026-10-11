@@ -837,3 +837,28 @@ fn a_reader_that_goes_away_ends_the_output_without_a_panic() {
     ended_by_a_closed_pipe(&["daemon", "stop"]);
     assert!(health.is_ok(), "daemon --ensure started no daemon");
 }
+
+#[test]
+fn a_local_import_records_the_claude_code_login_without_touching_it() {
+    let env = env();
+    let login = env.claude.join(".claude.json");
+    let body = r#"{"oauthAccount":{"accountUuid":"u-1","organizationName":"Acme","organizationType":"claude_max"}}"#;
+    std::fs::write(&login, body).unwrap();
+    cmd(&env, &["import"]).assert().success();
+    let connection = rusqlite::Connection::open(env.plus.join("data.db")).unwrap();
+    let (id, label): (String, String) = connection
+        .query_row("SELECT id, label FROM accounts", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((id.as_str(), label.as_str()), ("oauth:u-1", "Acme · Max"));
+    let open: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM account_periods WHERE to_ms IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(open, 1);
+    assert_eq!(std::fs::read_to_string(&login).unwrap(), body);
+}

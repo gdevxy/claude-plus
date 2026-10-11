@@ -1,6 +1,10 @@
+use std::time::SystemTime;
+
 use anyhow::{Result, anyhow};
 
 use super::format::{plural, usd};
+use crate::accounts;
+use crate::api::epoch_ms;
 use crate::ingest::{IngestReport, Ingestor};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
@@ -48,6 +52,8 @@ fn locally(paths: &Paths, prices: &PriceTable) -> Result<(Store, IngestReport, R
         bar.set_position(done as u64);
     })?;
     bar.finish_and_clear();
+    let _ = accounts::observe(&mut store, &paths.claude_json, epoch_ms(SystemTime::now()));
+    accounts::attribute_pending(&mut store)?;
     let reconciled = report
         .reconcile_error
         .clone()

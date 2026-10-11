@@ -1,16 +1,18 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, anyhow};
+use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 
 use super::log::Log;
+use crate::accounts::{self, Auth};
 use crate::api::epoch_ms;
-use crate::api::wire::{MEASURE_KIND, USAGE_KIND};
+use crate::api::wire::{MEASURE_KIND, START_KIND, USAGE_KIND};
 use crate::ingest::{IngestReport, Ingestor, Rebuilt, TranscriptFile};
 use crate::limits;
 use crate::pricing::PriceTable;
@@ -188,6 +190,7 @@ pub fn spawn(
     store: Store,
     prices: PriceTable,
     projects_dir: PathBuf,
+    claude_json: PathBuf,
     log: Arc<Log>,
 ) -> Result<(WriterHandle, JoinHandle<()>)> {
     let (jobs, queue) = mpsc::channel();
@@ -209,6 +212,7 @@ pub fn spawn(
         store,
         prices,
         projects_dir,
+        claude_json,
         log,
         shared: handle.shared.clone(),
         cancel: handle.cancel.clone(),
@@ -227,6 +231,7 @@ struct Worker {
     store: Store,
     prices: PriceTable,
     projects_dir: PathBuf,
+    claude_json: PathBuf,
     log: Arc<Log>,
     shared: Arc<Shared>,
     cancel: Arc<AtomicBool>,
@@ -240,10 +245,14 @@ impl Worker {
             let Some(job) = deferred.pop_front().or_else(|| queue.recv().ok()) else {
                 break;
             };
+            let claude_json = self.claude_json.clone();
+            let log = self.log.clone();
             let mut drain = |store: &mut Store| {
                 while let Ok(job) = queue.try_recv() {
                     match job {
-                        Job::Events(rows, reply) => answer(reply, store_events(store, &rows)),
+                        Job::Events(rows, reply) => {
+                            answer(reply, store_events(store, &claude_json, &log, &rows))
+                        }
                         #[cfg(test)]
                         Job::Hold(held) => {
                             let _ = held.recv();
@@ -258,11 +267,15 @@ impl Worker {
                     self.finish_ingest(outcome, None, false);
                 }
                 Job::Scan(reply) => {
+                    self.observe_login();
                     let outcome = self.scan(&mut drain);
                     self.publish_rebuilding(None);
                     self.finish_ingest(outcome, reply, true);
                 }
-                Job::Events(rows, reply) => answer(reply, store_events(&mut self.store, &rows)),
+                Job::Events(rows, reply) => answer(
+                    reply,
+                    store_events(&mut self.store, &self.claude_json, &self.log, &rows),
+                ),
                 Job::Reindex(reply) => {
                     self.publish_rebuilding(Some(true));
                     let rebuilt = self.reindex(&mut drain);
@@ -374,6 +387,10 @@ impl Worker {
             }
         }
         if outcome.is_ok() {
+            if let Err(error) = accounts::attribute_pending(&mut self.store) {
+                self.log
+                    .warn(format!("cannot attribute sessions to accounts: {error:#}"));
+            }
             self.refresh_fit();
         }
         if let Some((id, reply)) = reply {
@@ -382,6 +399,16 @@ impl Worker {
                 report: collected.unwrap_or(done.report),
                 reconcile_error: done.reconcile_error,
             }));
+        }
+    }
+
+    fn observe_login(&mut self) {
+        if let Err(error) = accounts::observe(
+            &mut self.store,
+            &self.claude_json,
+            epoch_ms(SystemTime::now()),
+        ) {
+            warn_login(&self.log, &error);
         }
     }
 
@@ -431,20 +458,57 @@ impl Worker {
     }
 }
 
-fn store_events(store: &mut Store, rows: &[EventRow]) -> Result<()> {
+fn warn_login(log: &Log, error: &anyhow::Error) {
+    log.warn_once(
+        "login",
+        format!("cannot read the Claude Code login: {error:#}"),
+    );
+}
+
+fn store_events(store: &mut Store, claude_json: &Path, log: &Log, rows: &[EventRow]) -> Result<()> {
+    let starts = rows.iter().any(|row| row.kind == START_KIND);
+    let open = if starts {
+        match accounts::observe(store, claude_json, epoch_ms(SystemTime::now())) {
+            Ok(open) => open,
+            Err(error) => {
+                warn_login(log, &error);
+                store.open_account()?
+            }
+        }
+    } else {
+        None
+    };
     let mut writer = store.writer()?;
     for row in rows {
         if row.kind == USAGE_KIND {
             writer.live_breakdown(row)?;
             continue;
         }
-        if !writer.event(row)? || row.kind != MEASURE_KIND {
+        if !writer.event(row)? {
             continue;
         }
-        let Ok(data) = serde_json::from_str(&row.json) else {
+        let Ok(data) = serde_json::from_str::<Value>(&row.json) else {
             continue;
         };
-        for sample in limits::samples_from_measure(&row.session_id, row.ts_ms, &data) {
+        if row.kind == START_KIND {
+            let auth: Option<Auth> = data
+                .get("auth")
+                .and_then(|auth| serde_json::from_value(auth.clone()).ok());
+            accounts::attribute_start(
+                &mut writer,
+                &row.session_id,
+                auth.as_ref(),
+                open.as_deref(),
+                row.received_ms,
+            )?;
+            continue;
+        }
+        if row.kind != MEASURE_KIND {
+            continue;
+        }
+        let account = accounts::account_for_sample(&mut writer, &row.session_id, row.ts_ms)?;
+        for mut sample in limits::samples_from_measure(&row.session_id, row.ts_ms, &data) {
+            sample.account_id = account.clone();
             writer.limit_sample(&sample)?;
         }
     }
@@ -481,8 +545,14 @@ mod tests {
             std::fs::create_dir_all(projects.join("proj")).unwrap();
             let store = Store::open(&temp.path().join("data.db")).unwrap();
             let log = Arc::new(Log::open(&temp.path().join("daemon.log"), false).unwrap());
-            let (handle, thread) =
-                spawn(store, PriceTable::bundled(), projects.clone(), log).unwrap();
+            let (handle, thread) = spawn(
+                store,
+                PriceTable::bundled(),
+                projects.clone(),
+                temp.path().join(".claude.json"),
+                log,
+            )
+            .unwrap();
             Self {
                 temp,
                 projects,
@@ -701,6 +771,7 @@ mod tests {
             store,
             PriceTable::bundled(),
             temp.path().join("projects"),
+            temp.path().join(".claude.json"),
             log,
         )
         .unwrap();
@@ -814,6 +885,113 @@ mod tests {
         assert_eq!(fx.handle.status().last_error, None);
         assert_eq!(fx.reader().totals().unwrap().requests, 2);
         fx.stop();
+    }
+
+    #[tokio::test]
+    async fn a_session_start_takes_the_open_login_and_its_samples_carry_it() {
+        let fx = Fixture::new();
+        std::fs::write(
+            fx.temp.path().join(".claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"u-1","organizationName":"Acme","organizationType":"claude_enterprise"}}"#,
+        )
+        .unwrap();
+        let event = |kind: &str, ts_ms: i64, json: &str| EventRow {
+            client_id: None,
+            session_id: "s1".into(),
+            kind: kind.into(),
+            ts_ms,
+            received_ms: ts_ms,
+            json: json.into(),
+        };
+        fx.handle
+            .store_events(vec![
+                event("session.start", 1_000, r#"{"cwd":"/w","auth":{"provider":"anthropic","base_url":null,"api_key":false}}"#),
+                event("session.measure", 2_000, r#"{"rateLimits":[{"kind":"spend_limit","percentUsed":4,"resetsAt":"2026-11-01T00:00:00Z"}]}"#),
+            ])
+            .await
+            .unwrap();
+        let reader = fx.reader();
+        assert_eq!(
+            reader.session_account("s1").unwrap().as_deref(),
+            Some("oauth:u-1")
+        );
+        let samples = reader.limit_samples_since(0).unwrap();
+        assert_eq!(samples[0].account_id.as_deref(), Some("oauth:u-1"));
+    }
+
+    #[tokio::test]
+    async fn a_gateway_session_is_its_own_account_even_while_signed_in() {
+        let fx = Fixture::new();
+        std::fs::write(
+            fx.temp.path().join(".claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"u-1"}}"#,
+        )
+        .unwrap();
+        fx.handle
+            .store_events(vec![EventRow {
+                client_id: None,
+                session_id: "s2".into(),
+                kind: "session.start".into(),
+                ts_ms: 1_000,
+                received_ms: 1_000,
+                json: r#"{"auth":{"provider":"anthropic","base_url":"https://llm.corp","api_key":true}}"#.into(),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            fx.reader().session_account("s2").unwrap().as_deref(),
+            Some("gateway:https://llm.corp:443")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_start_without_a_login_file_is_stored_and_warned_about_once() {
+        let fx = Fixture::new();
+        let start = |session: &str| EventRow {
+            client_id: None,
+            session_id: session.into(),
+            kind: "session.start".into(),
+            ts_ms: 1_000,
+            received_ms: 1_000,
+            json: r#"{"cwd":"/w"}"#.into(),
+        };
+        fx.handle.store_events(vec![start("s1")]).await.unwrap();
+        fx.handle.store_events(vec![start("s2")]).await.unwrap();
+        let reader = fx.reader();
+        assert!(
+            reader
+                .latest_event("s2", "session.start")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(reader.session_account("s2").unwrap(), None);
+        let log = std::fs::read_to_string(fx.temp.path().join("daemon.log")).unwrap();
+        assert_eq!(
+            log.matches("cannot read the Claude Code login").count(),
+            1,
+            "{log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scan_observes_the_login_and_attributes_the_sessions_it_imported() {
+        let fx = Fixture::new();
+        std::fs::write(
+            fx.temp.path().join(".claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"u-1"}}"#,
+        )
+        .unwrap();
+        fx.write(
+            "a.jsonl",
+            &line("a", "ra").replace("2026-10-01T10:00:00Z", "2099-01-01T00:00:00Z"),
+        );
+        fx.handle.import().await.unwrap();
+        let reader = fx.reader();
+        assert_eq!(reader.open_account().unwrap().as_deref(), Some("oauth:u-1"));
+        assert_eq!(
+            reader.session_account("a").unwrap().as_deref(),
+            Some("oauth:u-1")
+        );
     }
 
     #[tokio::test]

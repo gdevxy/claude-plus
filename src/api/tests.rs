@@ -45,8 +45,14 @@ impl Server {
         let history_reader = Store::open_read_only(&database).unwrap();
         let insights_reader = Store::open_read_only(&database).unwrap();
         let log = Arc::new(Log::open(&temp.path().join("daemon.log"), false).unwrap());
-        let (writer, _) =
-            writer::spawn(store, PriceTable::bundled(), projects, log.clone()).unwrap();
+        let (writer, _) = writer::spawn(
+            store,
+            PriceTable::bundled(),
+            projects,
+            temp.path().join("claude.json"),
+            log.clone(),
+        )
+        .unwrap();
         let socket = temp.path().join("daemon.sock");
         let listener = listen(&socket).unwrap();
         let shutdown = Shutdown::default();
