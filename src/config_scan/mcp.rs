@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -73,7 +73,9 @@ pub fn servers(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
         match manifest.as_ref().and_then(|m| m.get("mcpServers")) {
             Some(Value::Object(inline)) => names.extend(inline.keys().cloned()),
             Some(Value::String(relative)) => {
-                names.extend(names_in(read_json(&plugin.dir.join(relative)).as_ref()));
+                if let Some(file) = inside(&plugin.dir, relative) {
+                    names.extend(names_in(read_json(&file).as_ref()));
+                }
             }
             _ => {}
         }
@@ -85,6 +87,12 @@ pub fn servers(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
             &none,
         );
     }
+}
+
+fn inside(dir: &Path, relative: &str) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(dir).ok()?;
+    let file = std::fs::canonicalize(dir.join(relative)).ok()?;
+    file.starts_with(&root).then_some(file)
 }
 
 fn names_in(config: Option<&Value>) -> BTreeSet<String> {
@@ -192,6 +200,39 @@ mod tests {
         let found = scan(&home.roots(None));
         let servers: Vec<&str> = found.sources.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(servers, vec!["context7"]);
+    }
+
+    #[test]
+    fn a_plugin_manifest_cannot_point_outside_its_plugin() {
+        let home = Home::new();
+        home.write(
+            "home/.claude/plugins/installed_plugins.json",
+            &serde_json::json!({"plugins": {
+                "up@m": [{"scope": "user", "installPath": home.path("plugins/up")}],
+                "abs@m": [{"scope": "user", "installPath": home.path("plugins/abs")}]
+            }})
+            .to_string(),
+        );
+        home.write(
+            "home/.claude/settings.json",
+            r#"{"enabledPlugins":{"up@m":true,"abs@m":true}}"#,
+        );
+        let outside = home.write("secret.json", r#"{"mcpServers":{"leaked":{}}}"#);
+        home.write(
+            "plugins/up/.claude-plugin/plugin.json",
+            r#"{"mcpServers":"../../secret.json"}"#,
+        );
+        home.write(
+            "plugins/abs/.claude-plugin/plugin.json",
+            &serde_json::json!({"mcpServers": outside}).to_string(),
+        );
+        let found = scan(&home.roots(None));
+        assert!(
+            found
+                .sources
+                .iter()
+                .all(|s| s.kind != SourceKind::McpServer)
+        );
     }
 
     #[test]
