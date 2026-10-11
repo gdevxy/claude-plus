@@ -209,8 +209,10 @@ impl Rule for Retention {
             return Vec::new();
         }
         let setting = match ctx.retention_days {
-            Some(days) => format!("cleanupPeriodDays is {days}"),
-            None => format!("cleanupPeriodDays is {days}, the default"),
+            Some(days) => format!("cleanupPeriodDays is {days} in ~/.claude/settings.json"),
+            None => {
+                format!("~/.claude/settings.json leaves cleanupPeriodDays at its default of {days}")
+            }
         };
         vec![
             Draft {
@@ -372,7 +374,10 @@ mod tests {
             finding.tip,
             "keep 90\u{a0}days of transcripts to match the History range"
         );
-        assert_eq!(finding.evidence[0], "cleanupPeriodDays is 30, the default");
+        assert_eq!(
+            finding.evidence[0],
+            "~/.claude/settings.json leaves cleanupPeriodDays at its default of 30"
+        );
         assert_eq!(
             finding.how,
             "Add \"cleanupPeriodDays\": 90 to ~/.claude/settings.json. \
@@ -382,7 +387,7 @@ mod tests {
         fixture.retention_days = Some(45);
         assert_eq!(
             Retention.evaluate(&fixture.ctx())[0].evidence[0],
-            "cleanupPeriodDays is 45"
+            "cleanupPeriodDays is 45 in ~/.claude/settings.json"
         );
     }
 }

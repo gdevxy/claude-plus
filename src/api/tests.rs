@@ -615,7 +615,10 @@ fn the_insights_route_answers_with_ranked_findings_wins_and_a_recap() {
         (&retention["confidence"], &retention["saving_usd"]),
         (&json!("high"), &json!(null))
     );
-    assert_eq!(retention["evidence"][0], "cleanupPeriodDays is 30");
+    assert_eq!(
+        retention["evidence"][0],
+        "cleanupPeriodDays is 30 in ~/.claude/settings.json"
+    );
 }
 
 #[test]
