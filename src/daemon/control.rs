@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -67,7 +68,22 @@ impl Build<'static> {
 
 impl Build<'_> {
     fn is_older_than(&self, other: &Build) -> bool {
-        is_older(self.version, other.version) || self.schema < other.schema || self.api < other.api
+        self.order(other).is_lt()
+    }
+
+    fn order(&self, other: &Build) -> Ordering {
+        self.api
+            .cmp(&other.api)
+            .then(self.schema.cmp(&other.schema))
+            .then_with(|| {
+                if is_older(self.version, other.version) {
+                    Ordering::Less
+                } else if is_older(other.version, self.version) {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            })
     }
 
     fn of(health: &Health) -> Build<'_> {
@@ -130,7 +146,7 @@ impl<'a> Version<'a> {
 
     fn precedes(&self, other: &Self) -> bool {
         match self.core.cmp(&other.core) {
-            std::cmp::Ordering::Equal => match (self.pre.is_empty(), other.pre.is_empty()) {
+            Ordering::Equal => match (self.pre.is_empty(), other.pre.is_empty()) {
                 (true, _) => false,
                 (false, true) => true,
                 (false, false) => self.pre < other.pre,
@@ -411,6 +427,54 @@ mod tests {
         assert_eq!(
             step(built("0.1.0", 10, 2)),
             Next::KeepNewer(built("0.1.0", 10, 2))
+        );
+    }
+
+    #[test]
+    fn two_builds_never_replace_each_other_back_and_forth() {
+        let builds = [
+            ("0.1.0", 10, 1),
+            ("0.2.0", 9, 1),
+            ("0.1.0", 9, 2),
+            ("0.3.0", 11, 0),
+            ("0.1.0", 10, 1),
+            ("not-a-version", 10, 1),
+        ];
+        for (a_version, a_schema, a_api) in builds {
+            for (b_version, b_schema, b_api) in builds {
+                let a = Build {
+                    version: a_version,
+                    schema: a_schema,
+                    api: a_api,
+                };
+                let b = Build {
+                    version: b_version,
+                    schema: b_schema,
+                    api: b_api,
+                };
+                let a_replaces_b = matches!(
+                    next_step(Status::Running(built(b_version, b_schema, b_api)), &a),
+                    Next::Replace(_)
+                );
+                let b_replaces_a = matches!(
+                    next_step(Status::Running(built(a_version, a_schema, a_api)), &b),
+                    Next::Replace(_)
+                );
+                assert!(!(a_replaces_b && b_replaces_a), "{a:?} and {b:?} swap");
+            }
+        }
+        let ours = Build {
+            version: "0.1.0",
+            schema: 10,
+            api: 1,
+        };
+        assert_eq!(
+            next_step(Status::Running(built("0.2.0", 9, 1)), &ours),
+            Next::Replace(built("0.2.0", 9, 1))
+        );
+        assert_eq!(
+            next_step(Status::Running(built("0.1.0", 9, 2)), &ours),
+            Next::KeepNewer(built("0.1.0", 9, 2))
         );
     }
 

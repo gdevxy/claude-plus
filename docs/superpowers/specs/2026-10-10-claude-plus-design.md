@@ -220,7 +220,7 @@ Claude Code documents the transcript format as internal and subject to change, s
 ### Daemon lifecycle
 
 - The mod runs `claude-plus daemon --ensure` with `$.process.run` at session start (binary resolved from `userConfig.binaryPath`, default `claude-plus` on `PATH`), which returns at once after starting a detached daemon if none answers on the socket.
-- `--ensure` replaces a running daemon that is older in its version, its store schema or its API version, and keeps a newer one.
+- `--ensure` orders two builds by API version, then store schema, then semver version, replaces a running daemon that is older in that order, and keeps one that is the same or newer, so two builds never replace each other back and forth.
 - The mod runs `--ensure` again on `/plus`, every 30 s while the daemon does not answer, and at once when a snapshot shows the daemon is older than the pane.
 - A daemon started by the mod's `$.process.spawn` would die with the module on reload, which is why the daemon detaches itself instead.
 - Single instance is enforced by an exclusive lock on `~/.claude-plus/daemon.lock` and a socket probe, so many concurrent sessions share one daemon.
