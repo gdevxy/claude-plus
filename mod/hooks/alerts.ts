@@ -18,7 +18,7 @@ export function ownAlerts(known: Alerted, session: string | null, model: string 
   if (known.session !== session) return { ...EMPTY_ALERTED, session, model }
   if (model === null || known.model === model) return known
   if (known.model === null) return { ...known, model }
-  return { ...known, model, threshold: null, thresholdAsked: false }
+  return { ...known, model, threshold: null, thresholdAsked: false, contextFired: false }
 }
 
 export function merged(current: Alerted, before: Alerted, after: Alerted): Alerted {

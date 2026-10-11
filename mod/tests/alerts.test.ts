@@ -95,10 +95,12 @@ describe('alerts', () => {
     expect(alertsOf(input({ snapshot: expiring(59_000), known: { ...before, cacheFor: NOW_MS + 59_000 } })).alerts.map(alert => alert.kind)).toEqual(['cache'])
   })
 
-  test('another model forgets the threshold learned for the previous one', () => {
-    const learned: Alerted = { ...KNOWN, model: 'claude-opus-5-5', threshold: 167_000, thresholdAsked: true }
+  test('another model forgets the threshold learned for the previous one and warns about its own context again', () => {
+    const learned: Alerted = { ...KNOWN, model: 'claude-opus-5-5', threshold: 167_000, thresholdAsked: true, contextFired: true }
     const switched = local({ ...near(170_000, null), model: 'claude-sonnet-5-5[1m]' })
-    expect(ownAlerts(learned, 's1', 'claude-sonnet-5-5[1m]')).toEqual({ ...learned, model: 'claude-sonnet-5-5[1m]', threshold: null, thresholdAsked: false })
+    expect(ownAlerts(learned, 's1', 'claude-sonnet-5-5[1m]')).toEqual({ ...learned, model: 'claude-sonnet-5-5[1m]', threshold: null, thresholdAsked: false, contextFired: false })
+    const larger = local({ ...near(930_000, 1_000_000), model: 'claude-sonnet-5-5[1m]' })
+    expect(alertsOf(input({ local: larger, known: learned })).alerts.map(alert => alert.kind)).toEqual(['context'])
     expect(ownAlerts(learned, 's1', 'claude-opus-5-5')).toBe(learned)
     expect(ownAlerts({ ...KNOWN, threshold: 167_000 }, 's1', 'claude-opus-5-5')).toEqual({ ...KNOWN, threshold: 167_000, model: 'claude-opus-5-5' })
     expect(alertsOf(input({ local: switched, known: learned })).alerts).toEqual([])
