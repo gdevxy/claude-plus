@@ -33,7 +33,7 @@ export const RESET_TOLERANCE_MS = 60_000
 export const PAIRS_NEEDED = 20
 
 export type Segment = { text: string; color?: ThemeKey; dim?: true; bold?: true }
-export type Line = { key: string; segments: Segment[]; why?: string; wrap?: true; indent?: number }
+export type Line = { key: string; segments: Segment[]; why?: string; toggle?: string; wrap?: true; indent?: number }
 
 export type ScreenInput = {
   width: number
@@ -281,7 +281,7 @@ export function screen(input: ScreenInput): Line[] {
   return sections.flatMap((section, index) => (index === 0 ? section : [gap(index), ...section]))
 }
 
-function gap(index: number): Line {
+export function gap(index: number): Line {
   return { key: `gap-${index}`, segments: [{ text: ' ' }] }
 }
 
@@ -289,19 +289,19 @@ function fitting(width: number, ...choices: string[]): string {
   return choices.find(choice => choice.length <= width) ?? choices[choices.length - 1] ?? ''
 }
 
-function plain(key: string, text: string, style: Style = {}): Line {
+export function plain(key: string, text: string, style: Style = {}): Line {
   return { key, segments: [{ text, ...style }] }
 }
 
-function prose(key: string, text: string, style: Style = {}, indent = 0): Line {
+export function prose(key: string, text: string, style: Style = {}, indent = 0): Line {
   const line: Line = { key, segments: [{ text, ...style }], wrap: true }
   if (indent > 0) line.indent = indent
   return line
 }
 
-type Style = Omit<Segment, 'text'>
+export type Style = Omit<Segment, 'text'>
 
-function pair(key: string, left: string, right: string, width: number, rightStyle: Style = {}, leftStyle: Style = {}): Line {
+export function pair(key: string, left: string, right: string, width: number, rightStyle: Style = {}, leftStyle: Style = {}): Line {
   const text = spread(left, right, width)
   return {
     key,
@@ -312,13 +312,13 @@ function pair(key: string, left: string, right: string, width: number, rightStyl
   }
 }
 
-function heading(key: string, title: string, width: number, why?: string): Line {
+export function heading(key: string, title: string, width: number, why?: string): Line {
   const line: Line = { key, segments: [{ text: title.padEnd(why === undefined ? width : width - WHY_COLUMNS), bold: true }] }
   if (why !== undefined) line.why = why
   return line
 }
 
-function meter(key: string, label: string, fraction: number, value: string, width: number, color: ThemeKey): Line {
+export function meter(key: string, label: string, fraction: number, value: string, width: number, color: ThemeKey): Line {
   const labelled = label.length > 0 ? `${label} ` : ''
   const cells = bar(fraction, width - labelled.length - value.length - 1)
   return {
@@ -332,7 +332,7 @@ function meter(key: string, label: string, fraction: number, value: string, widt
   }
 }
 
-function notice(input: ScreenInput, width: number): Line[] {
+export function notice(input: Pick<ScreenInput, 'daemon'>, width: number): Line[] {
   const { status, detail } = input.daemon
   if (status === 'ok') return []
   if (status === 'starting') return [prose('daemon', 'Starting the claude-plus daemon…', { dim: true })]
