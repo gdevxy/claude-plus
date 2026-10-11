@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::words::{count, times, tokens};
 use super::{Confidence, Draft, Finding, InsightContext, Rule, RuleId, listed};
@@ -125,11 +125,13 @@ pub struct OversizedMemory;
 
 impl Rule for OversizedMemory {
     fn evaluate(&self, ctx: &InsightContext) -> Vec<Finding> {
-        let mut seen: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut seen: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for memory in ctx.memory {
             for line in memory.text.lines().map(str::trim) {
-                if line.chars().count() >= DUPLICATE_MIN_CHARS {
-                    seen.entry(line).or_default().push(&memory.name);
+                if line.chars().count() >= DUPLICATE_MIN_CHARS
+                    && line.chars().any(char::is_alphanumeric)
+                {
+                    seen.entry(line).or_default().insert(&memory.name);
                 }
             }
         }
@@ -188,7 +190,7 @@ impl Rule for OversizedMemory {
             confidence: Confidence::Medium,
             how: format!(
                 "Reads the CLAUDE.md and memory files Claude Code loads into every request in this project. \
-                 The saving counts lines of {DUPLICATE_MIN_CHARS} characters or more that appear in more than one place \
+                 The saving counts lines of {DUPLICATE_MIN_CHARS} characters or more, with a letter or digit, that appear in more than one file \
                  and anything past 40,000 characters in a file, priced on every main-thread request of the last 14 days."
             ),
         };
@@ -302,36 +304,46 @@ mod tests {
     }
 
     #[test]
-    fn repeated_memory_lines_and_oversized_files_are_priced_as_prose() {
+    fn lines_repeated_across_memory_files_and_oversized_files_are_priced_as_prose() {
         let mut fixture = Fixture::new();
         busy(&mut fixture);
         let rule = "Always run cargo fmt before committing any change.";
+        let table = "|------|--------|-------|";
+        let own = "Keep this repeated line within one file only.";
         let long = "x".repeat(LARGE_MEMORY_CHARS as usize + 10_500);
-        let project = format!("# Rules\n{rule}\nshort line\n{long}");
+        let project = format!("# Rules\n{rule}\n{table}\nshort line\n{long}");
+        let global = format!("{rule}\n  {rule}  \n{table}\n{own}\n{own}\nshort line\n");
         let excess = project.len() as u64 - LARGE_MEMORY_CHARS;
         fixture.memory = vec![
             memory("CLAUDE.md", &project),
-            memory(
-                "~/.claude/CLAUDE.md",
-                &format!("{rule}\n  {rule}  \nshort line\n"),
-            ),
+            memory("~/.claude/CLAUDE.md", &global),
         ];
         let finding = &OversizedMemory.evaluate(&fixture.ctx())[0];
         assert_eq!(
             finding.tip,
-            "remove 2\u{a0}repeated lines from your memory files"
+            "remove 1\u{a0}repeated line from your memory files"
         );
+        let prose = |chars: usize| tokens(fixture.ratios.tokens(chars as u64, TextKind::Prose));
         assert_eq!(
             finding.evidence,
             [
-                "CLAUDE.md: ~14.4k\u{a0}tokens on every request",
-                "~/.claude/CLAUDE.md: ~33\u{a0}tokens on every request",
-                "2\u{a0}lines repeated in your memory files, ~29\u{a0}tokens",
+                format!(
+                    "CLAUDE.md: ~{}\u{a0}tokens on every request",
+                    prose(project.len())
+                ),
+                format!(
+                    "~/.claude/CLAUDE.md: ~{}\u{a0}tokens on every request",
+                    prose(global.len())
+                ),
+                format!(
+                    "1\u{a0}line repeated in your memory files, ~{}\u{a0}tokens",
+                    prose(rule.len())
+                ),
             ]
         );
         let carried = fixture
             .ratios
-            .tokens(2 * rule.len() as u64 + excess, TextKind::Prose);
+            .tokens(rule.len() as u64 + excess, TextKind::Prose);
         let expected = carried_on_busy(carried as f64) / 2.0;
         assert!((finding.saving_usd.unwrap() - expected).abs() < 1e-9);
     }
