@@ -1,6 +1,6 @@
-import type { HttpInit, HttpResponse, JsonValue, SessionMeasureInput } from 'claude-code'
+import type { HttpInit, HttpResponse, JsonValue, SessionMeasureInput, SessionUsage } from 'claude-code'
 
-import type { Measure, Snapshot } from '../types'
+import type { ContextReport, LiveContext, Measure, Snapshot } from '../types'
 
 export const TIMEOUT_MS = 500
 export const OUTBOX_LIMIT = 256
@@ -20,6 +20,11 @@ export type SnapshotReply =
   | { kind: 'snapshot'; snapshot: Snapshot }
   | { kind: 'rebuilding' }
   | { kind: 'outdated'; newer: 'daemon' | 'pane' }
+  | { kind: 'failed'; reason: string }
+
+export type ContextReply =
+  | { kind: 'context'; report: ContextReport }
+  | { kind: 'rebuilding' }
   | { kind: 'failed'; reason: string }
 
 export type PlusEvent = { id: string; session: string; kind: string; ts_ms: number; data: { [key: string]: JsonValue } }
@@ -84,6 +89,87 @@ export function parseSnapshot(text: string): Snapshot | null {
   const live = value.live
   if (!isObject(value.totals) || !isObject(live) || !isObject(live.cache) || !Array.isArray(live.limits)) return null
   return value as unknown as Snapshot
+}
+
+export function contextPath(session: string): string {
+  return `/context?session=${encodeURIComponent(session)}`
+}
+
+export async function fetchContext(io: Io, socket: string, session: string): Promise<ContextReply> {
+  const reply = await request(io, socket, contextPath(session))
+  if (!reply.ok) {
+    return reply.status === REBUILDING_STATUS ? { kind: 'rebuilding' } : { kind: 'failed', reason: reply.reason }
+  }
+  const report = parseContext(reply.text)
+  return report === null ? { kind: 'failed', reason: 'unreadable context' } : { kind: 'context', report }
+}
+
+export function parseContext(text: string): ContextReport | null {
+  const value = safeJson(text)
+  if (!isObject(value) || value.v !== 1 || typeof value.session !== 'string') return null
+  const lists = [value.items, value.dead_weight, value.tool_results]
+  if (!lists.every(Array.isArray) || !isObject(value.config) || !Array.isArray(value.config.groups)) return null
+  if (value.live !== null && !(isObject(value.live) && Array.isArray(value.live.categories))) return null
+  return value as unknown as ContextReport
+}
+
+export function breakdownOf(usage: SessionUsage, atMs: number): LiveContext | null {
+  const breakdown = usage.context.breakdown
+  if (breakdown === undefined) return null
+  return {
+    ts_ms: atMs,
+    model: breakdown.model,
+    total_tokens: breakdown.totalTokens,
+    max_tokens: Math.max(breakdown.rawMaxTokens, breakdown.maxTokens),
+    percentage: breakdown.percentage,
+    auto_compact_threshold: breakdown.autoCompactThreshold ?? null,
+    categories: breakdown.categories.map(category => ({
+      name: category.name,
+      tokens: category.tokens,
+      color: category.color,
+      kind: category.isDeferred ? 'deferred' : category.kind,
+    })),
+  }
+}
+
+export function usageData(usage: SessionUsage): { [key: string]: JsonValue } | null {
+  const b = usage.context.breakdown
+  if (b === undefined) return null
+  return {
+    model: b.model,
+    totalTokens: b.totalTokens,
+    maxTokens: b.maxTokens,
+    rawMaxTokens: b.rawMaxTokens,
+    percentage: b.percentage,
+    autocompactSource: b.autocompactSource,
+    autoCompactThreshold: b.autoCompactThreshold ?? null,
+    isAutoCompactEnabled: b.isAutoCompactEnabled,
+    categories: b.categories.map(c => ({ name: c.name, tokens: c.tokens, color: c.color, isDeferred: c.isDeferred, kind: c.kind })),
+    memoryFiles: b.memoryFiles.map(f => ({ path: f.path, type: f.type, tokens: f.tokens })),
+    mcpTools: b.mcpTools.map(t => ({ name: t.name, serverName: t.serverName, tokens: t.tokens, isLoaded: t.isLoaded })),
+    agents: b.agents.map(a => ({ agentType: a.agentType, source: a.source, tokens: a.tokens })),
+    skills:
+      b.skills === undefined
+        ? null
+        : {
+            totalSkills: b.skills.totalSkills,
+            includedSkills: b.skills.includedSkills,
+            tokens: b.skills.tokens,
+            skillFrontmatter: b.skills.skillFrontmatter.map(skill => ({
+              name: skill.name,
+              source: skill.source,
+              pluginName: skill.pluginName ?? null,
+              tokens: skill.tokens,
+            })),
+          },
+    slashCommands:
+      b.slashCommands === undefined
+        ? null
+        : { totalCommands: b.slashCommands.totalCommands, includedCommands: b.slashCommands.includedCommands, tokens: b.slashCommands.tokens },
+    apiUsage: b.apiUsage === null ? null : { ...b.apiUsage },
+    contextTokens: usage.context.tokens ?? null,
+    contextWindow: usage.context.window,
+  }
 }
 
 export function measureOf(e: SessionMeasureInput, atMs: number): Measure {

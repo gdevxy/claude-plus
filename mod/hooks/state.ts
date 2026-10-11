@@ -62,6 +62,7 @@ export const EMPTY_LOCAL: Local = {
   working: false,
   measure: null,
   step: null,
+  breakdown: null,
 }
 
 export const MISSING_EXIT = 127

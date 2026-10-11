@@ -1,4 +1,4 @@
-export type PlusView = 'live'
+export type PlusView = 'live' | 'context'
 
 export type Tokens = {
   input: number
@@ -108,6 +108,74 @@ export type Local = {
   working: boolean
   measure: Measure | null
   step: Step | null
+  breakdown: LiveContext | null
+}
+
+export type CategoryKind = 'used' | 'free' | 'buffer' | 'deferred'
+
+export type BreakdownCategory = { name: string; tokens: number; color: string; kind: CategoryKind }
+
+export type LiveContext = {
+  ts_ms: number
+  model: string
+  total_tokens: number
+  max_tokens: number
+  percentage: number
+  auto_compact_threshold: number | null
+  categories: BreakdownCategory[]
+}
+
+export type Part = 'system' | 'memory' | 'skills' | 'mcp' | 'agents' | 'files' | 'hooks' | 'reminders' | 'messages'
+
+export type Share = { part: Part; tokens: number }
+
+export type HistoryPoint = { ts_ms: number; prompt_tokens: number; injected_tokens: number; compacted: boolean }
+
+export type History = {
+  first_request_ms: number
+  measured_tokens: number
+  first_message_tokens: number
+  scale: number
+  initial: Share[]
+  now: Share[]
+  injected_later_tokens: number
+  compactions: number
+  points: HistoryPoint[]
+}
+
+export type Ratios = { prose: number; code: number; schema: number; calibrated: boolean; pairs: number }
+
+export type ItemKind = 'memory_file' | 'skill' | 'mcp_server' | 'agent' | 'output_style'
+
+export type ContextItem = {
+  kind: ItemKind
+  name: string
+  detail: string | null
+  tokens: number
+  estimated: boolean
+  uses_session: number | null
+  uses_14d: number | null
+}
+
+export type ToolResult = { tool: string | null; ts_ms: number; chars: number; images: number; tokens: number }
+
+export type SourceKind = 'claude_md' | 'memory' | 'skill' | 'agent' | 'output_style' | 'mcp_server' | 'plugin'
+
+export type Loading = 'always' | 'listing' | 'on_demand' | 'off' | 'unknown'
+
+export type ConfigGroup = { kind: SourceKind; loading: Loading; count: number; tokens: number }
+
+export type ContextReport = {
+  session: string
+  generated_at_ms: number
+  project_dir: string | null
+  live: LiveContext | null
+  history: History | null
+  ratios: Ratios
+  items: ContextItem[]
+  dead_weight: ContextItem[]
+  tool_results: ToolResult[]
+  config: { scanned_at_ms: number; groups: ConfigGroup[] }
 }
 
 export type DaemonStatus = 'starting' | 'ok' | 'rebuilding' | 'unreachable' | 'outdated' | 'behind' | 'newer' | 'missing' | 'failed'
@@ -123,6 +191,7 @@ declare module 'claude-code' {
     plus: {
       view: PlusView
       snapshot: Shaped<Snapshot | null>
+      context: Shaped<ContextReport | null>
       local: Shaped<Local>
       pane: PaneState
       daemon: Daemon

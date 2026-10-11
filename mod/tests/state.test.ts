@@ -195,7 +195,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
   },
   {
     name: 'a fresh session before the first prompt',
-    state: { snapshot: null, local: { session: 's1', model: null, effort: null, turns: 0, working: false, measure: null, step: null }, daemon: { status: 'starting', detail: null } },
+    state: { snapshot: null, local: { session: 's1', model: null, effort: null, turns: 0, working: false, measure: null, step: null, breakdown: null }, daemon: { status: 'starting', detail: null } },
     rows: {
       40: [
         ' Starting the claude-plus daemon…',

@@ -2,8 +2,25 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { HttpInit, HttpResponse } from 'claude-code'
 
 import type { Io, PlusEvent } from '../hooks/client'
-import { OUTBOX_LIMIT, Outbox, eventId, eventsBody, fetchSnapshot, measureOf, parseSnapshot, request, send, snapshotPath, socketPath } from '../hooks/client'
-import { snapshot } from './fixtures'
+import {
+  OUTBOX_LIMIT,
+  Outbox,
+  breakdownOf,
+  contextPath,
+  eventId,
+  eventsBody,
+  fetchContext,
+  fetchSnapshot,
+  measureOf,
+  parseContext,
+  parseSnapshot,
+  request,
+  send,
+  snapshotPath,
+  socketPath,
+  usageData,
+} from '../hooks/client'
+import { NOW_MS, contextReport, snapshot, usage } from './fixtures'
 
 function answering(response: Promise<HttpResponse>, seen: [string, HttpInit][] = []): Io {
   return {
@@ -142,5 +159,71 @@ describe('daemon client', () => {
     outbox.putBack(taken.slice(0, 2))
     expect(outbox.take().map(queued => queued.ts_ms)).toEqual([4, 5, 999])
     expect(eventsBody([event(1)])).toBe('{"events":[{"id":"e-1","session":"s1","kind":"turn.step","ts_ms":1,"data":{}}]}')
+  })
+
+  test('a context report is fetched for the session and a rebuilding daemon is told apart', async () => {
+    const seen: [string, HttpInit][] = []
+    const good = JSON.stringify({ v: 1, ...contextReport() })
+    const serving = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: good }), seen)
+    expect(await fetchContext(serving, '/s.sock', 'a/b')).toEqual({ kind: 'context', report: { v: 1, ...contextReport() } })
+    expect(seen[0]?.[0]).toBe(`http://claude-plus${contextPath('a/b')}`)
+    expect(contextPath('a/b')).toBe('/context?session=a%2Fb')
+    const rebuilding = answering(Promise.resolve({ status: 503, ok: false, headers: {}, text: '{"error":"the store is being rebuilt"}' }))
+    expect(await fetchContext(rebuilding, '/s.sock', 's1')).toEqual({ kind: 'rebuilding' })
+    const broken = answering(Promise.resolve({ status: 500, ok: false, headers: {}, text: '{"error":"boom"}' }))
+    expect(await fetchContext(broken, '/s.sock', 's1')).toEqual({ kind: 'failed', reason: '500: boom' })
+    const garbled = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: '{"v":1}' }))
+    expect(await fetchContext(garbled, '/s.sock', 's1')).toEqual({ kind: 'failed', reason: 'unreadable context' })
+  })
+
+  test('only a version 1 context report with its lists is accepted', () => {
+    const good = { v: 1, ...contextReport() }
+    expect(parseContext(JSON.stringify(good))).toEqual(good)
+    expect(parseContext(JSON.stringify({ ...good, live: null }))?.live).toBeNull()
+    expect(parseContext(JSON.stringify({ ...good, v: 2 }))).toBeNull()
+    expect(parseContext(JSON.stringify({ ...good, items: {} }))).toBeNull()
+    expect(parseContext(JSON.stringify({ ...good, config: { groups: null } }))).toBeNull()
+    expect(parseContext(JSON.stringify({ ...good, live: { categories: 'x' } }))).toBeNull()
+    expect(parseContext('nope')).toBeNull()
+  })
+
+  test('a full usage becomes the live breakdown the pane draws', () => {
+    expect(breakdownOf(usage(), NOW_MS)).toEqual({ ...contextReport().live!, ts_ms: NOW_MS })
+    const bare = usage()
+    delete bare.context.breakdown
+    expect(breakdownOf(bare, NOW_MS)).toBeNull()
+    expect(usageData(bare)).toBeNull()
+  })
+
+  test('the forwarded usage keeps what the daemon reads and drops the grid', () => {
+    const data = usageData(usage())
+    expect(data).not.toBeNull()
+    expect(Object.keys(data!)).toEqual([
+      'model',
+      'totalTokens',
+      'maxTokens',
+      'rawMaxTokens',
+      'percentage',
+      'autocompactSource',
+      'autoCompactThreshold',
+      'isAutoCompactEnabled',
+      'categories',
+      'memoryFiles',
+      'mcpTools',
+      'agents',
+      'skills',
+      'slashCommands',
+      'apiUsage',
+      'contextTokens',
+      'contextWindow',
+    ])
+    expect(data!.skills).toEqual({
+      totalSkills: 2,
+      includedSkills: 2,
+      tokens: 2_600,
+      skillFrontmatter: [{ name: 'superpowers:brainstorming', source: 'plugin', pluginName: 'superpowers', tokens: 2_300 }],
+    })
+    expect(data!.slashCommands).toBeNull()
+    expect(JSON.parse(JSON.stringify(data))).toEqual(data)
   })
 })
