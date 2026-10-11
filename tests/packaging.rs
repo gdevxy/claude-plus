@@ -141,7 +141,9 @@ fn a_truncated_installer_fails_and_changes_nothing() {
     let temp = scratch();
     let dist = release(temp.path(), "ada");
     let full = std::fs::read_to_string(dist.join("install.sh")).unwrap();
-    let guard = full.find("trap ").expect("the installer sets a guard first");
+    let guard = full
+        .find("trap ")
+        .expect("the installer sets a guard first");
     let body_starts = guard + full[guard..].find('\n').unwrap() + 1;
     let mut cuts: Vec<usize> = full[body_starts..]
         .match_indices('\n')
@@ -161,7 +163,10 @@ fn a_truncated_installer_fails_and_changes_nothing() {
         let output = install(
             &truncated,
             &home,
-            &[("CLAUDE_PLUS_DOWNLOAD_URL", &url), ("TMPDIR", tmp.to_str().unwrap())],
+            &[
+                ("CLAUDE_PLUS_DOWNLOAD_URL", &url),
+                ("TMPDIR", tmp.to_str().unwrap()),
+            ],
         );
         assert!(
             !output.status.success(),
