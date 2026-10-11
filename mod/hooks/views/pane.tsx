@@ -9,7 +9,20 @@ export const SHORT_BRAND = '✻'
 
 export type Tab = { key: string; hotkey: string; label: string; short: string; isActive: boolean; onPress: () => void }
 
-export type Control = { key: string; hotkey: string; label: string; onPress: () => void }
+export type Choice = { text: string; isActive: boolean }
+
+export type Control = { key: string; hotkey: string; label: string; choices: Choice[]; onPress: () => void }
+
+const CONTROLS_GAP = 2
+
+function choicesText(choices: readonly Choice[]): string {
+  return choices.map(choice => choice.text).join(' ')
+}
+
+function choicesFit(inner: number, controls: readonly Control[]): boolean {
+  const width = controls.reduce((sum, control) => sum + control.hotkey.length + 2 + choicesText(control.choices).length, 0)
+  return width + CONTROLS_GAP * Math.max(0, controls.length - 1) <= inner
+}
 
 export function buttonsWidth(buttons: readonly { hotkey: string; label: string }[]): number {
   return buttons.reduce((sum, button) => sum + button.hotkey.length + 2 + button.label.length, 0) + Math.max(0, buttons.length - 1)
@@ -44,6 +57,7 @@ export function PaneBody({
   const { Box, Text, Button } = ui
   const inner = Math.max(1, width - 2 * PADDING)
   const shown = shownTabs(inner, tabs)
+  const expanded = choicesFit(inner, controls)
   return (
     <Box flexDirection="column" width={width} paddingX={PADDING}>
       <Box key="header" width={inner} justifyContent="space-between">
@@ -59,10 +73,21 @@ export function PaneBody({
       <Text> </Text>
       {controls.length > 0
         ? [
-            <Box key="controls" width={inner} gap={2}>
-              {controls.map(control => (
-                <Button key={control.key} hotkey={control.hotkey} plain label={control.label} onPress={control.onPress} />
-              ))}
+            <Box key="controls" width={inner} gap={CONTROLS_GAP}>
+              {controls.map(control =>
+                expanded ? (
+                  <Button key={control.key} hotkey={control.hotkey} plain label={control.label} onPress={control.onPress}>
+                    {control.choices.flatMap((choice, index) => [
+                      ...(index > 0 ? [' '] : []),
+                      <Text bold={choice.isActive} dimColor={!choice.isActive}>
+                        {choice.text}
+                      </Text>,
+                    ])}
+                  </Button>
+                ) : (
+                  <Button key={control.key} hotkey={control.hotkey} plain label={control.label} onPress={control.onPress} />
+                ),
+              )}
             </Box>,
             <Text key="controls-gap"> </Text>,
           ]

@@ -272,6 +272,23 @@ fn uninstall_asks_first_and_purge_deletes_the_data_dir() {
 }
 
 #[test]
+fn purge_deletes_the_data_dir_of_a_daemon_stopped_by_hand() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    cmd(&env, &["daemon", "stop"]).assert().success();
+    assert!(env.plus.join("daemon.stopped").exists());
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "✻ Deleted {}\n",
+            env.plus.display()
+        )));
+    assert!(!env.plus.exists());
+}
+
+#[test]
 fn purge_refuses_a_data_dir_that_holds_the_claude_dir_before_changing_anything() {
     let env = env();
     let parent = env.claude.parent().unwrap();

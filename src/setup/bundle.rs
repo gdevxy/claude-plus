@@ -215,7 +215,8 @@ mod tests {
         }
         assert!(
             names.iter().all(|name| !name.starts_with("mod/tests/")
-                && !name.starts_with("mod/.claude-plugin/types/")),
+                && !name.starts_with("mod/.claude-plugin/types/")
+                && *name != "mod/tsconfig.json"),
             "{names:?}"
         );
     }

@@ -32,6 +32,13 @@ pub enum Ensured {
     KeptNewer(Health),
     Started(Health),
     Restarted { previous: Health, health: Health },
+    LeftStopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    Respect,
+    Override,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,11 +184,15 @@ pub fn status(paths: &Paths) -> Result<Status> {
     }
 }
 
-pub fn ensure(paths: &Paths) -> Result<Ensured> {
+pub fn ensure(paths: &Paths, policy: Stop) -> Result<Ensured> {
     check_socket_path(&paths.socket())?;
+    if policy == Stop::Override {
+        clear_stopped(paths)?;
+    }
     match next_step(status(paths)?, &Build::this()) {
         Next::Keep(health) => Ok(Ensured::Running(health)),
         Next::KeepNewer(health) => Ok(Ensured::KeptNewer(health)),
+        Next::Start if policy == Stop::Respect && was_stopped(paths) => Ok(Ensured::LeftStopped),
         Next::Start => start(paths),
         Next::Replace(old) => {
             stop(paths)?;
@@ -193,11 +204,35 @@ pub fn ensure(paths: &Paths) -> Result<Ensured> {
                 restarted => restarted,
             })
         }
-        Next::Wait(pid) => wait_for_daemon(paths, pid),
+        Next::Wait(pid) => wait_for_daemon(paths, pid, policy),
     }
 }
 
-fn wait_for_daemon(paths: &Paths, pid: Option<u32>) -> Result<Ensured> {
+pub fn was_stopped(paths: &Paths) -> bool {
+    paths.daemon_stopped().exists()
+}
+
+pub fn mark_stopped(paths: &Paths) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(paths.daemon_stopped())
+        .map(drop)
+        .with_context(|| format!("cannot write {}", paths.daemon_stopped().display()))
+}
+
+pub fn clear_stopped(paths: &Paths) -> Result<()> {
+    match std::fs::remove_file(paths.daemon_stopped()) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error)
+            .with_context(|| format!("cannot remove {}", paths.daemon_stopped().display())),
+        _ => Ok(()),
+    }
+}
+
+fn wait_for_daemon(paths: &Paths, pid: Option<u32>, policy: Stop) -> Result<Ensured> {
     let client = Client::new(&paths.socket()).with_timeout(PROBE_TIMEOUT);
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
@@ -205,6 +240,9 @@ fn wait_for_daemon(paths: &Paths, pid: Option<u32>) -> Result<Ensured> {
             return Ok(Ensured::Running(health));
         }
         if probe(&paths.daemon_lock())? == Holder::Free {
+            if policy == Stop::Respect && was_stopped(paths) {
+                return Ok(Ensured::LeftStopped);
+            }
             return start(paths);
         }
         if Instant::now() >= deadline {
@@ -272,6 +310,9 @@ fn start(paths: &Paths) -> Result<Ensured> {
         match (exited, client.health()) {
             (None, Ok(health)) if health.pid == child.id() => return Ok(Ensured::Started(health)),
             (Some(exit), Ok(health)) if exit.success() => return Ok(Ensured::Running(health)),
+            (Some(exit), Err(_)) if exit.success() && was_stopped(paths) => {
+                return Ok(Ensured::LeftStopped);
+            }
             (Some(exit), _) if !exit.success() => bail!(
                 "the claude-plus daemon exited at start ({exit}), see {}",
                 paths.daemon_log().display()

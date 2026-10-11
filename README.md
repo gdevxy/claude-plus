@@ -90,8 +90,8 @@ Run `claude-plus uninstall` before you remove the binary with `brew uninstall cl
 | `claude-plus doctor` | Check the binary, daemon, mod, Claude Code version and transcript retention. |
 | `claude-plus import` | Read new transcripts into the store, with progress. |
 | `claude-plus reindex` | Rebuild derived tables from stored records. |
-| `claude-plus daemon [--ensure]` | Run the daemon, or start it detached unless one answers. |
-| `claude-plus daemon stop` | Stop the running daemon. |
+| `claude-plus daemon [--ensure [--unless-stopped]]` | Run the daemon, or start it detached unless one answers; with `--unless-stopped`, leave one stopped by `daemon stop` stopped. |
+| `claude-plus daemon stop` | Stop the running daemon and keep it stopped: open panes leave it alone until `/plus`, a new session or `--ensure` starts it. |
 
 ## Privacy
 

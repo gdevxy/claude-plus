@@ -178,7 +178,7 @@ impl From<ModelTotal> for ModelCost {
 mod tests {
     use super::*;
     use crate::cache_model::{Cache, CacheState, Rebuild, RebuildCause, Ttl, TtlSource};
-    use crate::forecast::{Alternative, Forecast};
+    use crate::forecast::{Forecast, ModelCost};
     use crate::limits::{Calibration, LimitWindow, Pace};
 
     const SNAPSHOT_V1: &str = r#"{
@@ -253,11 +253,18 @@ mod tests {
       "cold_usd": 0.4,
       "warm_pct_5h": 0.015,
       "cold_pct_5h": 0.2,
-      "alternative": {
-        "model": "claude-sonnet-5-5",
-        "first_usd": 0.2,
-        "next_usd": 0.02
-      }
+      "lineup": [
+        {
+          "model": "claude-opus-5-5",
+          "warm_usd": 0.03,
+          "cold_usd": 0.4
+        },
+        {
+          "model": "claude-sonnet-5-5",
+          "warm_usd": 0.02,
+          "cold_usd": 0.2
+        }
+      ]
     },
     "limits": [
       {
@@ -313,11 +320,18 @@ mod tests {
                 cold_usd: Some(0.4),
                 warm_pct_5h: Some(0.015),
                 cold_pct_5h: Some(0.2),
-                alternative: Some(Alternative {
-                    model: "claude-sonnet-5-5".into(),
-                    first_usd: 0.2,
-                    next_usd: 0.02,
-                }),
+                lineup: vec![
+                    ModelCost {
+                        model: "claude-opus-5-5".into(),
+                        warm_usd: 0.03,
+                        cold_usd: 0.4,
+                    },
+                    ModelCost {
+                        model: "claude-sonnet-5-5".into(),
+                        warm_usd: 0.02,
+                        cold_usd: 0.2,
+                    },
+                ],
             }),
             limits: vec![LimitWindow {
                 window: "five_hour".into(),
@@ -415,6 +429,19 @@ mod tests {
         );
         let parsed: Snapshot = serde_json::from_str(SNAPSHOT_V1).unwrap();
         assert_eq!(parsed, snapshot);
+    }
+
+    #[test]
+    fn a_forecast_from_a_daemon_before_the_lineup_reads_with_no_lineup() {
+        let mut older: serde_json::Value = serde_json::from_str(SNAPSHOT_V1).unwrap();
+        let forecast = older["live"]["forecast"].as_object_mut().unwrap();
+        forecast.remove("lineup").unwrap();
+        forecast.insert(
+            "alternative".into(),
+            serde_json::json!({ "model": "claude-sonnet-5-5", "first_usd": 0.2, "next_usd": 0.02 }),
+        );
+        let parsed: Snapshot = serde_json::from_value(older).unwrap();
+        assert_eq!(parsed.live.forecast.unwrap().lineup, []);
     }
 
     #[test]

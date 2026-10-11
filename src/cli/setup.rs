@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::daemon::{ensured, stopped};
-use crate::daemon::control::{self, is_older};
+use crate::daemon::control::{self, Stop, is_older};
 use crate::paths::{DAEMON_FILES, DATABASE_FILES, MARKER, Paths};
 use crate::setup::bundle::{self, MARKETPLACE, PLUGIN_ID};
 use crate::setup::claude::{self, ClaudeCode, Outcome, Step};
@@ -67,7 +67,7 @@ pub fn install(paths: &Paths, yes: bool) -> Result<()> {
     {
         say!("✻ The plus mod v{} is installed", bundle::VERSION);
     }
-    for line in ensured(&control::ensure(paths)?) {
+    for line in ensured(&control::ensure(paths, Stop::Override)?) {
         say!("{line}");
     }
     if let Some(warning) = path_warning(&std::env::current_exe()?, std::env::var_os("PATH")) {

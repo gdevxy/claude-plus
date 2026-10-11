@@ -30,7 +30,7 @@ describe('context screen', () => {
   test('draws the live breakdown, the largest items and the setup at 40 columns', () => {
     expect(frame(contextScreen(input()))).toEqual([
       'Context · Opus 5.5          46k / 200k',
-      '███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+      '███████▋░░░░░░░░░░░░░░░░░░░│░░░░░  23%',
       'Auto-compact at 167k · 121k to go',
       ' ',
       'By category                          ?',
@@ -124,7 +124,7 @@ describe('context screen', () => {
       'claude-plus is not installed yet. Install it, or set its path in the plugin options',
       ' ',
       'Context · Opus 5.5          46k / 200k',
-      '███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+      '███████▋░░░░░░░░░░░░░░░░░░░│░░░░░  23%',
       'Auto-compact at 167k · 121k to go',
       ' ',
       'By category                          ?',
@@ -238,6 +238,30 @@ describe('context screen', () => {
       { text: '46k', color: 'claude', bold: true },
       { text: ' / 200k' },
     ])
+  })
+
+  test('notes the model window when compaction caps the window below it', () => {
+    const report = contextReport()
+    const live = { ...report.live!, model: 'claude-sonnet-5-5', total_tokens: 51_200, max_tokens: 400_000, percentage: 13, auto_compact_threshold: 367_000 }
+    const measure = { ...local().measure!, contextTokens: 51_200, contextWindow: 1_000_000, contextPercent: 5 }
+    const lines = contextScreen(input({ width: 60, report: { ...report, live }, local: local({ model: 'claude-sonnet-5-5[1m]', measure }) }))
+    expect(line(lines, 'ctx-head').segments).toEqual([
+      { text: `Context · Sonnet 5.5${' '.repeat(58 - 20 - 23)}`, bold: true },
+      { text: '51.2k', color: 'claude', bold: true },
+      { text: ' / 400k' },
+      { text: ' · 1M model', dim: true },
+    ])
+    const narrow = contextScreen(input({ width: 40, report: { ...report, live }, local: local({ model: 'claude-sonnet-5-5', measure }) }))
+    expect(text(line(narrow, 'ctx-head'))).toBe(`Context · Sonnet 5.5${' '.repeat(38 - 20 - 12)}51.2k / 400k`)
+    const other = contextScreen(input({ width: 60, report: { ...report, live }, local: local({ model: 'claude-opus-5-5', measure }) }))
+    expect(text(line(other, 'ctx-head')).endsWith('51.2k / 400k')).toBe(true)
+  })
+
+  test('marks the auto-compact point on the bar until it is passed', () => {
+    expect(text(line(contextScreen(input()), 'ctx-bar')).indexOf('│')).toBe(Math.floor((167_000 / 200_000) * 33))
+    const report = contextReport()
+    const full = contextReport({ live: { ...report.live!, total_tokens: 170_000, percentage: 85 } })
+    expect(text(line(contextScreen(input({ report: full })), 'ctx-bar'))).not.toContain('│')
   })
 
   test('explains which tool results are listed once asked', () => {

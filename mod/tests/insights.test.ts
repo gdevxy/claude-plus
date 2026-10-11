@@ -101,7 +101,7 @@ describe('insights screen', () => {
     expect(failed.map(text)).toEqual(['Insights', 'Could not look for savings: no answer within 3000 ms', 'Trying again every 60 s'])
     expect(failed.slice(1).map(found => found.segments[0]?.dim)).toEqual([true, true])
     const older = insightsScreen(input({ report: null, failure: { kind: 'missing', reason: 'this daemon has no Insights' } }))
-    expect(older.map(text)).toEqual(['Insights', 'This claude-plus daemon is older than the pane and has no Insights', 'Run claude-plus daemon stop to restart it'])
+    expect(older.map(text)).toEqual(['Insights', 'This claude-plus daemon is older than the pane and has no Insights', 'Run claude-plus daemon stop, then /plus'])
     const kept = insightsScreen(input({ failure: { kind: 'failed', reason: '500: database is locked' } }))
     expect(line(kept, 'ins-stale').segments.map(segment => [segment.text, segment.dim])).toEqual([['Could not refresh: 500: database is locked', true]])
     expect(kept.indexOf(line(kept, 'ins-stale'))).toBe(kept.indexOf(line(kept, 'ins-sub')) + 1)

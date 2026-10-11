@@ -83,6 +83,10 @@ impl Paths {
         self.data_dir.join("daemon.lock")
     }
 
+    pub fn daemon_stopped(&self) -> PathBuf {
+        self.data_dir.join("daemon.stopped")
+    }
+
     pub fn daemon_log(&self) -> PathBuf {
         self.data_dir.join("daemon.log")
     }
@@ -152,7 +156,13 @@ impl Paths {
 pub const MARKER: &str = ".claude-plus-data";
 
 pub const DATABASE_FILES: &[&str] = &["data.db-wal", "data.db-shm", "data.db-journal"];
-pub const DAEMON_FILES: &[&str] = &["daemon.sock", "daemon.lock", "daemon.log", "daemon.log.1"];
+pub const DAEMON_FILES: &[&str] = &[
+    "daemon.sock",
+    "daemon.lock",
+    "daemon.log",
+    "daemon.log.1",
+    "daemon.stopped",
+];
 const MARKER_TEXT: &str =
     "claude-plus keeps its data here; claude-plus uninstall --purge deletes what it wrote\n";
 

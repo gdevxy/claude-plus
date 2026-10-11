@@ -1,5 +1,5 @@
 import type { Daemon, Finding, InsightsFailure, InsightsReport, Recap } from '../types'
-import { money, percent } from './format'
+import { approx, money, percent } from './format'
 import type { Line } from './state'
 import { MIN_CONTENT, PADDING, WHY_COLUMNS, fitting, gap, notice, pair, plain, prose } from './state'
 
@@ -20,7 +20,7 @@ export type InsightsInput = {
 }
 
 export function weekly(usd: number): string {
-  return `~${money(usd)}/week`
+  return `${approx(usd)}/week`
 }
 
 export function capitalized(text: string): string {
@@ -83,7 +83,7 @@ function failed(failure: InsightsFailure): Line[] {
   if (failure.kind === 'missing') {
     return [
       prose('ins-failed', 'This claude-plus daemon is older than the pane and has no Insights', { dim: true }),
-      prose('ins-retry', 'Run claude-plus daemon stop to restart it', { dim: true }),
+      prose('ins-retry', 'Run claude-plus daemon stop, then /plus', { dim: true }),
     ]
   }
   return [

@@ -1,7 +1,7 @@
 import type { BoxProps, ButtonProps, ElementConstructor, RasterProps, TextProps } from 'claude-code'
 
 import type { Grid } from '../chart'
-import { encode, runs } from '../chart'
+import { encode, glowCell, runs } from '../chart'
 import type { Palette } from '../palette'
 import type { Line, Segment } from '../state'
 
@@ -12,12 +12,43 @@ export type Ui = {
   Raster?: ElementConstructor<RasterProps>
 }
 
+export const GLOW_LOW = 0.25
+export const GLOW_HIGH = 0.75
+export const HEARTBEAT_KEY = 'heartbeat'
+
 export function Piece({ ui, segment }: { ui: Ui; segment: Segment }) {
   const { Text } = ui
+  const glow = segment.glow
+  const dim = segment.dim ?? (glow !== undefined && glow < GLOW_LOW ? true : undefined)
+  const bold = segment.bold ?? (glow !== undefined && glow > GLOW_HIGH ? true : undefined)
   return (
-    <Text color={segment.color} dimColor={segment.dim} bold={segment.bold}>
+    <Text color={segment.color} dimColor={dim} bold={bold}>
       {segment.text}
     </Text>
+  )
+}
+
+function glowing(ui: Ui, line: Line, palette: Palette | null) {
+  const { Box, Text, Raster } = ui
+  const index = line.segments.findIndex(segment => segment.glow !== undefined)
+  const segment = line.segments[index]
+  if (Raster === undefined || palette === null || line.toggle !== undefined || segment?.color === undefined || segment.glow === undefined) return null
+  const cells = glowCell(segment.text, segment.color, segment.glow, palette)
+  if (cells === null) return null
+  return (
+    <Box>
+      <Text wrap="truncate-end">
+        {line.segments.slice(0, index).map(before => (
+          <Piece ui={ui} segment={before} />
+        ))}
+      </Text>
+      <Raster key={HEARTBEAT_KEY} columns={1} rows={1} cells={cells} />
+      <Text wrap="truncate-end">
+        {line.segments.slice(index + 1).map(after => (
+          <Piece ui={ui} segment={after} />
+        ))}
+      </Text>
+    </Box>
   )
 }
 
@@ -46,7 +77,7 @@ export function Chart({ ui, chartKey, grid, width, palette }: { ui: Ui; chartKey
 export function Row({ ui, line, width, palette, onToggle }: { ui: Ui; line: Line; width: number; palette: Palette | null; onToggle: (key: string) => void }) {
   const { Box, Text, Button } = ui
   if (line.chart !== undefined) return <Chart ui={ui} chartKey={line.key} grid={line.chart} width={width} palette={palette} />
-  const pieces = (
+  const pieces = glowing(ui, line, palette) ?? (
     <Text wrap={line.wrap === true ? 'wrap' : 'truncate-end'}>
       {line.segments.map(segment => (
         <Piece ui={ui} segment={segment} />

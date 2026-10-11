@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 const MARKETPLACE: &str = ".claude-plugin/marketplace.json";
 const MOD_DIR: &str = "mod";
-const LEFT_OUT: &[&str] = &["mod/tests", "mod/.claude-plugin/types"];
+const LEFT_OUT: &[&str] = &["mod/tests", "mod/.claude-plugin/types", "mod/tsconfig.json"];
 
 fn main() {
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());

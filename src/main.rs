@@ -1,6 +1,8 @@
-fn main() {
-    if let Err(error) = claude_plus::cli::run() {
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    claude_plus::cli::run().unwrap_or_else(|error| {
         eprintln!("claude-plus: {error:#}");
-        std::process::exit(1);
-    }
+        ExitCode::FAILURE
+    })
 }

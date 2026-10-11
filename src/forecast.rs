@@ -15,6 +15,13 @@ const ALTERNATIVES: &[(&str, &str)] = &[
     ("haiku", "claude-sonnet-5-5"),
 ];
 const FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable", "mythos"];
+const LINEUP: &[&str] = &[
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+];
+const TIERS: &[&str] = &["mythos", "fable", "opus", "sonnet", "haiku"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Forecast {
@@ -27,14 +34,15 @@ pub struct Forecast {
     pub cold_usd: Option<f64>,
     pub warm_pct_5h: Option<f64>,
     pub cold_pct_5h: Option<f64>,
-    pub alternative: Option<Alternative>,
+    #[serde(default)]
+    pub lineup: Vec<ModelCost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Alternative {
+pub struct ModelCost {
     pub model: String,
-    pub first_usd: f64,
-    pub next_usd: f64,
+    pub warm_usd: f64,
+    pub cold_usd: f64,
 }
 
 pub fn family(model: &str) -> &'static str {
@@ -52,6 +60,22 @@ pub fn alternative_for(model: &str) -> Option<&'static str> {
         .iter()
         .find(|(from, _)| *from == family)
         .map(|(_, to)| *to)
+}
+
+fn lineup(current: &str) -> Vec<&str> {
+    let mut models: Vec<&str> = LINEUP
+        .iter()
+        .copied()
+        .filter(|model| family(model) != family(current))
+        .collect();
+    models.push(current);
+    models.sort_by_key(|model| {
+        TIERS
+            .iter()
+            .position(|tier| *tier == family(model))
+            .unwrap_or(TIERS.len())
+    });
+    models
 }
 
 pub fn next_turn(
@@ -87,13 +111,16 @@ pub fn next_turn(
     let warm_usd = prices.cost(&latest.model, &warm);
     let cold_usd = prices.cost(&latest.model, &cold);
     let percent = |usd: Option<f64>| usd.zip(pct_per_usd_5h).map(|(usd, rate)| usd * rate);
-    let alternative = alternative_for(&latest.model).and_then(|model| {
-        Some(Alternative {
-            model: model.to_string(),
-            first_usd: prices.cost(model, &cold)?,
-            next_usd: prices.cost(model, &warm)?,
+    let lineup = lineup(&latest.model)
+        .into_iter()
+        .filter_map(|model| {
+            Some(ModelCost {
+                model: model.to_string(),
+                warm_usd: prices.cost(model, &warm)?,
+                cold_usd: prices.cost(model, &cold)?,
+            })
         })
-    });
+        .collect();
     Some(Forecast {
         model: latest.model.clone(),
         samples: recent.len() as u32,
@@ -104,7 +131,7 @@ pub fn next_turn(
         cold_usd,
         warm_pct_5h: percent(warm_usd),
         cold_pct_5h: percent(cold_usd),
-        alternative,
+        lineup,
     })
 }
 
@@ -173,16 +200,19 @@ mod tests {
         assert!(close(forecast.cold_usd.unwrap(), cold));
         assert!(close(forecast.warm_pct_5h.unwrap(), warm * 0.5));
         assert!(close(forecast.cold_pct_5h.unwrap(), cold * 0.5));
-        let alternative = forecast.alternative.unwrap();
-        assert_eq!(alternative.model, "claude-sonnet-5-5");
+        let sonnet = &forecast.lineup[2];
+        assert_eq!(sonnet.model, "claude-sonnet-5-5");
         assert!(close(
-            alternative.first_usd,
+            sonnet.cold_usd,
             ((46_000.0 + 2_030.0) * 4.0 + 600.0 * 10.0) / 1e6
         ));
         assert!(close(
-            alternative.next_usd,
+            sonnet.warm_usd,
             (46_000.0 * 0.1 + 2_030.0 * 4.0 + 600.0 * 10.0) / 1e6
         ));
+        let opus = &forecast.lineup[1];
+        assert_eq!(opus.model, "claude-opus-5-5");
+        assert!(close(opus.warm_usd, warm) && close(opus.cold_usd, cold));
     }
 
     #[test]
@@ -221,7 +251,13 @@ mod tests {
             (forecast.warm_usd, forecast.cold_usd, forecast.warm_pct_5h),
             (None, None, None)
         );
-        assert_eq!(forecast.alternative, None);
+        assert_eq!(forecast.lineup.len(), 4);
+        assert!(
+            forecast
+                .lineup
+                .iter()
+                .all(|cost| cost.model != "claude-mystery-9")
+        );
         assert_eq!(
             next_turn(&[], &PriceTable::bundled(), Ttl::OneHour, None),
             None
@@ -239,5 +275,38 @@ mod tests {
             Some("claude-haiku-5-5")
         );
         assert_eq!(alternative_for("claude-mystery-9"), None);
+    }
+
+    #[test]
+    fn the_lineup_runs_down_the_tiers_with_the_current_model_in_its_family_slot() {
+        assert_eq!(
+            lineup("claude-sonnet-5-5"),
+            [
+                "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5"
+            ]
+        );
+        assert_eq!(
+            lineup("claude-opus-4-7"),
+            [
+                "claude-fable-5-1",
+                "claude-opus-4-7",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5"
+            ]
+        );
+        assert_eq!(
+            lineup("claude-mythos-5-1"),
+            [
+                "claude-mythos-5-1",
+                "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5"
+            ]
+        );
+        assert_eq!(lineup("claude-mystery-9").last(), Some(&"claude-mystery-9"));
     }
 }

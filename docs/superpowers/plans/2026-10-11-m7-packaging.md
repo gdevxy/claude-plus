@@ -67,7 +67,7 @@ The spec is silent on these points, or leaves them to this milestone, so this pl
     An archive is `claude-plus-<target>.tar.gz` with `claude-plus`, `LICENSE` and `README.md` at its top, named without the version so `releases/latest/download/<archive>` always works.
     Archives are reproducible: files stamped with `SOURCE_DATE_EPOCH` or the commit time, owned by root, without extended attributes, and compressed with `gzip -n` (fix wave).
 12. The release workflow runs on a `v*` tag, runs `cargo test`, checks that the tag is the version in `Cargo.toml` and in `mod/.claude-plugin/plugin.json` and that each binary says so (the Intel macOS one under Rosetta), and creates a draft release (fix wave); publishing it and creating the tap are the user's steps, in the check of Task 10.
-13. The one placeholder is `@GITHUB_OWNER@`, the GitHub owner of the repository and of its tap `<owner>/homebrew-tap` (so `brew install <owner>/tap/claude-plus`).
+13. The one placeholder is `gdevxy`, the GitHub owner of the repository and of its tap `<owner>/homebrew-tap` (so `brew install <owner>/tap/claude-plus`).
     The release fills it in the formula and the installer it attaches, from `$GITHUB_REPOSITORY_OWNER`, together with the version and the checksums, so `README.md` is the only file the user edits; the repository's own `packaging/install.sh` refuses to run until it is given an owner.
 14. `packaging/install.sh` is POSIX `sh`: it picks the archive for `uname -s` and `uname -m` (an x86_64 shell under Rosetta gets the arm64 build), downloads it and `SHA256SUMS` with `curl`, checks the sum with `sha256sum` or `shasum -a 256`, and moves the binary into `CLAUDE_PLUS_INSTALL_DIR` (default `~/.local/bin`) in one rename.
     Its steps run in `main`, called on the last line behind an `EXIT` guard, so a truncated download fails and changes nothing (fix wave).
@@ -139,8 +139,8 @@ The spec is silent on these points, or leaves them to this milestone, so this pl
 
 Nothing here blocks the tasks; these are the steps only the user can take, listed again in the check of Task 10.
 
-- `@GITHUB_OWNER@` is the single placeholder: the GitHub user or organization that will host `claude-plus` and `homebrew-tap`.
-  Replace it in `README.md` (three places); `git grep -n @GITHUB_OWNER@` then lists only `packaging/install.sh` and `packaging/claude-plus.rb.in`, which keep it because the release fills them in.
+- `gdevxy` is the single placeholder: the GitHub user or organization that will host `claude-plus` and `homebrew-tap`.
+  Replace it in `README.md` (three places); `git grep -n gdevxy` then lists only `packaging/install.sh` and `packaging/claude-plus.rb.in`, which keep it because the release fills them in.
 - Push `main` to `github.com/<owner>/claude-plus`, then push the tag `v0.1.0`, and publish the draft release the workflow creates.
 - Create `github.com/<owner>/homebrew-tap` and commit the draft's `claude-plus.rb` as `Formula/claude-plus.rb`, for each release.
 - If the repository is private, `ubuntu-24.04-arm` runners are not free; build `aarch64-unknown-linux-musl` elsewhere or make the repository public before the first tag.
@@ -3087,7 +3087,7 @@ fn release_assets_hold_checksums_a_formula_and_an_installer_for_the_owner() {
     assert!(ruby.status.success(), "{}", text(&ruby.stderr));
     let installer = std::fs::read_to_string(dist.join("install.sh")).unwrap();
     assert!(installer.contains("github_owner=\"${CLAUDE_PLUS_GITHUB_OWNER:-ada}\"\n"));
-    assert!(!installer.contains("@GITHUB_OWNER@"));
+    assert!(!installer.contains("gdevxy"));
     let parsed = run(Command::new("sh").arg("-n").arg(dist.join("install.sh")));
     assert!(parsed.status.success(), "{}", text(&parsed.stderr));
     let listing = run(Command::new("tar")
@@ -3172,13 +3172,13 @@ claude-plus runs on macOS and Linux and needs Claude Code 2.1.296 or newer.
 Install the binary with Homebrew:
 
 ```bash
-brew install @GITHUB_OWNER@/tap/claude-plus
+brew install gdevxy/tap/claude-plus
 ```
 
 Or with the install script, which puts it in `~/.local/bin`:
 
 ```bash
-curl -fsSL https://github.com/@GITHUB_OWNER@/claude-plus/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/gdevxy/claude-plus/releases/latest/download/install.sh | sh
 ```
 
 Then add the pane to Claude Code:
@@ -3194,7 +3194,7 @@ Start a new Claude Code session: the pane docks beside the conversation when the
 The mod alone can also be installed from Claude Code's prompt; it still needs the `claude-plus` binary on `PATH`:
 
 ```
-/plugin install plus --marketplace @GITHUB_OWNER@/claude-plus
+/plugin install plus --marketplace gdevxy/claude-plus
 ```
 
 ## Upgrade
@@ -3240,7 +3240,7 @@ Create `packaging/install.sh`, and make it executable (`chmod +x packaging/insta
 #!/bin/sh
 set -eu
 
-github_owner="${CLAUDE_PLUS_GITHUB_OWNER:-@GITHUB_OWNER@}"
+github_owner="${CLAUDE_PLUS_GITHUB_OWNER:-gdevxy}"
 version="${CLAUDE_PLUS_VERSION:-latest}"
 install_dir="${CLAUDE_PLUS_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -3384,7 +3384,7 @@ sha256() {
 }
 
 : > "$dist/SHA256SUMS"
-substitutions="s|@VERSION@|$version|g; s|@GITHUB_OWNER@|$owner|g"
+substitutions="s|@VERSION@|$version|g; s|gdevxy|$owner|g"
 for target in $targets; do
   archive="claude-plus-$target.tar.gz"
   [ -f "$dist/$archive" ] || {
@@ -3397,7 +3397,7 @@ for target in $targets; do
   substitutions="$substitutions; s|@SHA256_${key}@|$sum|g"
 done
 sed "$substitutions" "$here/claude-plus.rb.in" > "$dist/claude-plus.rb"
-sed "s|@GITHUB_OWNER@|$owner|g" "$here/install.sh" > "$dist/install.sh"
+sed "s|gdevxy|$owner|g" "$here/install.sh" > "$dist/install.sh"
 ```
 
 Create `packaging/claude-plus.rb.in`:
@@ -3405,28 +3405,28 @@ Create `packaging/claude-plus.rb.in`:
 ```ruby
 class ClaudePlus < Formula
   desc "Token, cache and cost visibility for Claude Code"
-  homepage "https://github.com/@GITHUB_OWNER@/claude-plus"
+  homepage "https://github.com/gdevxy/claude-plus"
   version "@VERSION@"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/@GITHUB_OWNER@/claude-plus/releases/download/v@VERSION@/claude-plus-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/gdevxy/claude-plus/releases/download/v@VERSION@/claude-plus-aarch64-apple-darwin.tar.gz"
       sha256 "@SHA256_AARCH64_APPLE_DARWIN@"
     end
     on_intel do
-      url "https://github.com/@GITHUB_OWNER@/claude-plus/releases/download/v@VERSION@/claude-plus-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/gdevxy/claude-plus/releases/download/v@VERSION@/claude-plus-x86_64-apple-darwin.tar.gz"
       sha256 "@SHA256_X86_64_APPLE_DARWIN@"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/@GITHUB_OWNER@/claude-plus/releases/download/v@VERSION@/claude-plus-aarch64-unknown-linux-musl.tar.gz"
+      url "https://github.com/gdevxy/claude-plus/releases/download/v@VERSION@/claude-plus-aarch64-unknown-linux-musl.tar.gz"
       sha256 "@SHA256_AARCH64_UNKNOWN_LINUX_MUSL@"
     end
     on_intel do
-      url "https://github.com/@GITHUB_OWNER@/claude-plus/releases/download/v@VERSION@/claude-plus-x86_64-unknown-linux-musl.tar.gz"
+      url "https://github.com/gdevxy/claude-plus/releases/download/v@VERSION@/claude-plus-x86_64-unknown-linux-musl.tar.gz"
       sha256 "@SHA256_X86_64_UNKNOWN_LINUX_MUSL@"
     end
   end
@@ -3966,7 +3966,7 @@ claude-plus --version
 
 Nothing in the plan pushed, tagged or published; these steps are yours.
 
-- [ ] Replace `@GITHUB_OWNER@` in `README.md` with the GitHub owner (`git grep -n @GITHUB_OWNER@` lists every place; `packaging/install.sh` and `packaging/claude-plus.rb.in` keep it, because the release fills them in).
+- [ ] Replace `gdevxy` in `README.md` with the GitHub owner (`git grep -n gdevxy` lists every place; `packaging/install.sh` and `packaging/claude-plus.rb.in` keep it, because the release fills them in).
 - [ ] Push `main` to `github.com/<owner>/claude-plus`; the `ci` workflow passes on macOS and Linux, its `install` job included.
 - [ ] Push the tag `v0.1.0`; the `release` workflow builds four archives and creates a draft release with them, `SHA256SUMS`, `install.sh` and `claude-plus.rb`.
 - [ ] Download the draft's assets and check `shasum -a 256 -c SHA256SUMS`; publish the draft.
@@ -4018,7 +4018,7 @@ Spec coverage, line by line of milestone 7 and the sections it touches:
 - "0700 directory, 0600 files": Task 1 test `writing_the_bundle_replaces_the_folder_and_keeps_it_private`.
 - The M3 carryover, pinning CI actions and checksums: Decision 15, Task 9 test `workflows_pin_every_action_to_a_commit_and_every_runner_to_an_image`.
 
-Placeholder scan: every step holds the full file or the exact hunk it applies, every run names its command and its expected result; `@GITHUB_OWNER@` is the one deliberate placeholder, which the release fills in and the user replaces in `README.md`.
+Placeholder scan: every step holds the full file or the exact hunk it applies, every run names its command and its expected result; `gdevxy` is the one deliberate placeholder, which the release fills in and the user replaces in `README.md`.
 
 Type consistency: the names in each task's Interfaces block are the ones its code defines and later tasks call (`bundle::write`, `bundle::refresh`, `bundle::remove`, `ClaudeCode::run`, `Step::edits_settings`, `install_steps`, `uninstall_steps`, `ensured`, `stopped`, `confirm`, `path_warning`), and the fake `claude` answers exactly the command lines `Step::args` builds, which Task 3's call-log assertions pin.
 

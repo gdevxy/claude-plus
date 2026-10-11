@@ -4,10 +4,11 @@ import type { Bucket, ContextReport, Daemon, Failures, HistoryFailure, HistoryRa
 import type { Layout, Piece } from './chart'
 import { area, bars, grouped, layout, markers, MARKER, stacked } from './chart'
 import { compositionOf, reportOf } from './context'
-import { FULL_BLOCK, count, fit, money, modelName, percent, spread, tokens } from './format'
+import { FULL_BLOCK, approx, count, fit, money, modelName, percent, spread, tokens } from './format'
 import { seriesOf } from './palette'
 import type { Line } from './state'
 import { LIMIT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, fitting, gap, notice, pair, plain, prose } from './state'
+import type { Choice } from './views/pane'
 
 export const RANGES: readonly HistoryRange[] = ['24h', '7d', '30d', '90d']
 export const METRICS: readonly Metric[] = ['cost', 'tokens', 'pct']
@@ -45,6 +46,15 @@ export function rangeLabel(range: HistoryRange): string {
 
 export function metricLabel(metric: Metric): string {
   return METRIC_LABELS[metric]
+}
+
+export function rangeChoices(range: HistoryRange): Choice[] {
+  return RANGES.map(option => ({ text: option, isActive: option === range }))
+}
+
+export function metricChoices(metric: Metric, report: HistoryReport | null): Choice[] {
+  const shown = shownMetric(metric, report)
+  return metricsOf(report).map(option => ({ text: METRIC_LABELS[option], isActive: option === shown }))
 }
 
 export function nextRange(range: HistoryRange): HistoryRange {
@@ -129,7 +139,7 @@ function failed(range: HistoryRange, failure: HistoryFailure): Line[] {
   if (failure.kind === 'missing') {
     return [
       prose('hist-failed', 'This claude-plus daemon is older than the pane and has no History', { dim: true }),
-      prose('hist-retry', 'Run claude-plus daemon stop to restart it', { dim: true }),
+      prose('hist-retry', 'Run claude-plus daemon stop, then /plus', { dim: true }),
     ]
   }
   return [
@@ -216,7 +226,7 @@ function cacheChart(input: HistoryInput, report: HistoryReport, width: number): 
   lines.push({ key: 'hist-hit-chart', segments: [], chart: bars(stacks, shape, HIT_ROWS, 1 - floor) })
   if (totals.saved_usd >= 0.01) lines.push(pair('hist-saved', `${INDENT}Saved by cache hits`, money(totals.saved_usd), width, { color: 'success' }, { dim: true }))
   if (totals.rebuilds > 0) {
-    lines.push(pair('hist-rebuilds', `${INDENT}Rebuilds`, `${totals.rebuilds} · ~${money(totals.rebuild_usd)}`, width, {}, { dim: true }))
+    lines.push(pair('hist-rebuilds', `${INDENT}Rebuilds`, `${totals.rebuilds} · ${approx(totals.rebuild_usd)}`, width, {}, { dim: true }))
   }
   return lines
 }

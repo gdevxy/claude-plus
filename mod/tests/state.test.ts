@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Line, ScreenInput } from '../hooks/state'
+import type { Local } from '../types'
 import {
   EASE_MS,
   FRAME_MS,
   QUICK_BREATH_MS,
   TICK_MS,
   WHY_COLUMNS,
+  breath,
   cacheClock,
   eased,
   ensureError,
@@ -33,6 +35,12 @@ function text(line: Line): string {
   return line.segments.map(segment => segment.text).join('')
 }
 
+function capped(breakdownModel: string): Local {
+  const measure = { ...local().measure!, contextTokens: 51_200, contextWindow: 1_000_000, contextPercent: 5 }
+  const breakdown = { ts_ms: NOW_MS, model: breakdownModel, total_tokens: 51_200, max_tokens: 400_000, percentage: 13, auto_compact_threshold: 367_000, categories: [] }
+  return local({ model: 'claude-sonnet-5-5[1m]', measure, breakdown })
+}
+
 function line(lines: Line[], key: string): Line {
   const found = lines.find(candidate => candidate.key === key)
   if (found === undefined) throw new Error(`no line ${key}`)
@@ -56,10 +64,12 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Hit ratio                        93%',
         '   Rebuilds                1 · ~$0.40 ?',
         '',
-        ' Next turn                            ?',
-        '   if warm         ~$0.03 · <0.1% of 5h',
-        '   if cold          ~$0.40 · 0.2% of 5h',
-        '   on Sonnet 5.5    ~$0.20, then ~$0.02',
+        ' Next prompt · cache warm             ?',
+        '   Fable 5.1        ~$0.67, then ~$0.05',
+        ' ● Opus 5.5        ~$0.03 · <0.1% of 5h',
+        '     if it expires  ~$0.40 · 0.2% of 5h',
+        '   Sonnet 5.5       ~$0.20, then ~$0.02',
+        '   Haiku 5.5        ~$0.07, then <$0.01',
         '',
         ' Session',
         '   Tokens in / out             2M / 61k',
@@ -83,10 +93,12 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Hit ratio                                            93%',
         '   Rebuilds                                    1 · ~$0.40 ?',
         '',
-        ' Next turn                                                ?',
-        '   if warm                             ~$0.03 · <0.1% of 5h',
-        '   if cold                              ~$0.40 · 0.2% of 5h',
-        '   on Sonnet 5.5                        ~$0.20, then ~$0.02',
+        ' Next prompt · cache warm                                 ?',
+        '   Fable 5.1                            ~$0.67, then ~$0.05',
+        ' ● Opus 5.5                            ~$0.03 · <0.1% of 5h',
+        '     if the cache expires               ~$0.40 · 0.2% of 5h',
+        '   Sonnet 5.5                           ~$0.20, then ~$0.02',
+        '   Haiku 5.5                            ~$0.07, then <$0.01',
         '',
         ' Session',
         '   Tokens in / out                                 2M / 61k',
@@ -110,10 +122,12 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Hit ratio                                                                                    93%',
         '   Rebuilds                                                                            1 · ~$0.40 ?',
         '',
-        ' Next turn                                                                                        ?',
-        '   if warm                                                                     ~$0.03 · <0.1% of 5h',
-        '   if cold                                                                      ~$0.40 · 0.2% of 5h',
-        '   on Sonnet 5.5                                                                ~$0.20, then ~$0.02',
+        ' Next prompt · cache warm                                                                         ?',
+        '   Fable 5.1                                                                    ~$0.67, then ~$0.05',
+        ' ● Opus 5.5                                                                    ~$0.03 · <0.1% of 5h',
+        '     if the cache expires                                                       ~$0.40 · 0.2% of 5h',
+        '   Sonnet 5.5                                                                   ~$0.20, then ~$0.02',
+        '   Haiku 5.5                                                                    ~$0.07, then <$0.01',
         '',
         ' Session',
         '   Tokens in / out                                                                         2M / 61k',
@@ -258,10 +272,12 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Hit ratio                        93%',
         '   Rebuilds                1 · ~$0.40 ?',
         '',
-        ' Next turn                            ?',
-        '   if warm         ~$0.03 · <0.1% of 5h',
-        '   if cold          ~$0.40 · 0.2% of 5h',
-        '   on Sonnet 5.5    ~$0.20, then ~$0.02',
+        ' Next prompt · cache cold             ?',
+        '   Fable 5.1        ~$0.67, then ~$0.05',
+        ' ● Opus 5.5         ~$0.40 · 0.2% of 5h',
+        '     then          ~$0.03 · <0.1% of 5h',
+        '   Sonnet 5.5       ~$0.20, then ~$0.02',
+        '   Haiku 5.5        ~$0.07, then <$0.01',
         '',
         ' Session',
         '   Tokens in / out             2M / 61k',
@@ -286,10 +302,12 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Hit ratio                                            93%',
         '   Rebuilds                                    1 · ~$0.40 ?',
         '',
-        ' Next turn                                                ?',
-        '   if warm                             ~$0.03 · <0.1% of 5h',
-        '   if cold                              ~$0.40 · 0.2% of 5h',
-        '   on Sonnet 5.5                        ~$0.20, then ~$0.02',
+        ' Next prompt · cache cold                                 ?',
+        '   Fable 5.1                            ~$0.67, then ~$0.05',
+        ' ● Opus 5.5                             ~$0.40 · 0.2% of 5h',
+        '     then                              ~$0.03 · <0.1% of 5h',
+        '   Sonnet 5.5                           ~$0.20, then ~$0.02',
+        '   Haiku 5.5                            ~$0.07, then <$0.01',
         '',
         ' Session',
         '   Tokens in / out                                 2M / 61k',
@@ -313,10 +331,12 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Hit ratio                                                                                    93%',
         '   Rebuilds                                                                            1 · ~$0.40 ?',
         '',
-        ' Next turn                                                                                        ?',
-        '   if warm                                                                     ~$0.03 · <0.1% of 5h',
-        '   if cold                                                                      ~$0.40 · 0.2% of 5h',
-        '   on Sonnet 5.5                                                                ~$0.20, then ~$0.02',
+        ' Next prompt · cache cold                                                                         ?',
+        '   Fable 5.1                                                                    ~$0.67, then ~$0.05',
+        ' ● Opus 5.5                                                                     ~$0.40 · 0.2% of 5h',
+        '     then                                                                      ~$0.03 · <0.1% of 5h',
+        '   Sonnet 5.5                                                                   ~$0.20, then ~$0.02',
+        '   Haiku 5.5                                                                    ~$0.07, then <$0.01',
         '',
         ' Session',
         '   Tokens in / out                                                                         2M / 61k',
@@ -363,9 +383,38 @@ describe('live screen', () => {
     const lines = screen(input({ local: local({ measure: { ...local().measure!, contextPercent: 85 } }) }))
     expect(line(lines, 'headline').segments[1]).toEqual({ text: '$4.18', color: 'claude', bold: true })
     expect(line(lines, 'context-bar').segments[1]?.color).toBe('warning')
-    expect(line(lines, 'cache').segments[1]).toEqual({ text: '✻', color: 'claude', dim: true })
+    expect(line(lines, 'cache').segments[1]).toEqual({ text: '✻', color: 'claude', glow: 1 })
     expect(line(lines, 'cache').segments[3]).toEqual({ text: '52:14 left', color: 'success' })
     expect(line(lines, 'cache-bar').segments[0]?.color).toBe('success')
+  })
+
+  test('measures the context against a capped compaction window and notes the model window', () => {
+    const lines = screen(input({ width: 60, local: capped('claude-sonnet-5-5') }))
+    expect(text(line(lines, 'context'))).toBe(`Context${' '.repeat(58 - 7 - 23)}51.2k / 400k · 1M model`)
+    expect(line(lines, 'context').segments.at(-1)).toEqual({ text: ' · 1M model', dim: true })
+    const bar = text(line(lines, 'context-bar'))
+    expect(bar.endsWith(' 13%')).toBe(true)
+    expect(bar.indexOf('│')).toBe(Math.floor((367_000 / 400_000) * 53))
+  })
+
+  test('drops the model window note when the line is too narrow', () => {
+    expect(text(line(screen(input({ width: 26, local: capped('claude-sonnet-5-5') })), 'context'))).toBe('Context     51.2k / 400k')
+  })
+
+  test('ignores a breakdown counted on another model', () => {
+    const lines = screen(input({ width: 60, local: capped('claude-opus-5-5') }))
+    expect(text(line(lines, 'context'))).toBe(`Context${' '.repeat(58 - 7 - 10)}51.2k / 1M`)
+    expect(text(line(lines, 'context-bar')).endsWith('  5%')).toBe(true)
+    expect(text(line(lines, 'context-bar'))).not.toContain('│')
+  })
+
+  test('marks the auto-compact point on an uncapped window until the bar passes it', () => {
+    const breakdown = { ts_ms: NOW_MS, model: 'claude-opus-5-5', total_tokens: 46_000, max_tokens: 200_000, percentage: 23, auto_compact_threshold: 167_000, categories: [] }
+    const lines = screen(input({ local: local({ breakdown }) }))
+    expect(text(line(lines, 'context'))).toBe('Context                     46k / 200k')
+    expect(text(line(lines, 'context-bar')).indexOf('│')).toBe(Math.floor((167_000 / 200_000) * 33))
+    const full = local({ breakdown, measure: { ...local().measure!, contextTokens: 180_000, contextPercent: 90 } })
+    expect(text(line(screen(input({ local: full })), 'context-bar'))).not.toContain('│')
   })
 
   test('turns the countdown amber in its last minute and cold after it', () => {
@@ -373,8 +422,22 @@ describe('live screen', () => {
     expect(line(urgent, 'cache').segments[3]).toEqual({ text: '0:44 left', color: 'warning' })
     const cold = screen(input({ nowMs: NOW_MS + 53 * MINUTE_MS }))
     expect(line(cold, 'cache').segments[3]).toEqual({ text: 'expired', dim: true })
-    expect(line(cold, 'next-warm').segments[1]?.dim).toBe(true)
-    expect(line(cold, 'next-cold').segments[1]?.dim).toBeUndefined()
+    expect(text(line(cold, 'next'))).toBe('Next prompt · cache cold'.padEnd(36))
+    expect(text(line(cold, 'next-current'))).toMatch(/^● Opus 5\.5 +~\$0\.40 · 0\.2% of 5h$/)
+    expect(text(line(cold, 'next-after'))).toMatch(/^ {4}then +~\$0\.03 · <0\.1% of 5h$/)
+  })
+
+  test('marks the current model in the lineup and says what the next prompt costs on each', () => {
+    const lines = screen(input())
+    expect(line(lines, 'next').segments).toEqual([
+      { text: 'Next prompt', bold: true },
+      { text: ' · cache warm'.padEnd(25), dim: true },
+    ])
+    const current = line(lines, 'next-current').segments
+    expect(current[0]).toEqual({ text: '● ', color: 'claude' })
+    expect([current[1]?.bold, current[2]]).toEqual([true, { text: '~$0.03 · <0.1% of 5h', bold: true }])
+    expect(line(lines, 'next-after').segments.every(segment => segment.dim === true)).toBe(true)
+    expect(text(line(lines, 'next-claude-haiku-5-5'))).toMatch(/^ {2}Haiku 5\.5 +~\$0\.07, then <\$0\.01$/)
   })
 
   test('names what changed when the injected context rewrote the cache', () => {
@@ -394,7 +457,7 @@ describe('live screen', () => {
       'The last rebuild, 40m ago, wrote the prompt again because the cache expired during an idle gap.',
     )
     expect(text(line(lines, 'explain-forecast'))).toBe(
-      'Your 46k token prompt is read from the cache when warm and written again when cold. 2k new and 600 output tokens are typical of your last 10 requests.',
+      'Your 46k token prompt is read from the cache when warm and written again when cold. Each model keeps its own cache, so switching starts cold. 2k new and 600 output tokens are typical of your last 10 requests.',
     )
     expect(text(line(lines, 'explain-limits'))).toBe(
       'From 23 readings, 1% of your 5h window is about $2.00 of API-priced usage on Opus. The pace projects the last 30 minutes to the reset.',
@@ -452,6 +515,8 @@ describe('live screen', () => {
   test('names the daemon problem in plain words', () => {
     const unreachable = screen(input({ daemon: { status: 'unreachable', detail: 'no answer within 500 ms' } }))
     expect([text(line(unreachable, 'daemon')), text(line(unreachable, 'daemon-fix'))]).toEqual(['The daemon is not answering', 'Run claude-plus daemon --ensure'])
+    const stopped = screen(input({ daemon: { status: 'stopped', detail: null } }))
+    expect([text(line(stopped, 'daemon')), text(line(stopped, 'daemon-fix'))]).toEqual(['The claude-plus daemon is stopped', 'Run /plus to start it'])
     const wide = screen(input({ width: 100, daemon: { status: 'unreachable', detail: 'no answer within 500 ms' } }))
     expect(text(line(wide, 'daemon'))).toBe('The daemon is not answering · run claude-plus daemon --ensure')
     const outdated = screen(input({ daemon: { status: 'outdated', detail: null } }))
@@ -489,6 +554,7 @@ const STATES: Record<string, Partial<ScreenInput>> = {
   'a fresh session': { snapshot: null, local: { ...local(), model: null, turns: 0, measure: null }, daemon: { status: 'starting', detail: null } },
   'a missing daemon': { snapshot: null, daemon: { status: 'missing', detail: null } },
   'an unreachable daemon': { daemon: { status: 'unreachable', detail: 'ECONNREFUSED' } },
+  'a stopped daemon': { daemon: { status: 'stopped', detail: null } },
   'a filling window': { snapshot: FILLING() },
   'a plan still learning': { snapshot: LEARNING() },
   'an older daemon': { daemon: { status: 'outdated', detail: null } },
@@ -523,20 +589,21 @@ describe('fitting', () => {
 })
 
 describe('motion', () => {
-  test('the heartbeat breathes over four seconds and quickens in the last minute', () => {
+  test('the heartbeat breathes in and out over four seconds and quickens to one in the last minute', () => {
     const warm = cacheClock(snapshot(), local(), NOW_MS)
-    const phases = [0, 1, 2, 3].map(second => heartbeat(warm, 1_000 * second, true, false))
-    expect(phases).toEqual([
-      { text: '✻', color: 'claude', dim: true },
-      { text: '✻', color: 'claude' },
-      { text: '✻', color: 'claude', bold: true },
-      { text: '✻', color: 'claude' },
-    ])
+    expect([0, 500, 1000, 2000, 3000, 4000].map(ms => heartbeat(warm, NOW_MS + ms, true, false))).toEqual(
+      [1, 0.854, 0.5, 0, 0.5, 1].map(glow => ({ text: '✻', color: 'claude', glow })),
+    )
     const lastMinute = cacheClock(snapshot(), local(), NOW_MS + 52 * MINUTE_MS)
-    expect([0, 500].map(ms => heartbeat(lastMinute, ms, true, false))).toEqual([
-      { text: '✻', color: 'warning', bold: true },
-      { text: '✻', color: 'warning', dim: true },
-    ])
+    expect([0, 250, 500].map(ms => heartbeat(lastMinute, NOW_MS + 52 * MINUTE_MS + ms, true, false))).toEqual(
+      [0, 0.5, 1].map(glow => ({ text: '✻', color: 'warning', glow })),
+    )
+  })
+
+  test('a breath is a smooth wave, phased to the cache expiry', () => {
+    expect([-4000, -3000, -1000, 0, 1000, 2000].map(ms => breath(ms, 4000))).toEqual([0, 0.5, 0.5, 0, 0.5, 1])
+    const samples = Array.from({ length: 41 }, (_, index) => breath(index * 100, 4000))
+    expect(Math.max(...samples.slice(1).map((glow, index) => Math.abs(glow - (samples[index] ?? 0))))).toBeLessThan(0.08)
   })
 
   test('the heartbeat holds still without animations or while Claude is working', () => {
@@ -572,12 +639,13 @@ describe('motion', () => {
     expect([nextTickDelay(1000, 5300, 5000), nextTickDelay(1000, 5300, 5300), nextTickDelay(1000, 0, 5450), nextTickDelay(500, 5300, 5100)]).toEqual([300, 1000, 550, 200])
   })
 
-  test('the ticker runs at 20 fps only while something moves', () => {
-    const base = { animations: true, motions: {}, nowMs: NOW_MS, snapshot: snapshot(), local: local() }
+  test('the ticker runs at 20 fps only while something moves, and steps the heartbeat itself only when nothing blits it', () => {
+    const base = { animations: true, motions: {}, nowMs: NOW_MS, snapshot: snapshot(), local: local(), breathing: false }
     expect(tickPeriod(base)).toBe(TICK_MS)
     expect(tickPeriod({ ...base, motions: { cost: { from: 0, to: 1, startMs: NOW_MS } } })).toBe(FRAME_MS)
-    expect(tickPeriod({ ...base, nowMs: NOW_MS + 52 * MINUTE_MS })).toBe(QUICK_BREATH_MS)
+    expect(tickPeriod({ ...base, nowMs: NOW_MS + 52 * MINUTE_MS })).toBe(QUICK_BREATH_MS / 2)
     expect(tickPeriod({ ...base, animations: false, nowMs: NOW_MS + 52 * MINUTE_MS })).toBe(TICK_MS)
+    expect(tickPeriod({ ...base, breathing: true, nowMs: NOW_MS + 52 * MINUTE_MS })).toBe(TICK_MS)
   })
 })
 
@@ -591,6 +659,7 @@ describe('status and daemon', () => {
   test('the ensure outcome tells a missing binary from a failed start', () => {
     expect(ensureOutcome(0, '')).toEqual({ status: 'ok', detail: null })
     expect(ensureOutcome(127, '')).toEqual({ status: 'missing', detail: null })
+    expect(ensureOutcome(3, '')).toEqual({ status: 'stopped', detail: null })
     expect(ensureOutcome(1, 'Error: the claude-plus daemon exited at start\n')).toEqual({ status: 'failed', detail: 'the claude-plus daemon exited at start' })
     expect(ensureError(new Error('spawn claude-plus ENOENT'))).toEqual({ status: 'missing', detail: null })
   })

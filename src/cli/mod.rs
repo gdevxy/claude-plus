@@ -8,6 +8,7 @@ mod setup;
 mod stats;
 
 use std::path::Path;
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::api::client::{Client, ClientError};
 use crate::api::wire::Health;
-use crate::daemon::control::{self, Status};
+use crate::daemon::control::{self, Status, Stop};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
 use crate::store::Store;
@@ -88,6 +89,12 @@ enum Command {
     Daemon {
         #[arg(long, help = "Start a detached daemon unless one answers, then return")]
         ensure: bool,
+        #[arg(
+            long,
+            requires = "ensure",
+            help = "With --ensure, leave a daemon stopped by `claude-plus daemon stop` stopped"
+        )]
+        unless_stopped: bool,
         #[arg(long, hide = true)]
         detached: bool,
         #[arg(long, hide = true, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
@@ -103,7 +110,7 @@ enum DaemonAction {
     Stop,
 }
 
-pub fn run() -> Result<()> {
+pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     if !matches!(
         cli.command,
@@ -120,6 +127,19 @@ pub fn run() -> Result<()> {
     let paths = Paths::from_env()?;
     let prices = PriceTable::bundled();
     match cli.command {
+        Command::Daemon {
+            ensure: true,
+            unless_stopped,
+            action: None,
+            ..
+        } => {
+            let policy = if unless_stopped {
+                Stop::Respect
+            } else {
+                Stop::Override
+            };
+            return daemon::ensure(&paths, policy);
+        }
         Command::Import => import::run(&paths, &prices),
         Command::Stats { days } => stats::run(&paths, &prices, days),
         Command::Export { format, days } => export::run(&paths, &prices, format, days),
@@ -131,13 +151,13 @@ pub fn run() -> Result<()> {
             action: Some(DaemonAction::Stop),
             ..
         } => daemon::stop(&paths),
-        Command::Daemon { ensure: true, .. } => daemon::ensure(&paths),
         Command::Daemon {
             detached,
             rescan_secs,
             ..
         } => daemon::run(&paths, prices, detached, rescan_secs),
     }
+    .map(|()| ExitCode::SUCCESS)
 }
 
 fn end_quietly_when_the_reader_goes_away() {

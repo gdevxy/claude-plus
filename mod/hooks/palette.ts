@@ -95,6 +95,14 @@ export function colorOf(palette: Palette, key: ThemeKey | null): number {
   return key === null ? DEFAULT_COLOR : (palette[key] ?? DEFAULT_COLOR)
 }
 
+export function blended(palette: Palette, from: ThemeKey, to: ThemeKey, amount: number): number | null {
+  const start = palette[from]
+  const end = palette[to]
+  if (start === undefined || end === undefined) return null
+  const channel = (shift: number) => Math.round(((start >> shift) & 0xff) * (1 - amount) + ((end >> shift) & 0xff) * amount) << shift
+  return channel(16) | channel(8) | channel(0)
+}
+
 export type Series = { readonly models: readonly ThemeKey[]; readonly other: ThemeKey }
 
 const DEFAULT_SERIES: Series = { models: ['claude', 'permission', 'planMode', 'ide', 'text'], other: 'subtle' }

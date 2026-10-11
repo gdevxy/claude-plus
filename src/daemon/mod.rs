@@ -58,6 +58,18 @@ fn run_locked(
         }
         lock => lock?,
     };
+    match mode {
+        Mode::Detached if control::was_stopped(paths) => {
+            log.info("stopped with claude-plus daemon stop, leaving it stopped");
+            return Ok(());
+        }
+        Mode::Detached => {}
+        Mode::Foreground => {
+            if let Err(error) = control::clear_stopped(paths) {
+                log.warn(format!("{error:#}"));
+            }
+        }
+    }
     let mut store = Store::open(&paths.database())?;
     prune_breakdowns(&mut store, paths, log)?;
     let reader = Store::open_read_only(&paths.database())?;

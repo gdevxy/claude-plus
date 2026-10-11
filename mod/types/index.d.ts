@@ -51,8 +51,10 @@ export type Forecast = {
   cold_usd: number | null
   warm_pct_5h: number | null
   cold_pct_5h: number | null
-  alternative: { model: string; first_usd: number; next_usd: number } | null
+  lineup: ModelCost[]
 }
+
+export type ModelCost = { model: string; warm_usd: number; cold_usd: number }
 
 export type LimitWindow = {
   window: string
@@ -293,7 +295,7 @@ export type Alerted = {
   thresholdAsked: boolean
 }
 
-export type DaemonStatus = 'starting' | 'ok' | 'rebuilding' | 'unreachable' | 'outdated' | 'behind' | 'newer' | 'missing' | 'failed'
+export type DaemonStatus = 'starting' | 'ok' | 'rebuilding' | 'unreachable' | 'stopped' | 'outdated' | 'behind' | 'newer' | 'missing' | 'failed'
 
 export type Daemon = { status: DaemonStatus; detail: string | null }
 

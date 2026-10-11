@@ -17,6 +17,10 @@ export function money(usd: number): string {
   return `$${grouped(Math.round(usd))}`
 }
 
+export function approx(usd: number): string {
+  return usd > 0 && usd < 0.01 ? money(usd) : `~${money(usd)}`
+}
+
 export function count(value: number): string {
   return grouped(Math.round(value))
 }

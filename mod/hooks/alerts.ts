@@ -1,6 +1,6 @@
 import type { Alerted, Daemon, Local, Snapshot } from '../types'
-import { duration, money, tokens } from './format'
-import { LAST_MINUTE_MS, RESET_TOLERANCE_MS, cacheClock, current, limitsOf } from './state'
+import { approx, duration, tokens } from './format'
+import { LAST_MINUTE_MS, RESET_TOLERANCE_MS, cacheClock, contextGauge, current, limitsOf, ownBreakdown } from './state'
 
 export const CONTEXT_ALERT = 0.9
 export const CONTEXT_REARM = 0.8
@@ -28,11 +28,11 @@ export function merged(current: Alerted, before: Alerted, after: Alerted): Alert
 }
 
 export function thresholdOf(local: Local, known: Alerted): number | null {
-  return local.breakdown?.auto_compact_threshold ?? known.threshold
+  return ownBreakdown(local)?.auto_compact_threshold ?? known.threshold
 }
 
 export function wantsThreshold(local: Local, known: Alerted): boolean {
-  const percent = local.measure?.contextPercent ?? null
+  const percent = contextGauge(local)?.percent ?? null
   const own = ownAlerts(known, local.session, local.model)
   return percent !== null && percent >= CONTEXT_ASK_PCT && thresholdOf(local, own) === null && !own.thresholdAsked
 }
@@ -45,7 +45,7 @@ export function alertsOf(input: AlertInput): { alerts: Alert[]; next: Alerted } 
   const clock = cacheClock(snapshot, input.local, input.nowMs)
   if (clock.state === 'warm' && clock.remainingMs <= LAST_MINUTE_MS && !input.local.working && known.cacheFor !== clock.expiresAtMs) {
     const cold = snapshot?.live.forecast?.cold_usd ?? null
-    const price = cold === null ? '' : ` rewarming later costs ~${money(cold)}`
+    const price = cold === null ? '' : ` rewarming later costs ${approx(cold)}`
     alerts.push({ kind: 'cache', text: `Cache goes cold in under a minute ✻${price}` })
     next.cacheFor = clock.expiresAtMs
   }

@@ -72,11 +72,10 @@ function cells(value: unknown): number {
 }
 
 function shownText(node: Drawn): string {
-  if (node.type === 'Button' && node.props?.label !== undefined) {
-    const hotkey = node.props.plain === true && typeof node.props.hotkey === 'string' ? `${node.props.hotkey}: ` : ''
-    return `${hotkey}${String(node.props.label)}`
-  }
-  return (node.children ?? []).map(child => (typeof child === 'string' ? child : isDrawn(child) ? shownText(child) : '')).join('')
+  const children = (node.children ?? []).map(child => (typeof child === 'string' ? child : isDrawn(child) ? shownText(child) : '')).join('')
+  if (node.type !== 'Button') return children
+  const hotkey = node.props?.plain === true && typeof node.props.hotkey === 'string' ? `${node.props.hotkey}: ` : ''
+  return `${hotkey}${children === '' ? String(node.props?.label ?? '') : children}`
 }
 
 export function paintTree(node: Drawn, width: number): string[] {

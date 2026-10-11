@@ -1,7 +1,7 @@
 import type { ThemeKey } from 'claude-code'
 
 import type { Palette } from './palette'
-import { colorOf } from './palette'
+import { DEFAULT_COLOR, blended, colorOf } from './palette'
 
 export const LOWER = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 export const BRAILLE_BASE = 0x2800
@@ -158,6 +158,14 @@ export function encode(grid: Grid, palette: Palette): string {
     }
   }
   return base64(bytes)
+}
+
+export const GLOW_FLOOR = 0.25
+
+export function glowCell(glyph: string, color: ThemeKey, glow: number, palette: Palette): string | null {
+  const fg = blended(palette, 'subtle', color, GLOW_FLOOR + (1 - GLOW_FLOOR) * glow)
+  if (fg === null) return null
+  return base64(new Uint8Array(Uint32Array.of(glyph.charCodeAt(0), fg, DEFAULT_COLOR).buffer))
 }
 
 export function base64(bytes: Uint8Array): string {

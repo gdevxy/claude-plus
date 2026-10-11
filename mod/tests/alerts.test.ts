@@ -39,7 +39,23 @@ function near(tokens: number, threshold: number | null): Local {
   return local({ measure: { ...measure, contextTokens: tokens, contextPercent: Math.round(tokens / 2000), rateLimits: [] }, breakdown })
 }
 
+function cappedAt(tokens: number, breakdownModel: string, threshold: number | null): Local {
+  const measure = { ...local().measure!, contextTokens: tokens, contextWindow: 1_000_000, contextPercent: Math.round(tokens / 10_000), rateLimits: [] }
+  const breakdown = { ts_ms: NOW_MS, model: breakdownModel, total_tokens: tokens, max_tokens: 400_000, percentage: 0, auto_compact_threshold: threshold, categories: [] }
+  return local({ model: 'claude-sonnet-5-5', measure, breakdown })
+}
+
 describe('alerts', () => {
+  test('asks for the threshold by how full the capped window is, not the model window', () => {
+    expect(wantsThreshold(cappedAt(250_000, 'claude-sonnet-5-5', null), KNOWN)).toBe(true)
+    expect(wantsThreshold(cappedAt(200_000, 'claude-sonnet-5-5', null), KNOWN)).toBe(false)
+  })
+
+  test('trusts a threshold only from a breakdown counted on the current model', () => {
+    expect(thresholdOf(cappedAt(250_000, 'claude-sonnet-5-5', 367_000), KNOWN)).toBe(367_000)
+    expect(thresholdOf(cappedAt(250_000, 'claude-opus-5-5', 367_000), { ...KNOWN, threshold: 167_000 })).toBe(167_000)
+  })
+
   test('the cache warns once in its last minute, with what rewarming would cost', () => {
     const first = alertsOf(input({ snapshot: expiring(59_000) }))
     expect(first.alerts).toEqual([{ kind: 'cache', text: 'Cache goes cold in under a minute ✻ rewarming later costs ~$0.40' }])
@@ -99,7 +115,8 @@ describe('alerts', () => {
     const learned: Alerted = { ...KNOWN, model: 'claude-opus-5-5', threshold: 167_000, thresholdAsked: true, contextFired: true }
     const switched = local({ ...near(170_000, null), model: 'claude-sonnet-5-5[1m]' })
     expect(ownAlerts(learned, 's1', 'claude-sonnet-5-5[1m]')).toEqual({ ...learned, model: 'claude-sonnet-5-5[1m]', threshold: null, thresholdAsked: false, contextFired: false })
-    const larger = local({ ...near(930_000, 1_000_000), model: 'claude-sonnet-5-5[1m]' })
+    const base = near(930_000, 1_000_000)
+    const larger = local({ ...base, model: 'claude-sonnet-5-5[1m]', breakdown: { ...base.breakdown!, model: 'claude-sonnet-5-5[1m]', max_tokens: 1_000_000 } })
     expect(alertsOf(input({ local: larger, known: learned })).alerts.map(alert => alert.kind)).toEqual(['context'])
     expect(ownAlerts(learned, 's1', 'claude-opus-5-5')).toBe(learned)
     expect(ownAlerts({ ...KNOWN, threshold: 167_000 }, 's1', 'claude-opus-5-5')).toEqual({ ...KNOWN, threshold: 167_000, model: 'claude-opus-5-5' })

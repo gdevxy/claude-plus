@@ -105,6 +105,13 @@ describe('daemon client', () => {
     expect(parseSnapshot('not json')).toBeNull()
   })
 
+  test('a forecast from a daemon before the lineup reads with no lineup', () => {
+    const served = snapshot()
+    const { lineup: _, ...older } = served.live.forecast!
+    const text = JSON.stringify({ v: 1, ...served, live: { ...served.live, forecast: { ...older, alternative: { model: 'claude-sonnet-5-5', first_usd: 0.2, next_usd: 0.02 } } } })
+    expect(parseSnapshot(text)?.live.forecast?.lineup).toEqual([])
+  })
+
   test('a measure keeps context, limits and cost with resets in epoch ms', () => {
     const measure = measureOf(
       { context: { tokens: 46_000, window: 200_000, percent: 23 }, rateLimits: [{ kind: 'five_hour', percentUsed: 54, resetsAt: '2026-10-11T10:00:00Z' }], cost: { usd: 4.18 }, changed: ['context'] },

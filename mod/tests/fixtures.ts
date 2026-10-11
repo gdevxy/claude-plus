@@ -44,7 +44,12 @@ export function snapshot(overrides: Partial<Snapshot['live']> = {}): Snapshot {
         cold_usd: 0.4,
         warm_pct_5h: 0.015,
         cold_pct_5h: 0.2,
-        alternative: { model: 'claude-sonnet-5-5', first_usd: 0.2, next_usd: 0.02 },
+        lineup: [
+          { model: 'claude-fable-5-1', warm_usd: 0.05, cold_usd: 0.67 },
+          { model: 'claude-opus-5-5', warm_usd: 0.03, cold_usd: 0.4 },
+          { model: 'claude-sonnet-5-5', warm_usd: 0.02, cold_usd: 0.2 },
+          { model: 'claude-haiku-5-5', warm_usd: 0.004, cold_usd: 0.07 },
+        ],
       },
       limits: [
         {

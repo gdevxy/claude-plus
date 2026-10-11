@@ -1,3 +1,5 @@
 /target
 /.superpowers
 /mod/.claude-plugin/types/
+/mod/tsconfig.json
+/.serena

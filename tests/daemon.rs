@@ -112,6 +112,97 @@ fn ensure_starts_one_detached_daemon_and_stop_ends_it() {
 }
 
 #[test]
+fn a_daemon_stopped_by_hand_stays_stopped_until_ensured_without_unless_stopped() {
+    let env = env();
+    let _cleanup = Detached { env: &env };
+    let pid = pid_in(&stdout_of(&env, &["daemon", "--ensure"]));
+    stdout_of(&env, &["daemon", "stop"]);
+    let mode = std::fs::metadata(env.plus.join("daemon.stopped"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let left = cmd(&env, &["daemon", "--ensure", "--unless-stopped"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(left).unwrap(),
+        "The claude-plus daemon was stopped with claude-plus daemon stop · start it with claude-plus daemon --ensure\n"
+    );
+    assert!(health(&env).is_none());
+    let restarted = pid_in(&stdout_of(&env, &["daemon", "--ensure"]));
+    assert_ne!(restarted, pid);
+    assert!(!env.plus.join("daemon.stopped").exists());
+    assert!(
+        stdout_of(&env, &["daemon", "--ensure", "--unless-stopped"]).starts_with(&format!(
+            "✻ claude-plus daemon is running · pid {restarted}"
+        )),
+    );
+}
+
+#[test]
+fn a_daemon_that_crashed_is_started_again_even_with_unless_stopped() {
+    let env = env();
+    let _cleanup = Detached { env: &env };
+    let pid = pid_in(&stdout_of(&env, &["daemon", "--ensure"]));
+    let target = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    kill_process(target, Signal::KILL).unwrap();
+    eventually("the daemon to die", || health(&env).is_none().then_some(()));
+    let started = stdout_of(&env, &["daemon", "--ensure", "--unless-stopped"]);
+    assert!(
+        started.starts_with("✻ Started the claude-plus daemon · pid "),
+        "{started}"
+    );
+}
+
+#[test]
+fn a_detached_daemon_that_starts_after_a_stop_leaves_itself_stopped() {
+    let env = env();
+    let _cleanup = Detached { env: &env };
+    stdout_of(&env, &["daemon", "--ensure"]);
+    stdout_of(&env, &["daemon", "stop"]);
+    cmd(&env, &["daemon", "--detached"]).assert().success();
+    assert!(health(&env).is_none());
+    assert!(env.plus.join("daemon.stopped").exists());
+}
+
+#[test]
+fn a_daemon_stopped_by_hand_in_a_directory_claude_plus_did_not_mark_stays_stopped() {
+    let env = env();
+    let _cleanup = Detached { env: &env };
+    std::fs::create_dir_all(&env.plus).unwrap();
+    std::fs::write(env.plus.join("notes.txt"), "mine").unwrap();
+    stdout_of(&env, &["daemon", "--ensure"]);
+    assert!(!env.plus.join(".claude-plus-data").exists());
+    stdout_of(&env, &["daemon", "stop"]);
+    cmd(&env, &["daemon", "--ensure", "--unless-stopped"])
+        .assert()
+        .code(3);
+    assert!(health(&env).is_none());
+}
+
+#[test]
+fn stop_writes_nothing_in_a_directory_claude_plus_never_ran_in() {
+    let env = env();
+    std::fs::create_dir_all(&env.plus).unwrap();
+    std::fs::write(env.plus.join("notes.txt"), "mine").unwrap();
+    stdout_of(&env, &["daemon", "stop"]);
+    assert!(!env.plus.join("daemon.stopped").exists());
+}
+
+#[test]
+fn unless_stopped_needs_ensure() {
+    let env = env();
+    cmd(&env, &["daemon", "--unless-stopped"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("--ensure"));
+}
+
+#[test]
 fn concurrent_ensures_share_one_daemon() {
     let env = env();
     let _cleanup = Detached { env: &env };

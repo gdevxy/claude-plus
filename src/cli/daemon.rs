@@ -1,10 +1,11 @@
+use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Result;
 
 use super::format::duration;
 use crate::api::wire::Health;
-use crate::daemon::control::{self, Ensured, Stopped};
+use crate::daemon::control::{self, Ensured, Stop, Stopped};
 use crate::daemon::{self as service, Mode};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
@@ -19,16 +20,22 @@ pub fn run(paths: &Paths, prices: PriceTable, detached: bool, rescan_secs: u64) 
     service::run(paths, prices, mode, Duration::from_secs(rescan_secs))
 }
 
-pub fn ensure(paths: &Paths) -> Result<()> {
+pub const LEFT_STOPPED_EXIT: u8 = 3;
+
+pub fn ensure(paths: &Paths, policy: Stop) -> Result<ExitCode> {
     match bundle::refresh(&paths.marketplace_dir()) {
         Ok(Some(from)) => println!("{}", refreshed(&from)),
         Ok(None) => {}
         Err(error) => eprintln!("claude-plus: could not update the plus mod: {error:#}"),
     }
-    for line in ensured(&control::ensure(paths)?) {
+    let outcome = control::ensure(paths, policy)?;
+    for line in ensured(&outcome) {
         println!("{line}");
     }
-    Ok(())
+    Ok(match outcome {
+        Ensured::LeftStopped => ExitCode::from(LEFT_STOPPED_EXIT),
+        _ => ExitCode::SUCCESS,
+    })
 }
 
 fn refreshed(from: &str) -> String {
@@ -58,6 +65,9 @@ pub fn ensured(ensured: &Ensured) -> Vec<String> {
             )]
         }
         Ensured::Restarted { previous, health } => vec![restarted(previous, health)],
+        Ensured::LeftStopped => vec![
+            "The claude-plus daemon was stopped with claude-plus daemon stop · start it with claude-plus daemon --ensure".into(),
+        ],
     }
 }
 
@@ -82,6 +92,9 @@ fn running(health: &Health) -> String {
 }
 
 pub fn stop(paths: &Paths) -> Result<()> {
+    if paths.marker().is_file() || paths.daemon_lock().exists() {
+        control::mark_stopped(paths)?;
+    }
     println!("{}", stopped(control::stop(paths)?));
     Ok(())
 }

@@ -3,7 +3,7 @@ import type { ThemeKey } from 'claude-code'
 import type { BreakdownCategory, ConfigGroup, ContextItem, ContextReport, Daemon, History, ItemKind, LiveContext, Local, Part, SourceKind } from '../types'
 import { bar, duration, fit, modelName, percent, tokens } from './format'
 import type { Line } from './state'
-import { CONTEXT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, gap, heading, meter, notice, pair, plain, prose } from './state'
+import { CONTEXT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, contextHead, gap, heading, meter, modelWindowBeyond, notice, pair, plain, prose } from './state'
 
 export const LABEL_COLUMNS = 16
 export const VALUE_COLUMNS = 7
@@ -153,23 +153,19 @@ function headline(input: ContextInput, composition: LiveContext | null, width: n
   const window = composition?.max_tokens ?? measure?.contextWindow ?? 0
   const fill = composition?.percentage ?? measure?.contextPercent ?? 0
   const color: ThemeKey = fill >= CONTEXT_WARNING ? 'warning' : 'text'
-  const lines = [amountLine(title, used, window, width), meter('ctx-bar', '', fill / 100, percent(fill).padStart(4), width, color)]
   const threshold = composition?.auto_compact_threshold ?? null
+  const full = composition === null ? null : modelWindowBeyond(input.local, composition.model, window)
+  const mark = threshold === null || window <= 0 ? null : threshold / window
+  const lines = [
+    contextHead('ctx-head', title, used, window, full, width, { color: 'claude', bold: true }),
+    meter('ctx-bar', '', fill / 100, percent(fill).padStart(4), width, color, mark),
+  ]
   if (threshold !== null && used !== null) {
     const due = used >= threshold
     const text = due ? `Auto-compact at ${tokens(threshold)} · due now` : `Auto-compact at ${tokens(threshold)} · ${tokens(threshold - used)} to go`
     lines.push(prose('ctx-compact', text, due ? { color: 'warning' } : { dim: true }))
   }
   return lines
-}
-
-function amountLine(title: string, used: number | null, window: number, width: number): Line {
-  if (used === null) return pair('ctx-head', title, tokens(window), width, {}, { bold: true })
-  const accent = tokens(used)
-  const rest = ` / ${tokens(window)}`
-  const line = pair('ctx-head', title, `${accent}${rest}`, width, {}, { bold: true })
-  line.segments = [line.segments[0]!, { text: accent, color: 'claude', bold: true }, { text: rest }]
-  return line
 }
 
 function categories(input: ContextInput, composition: LiveContext, width: number): Line[] {

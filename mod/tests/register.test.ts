@@ -6,10 +6,11 @@ import type { ContextReport, HistoryReport, InsightsReport, LimitWindow, Snapsho
 import { historyScreen } from '../hooks/history'
 import { insightsScreen } from '../hooks/insights'
 import { MINUTE_MS, NOW_MS, contextReport, dayReport, historyReport, insightsReport, local, snapshot, usage } from './fixtures'
-import { paintTree, painted, trimmed } from './paint'
+import { decoded, paintTree, painted, trimmed } from './paint'
 
 type Wiring = {
   session: string
+  model: string
   served: Snapshot | null
   serving: 'current' | 'older' | 'newer'
   lag: (() => Promise<void>) | null
@@ -36,9 +37,13 @@ type Wiring = {
   fetched: { url: string; init?: HttpInit }[]
   delivered: { url: string; init?: HttpInit }[]
   ran: (readonly string[])[]
+  holdingRuns: boolean
+  heldRuns: (() => void)[]
+  knowsUnlessStopped: boolean
   opened: string[]
   closed: string[]
   statuses: (string | undefined)[]
+  blits: { key: string; cells: string }[]
   placed: boolean
   duringUsage: (() => void) | null
   reportSession: string | null
@@ -78,10 +83,12 @@ const PANE_FRAMES: Record<number, string[]> = {
     '   Hit ratio                        93%',
     '   Rebuilds                1 · ~$0.40 ?',
     '',
-    ' Next turn                            ?',
-    '   if warm         ~$0.03 · <0.1% of 5h',
-    '   if cold          ~$0.40 · 0.2% of 5h',
-    '   on Sonnet 5.5    ~$0.20, then ~$0.02',
+    ' Next prompt · cache warm             ?',
+    '   Fable 5.1        ~$0.67, then ~$0.05',
+    ' ● Opus 5.5        ~$0.03 · <0.1% of 5h',
+    '     if it expires  ~$0.40 · 0.2% of 5h',
+    '   Sonnet 5.5       ~$0.20, then ~$0.02',
+    '   Haiku 5.5        ~$0.07, then <$0.01',
     '',
     ' Session',
     '   Tokens in / out             2M / 61k',
@@ -107,10 +114,12 @@ const PANE_FRAMES: Record<number, string[]> = {
     '   Hit ratio                                            93%',
     '   Rebuilds                                    1 · ~$0.40 ?',
     '',
-    ' Next turn                                                ?',
-    '   if warm                             ~$0.03 · <0.1% of 5h',
-    '   if cold                              ~$0.40 · 0.2% of 5h',
-    '   on Sonnet 5.5                        ~$0.20, then ~$0.02',
+    ' Next prompt · cache warm                                 ?',
+    '   Fable 5.1                            ~$0.67, then ~$0.05',
+    ' ● Opus 5.5                            ~$0.03 · <0.1% of 5h',
+    '     if the cache expires               ~$0.40 · 0.2% of 5h',
+    '   Sonnet 5.5                           ~$0.20, then ~$0.02',
+    '   Haiku 5.5                            ~$0.07, then <$0.01',
     '',
     ' Session',
     '   Tokens in / out                                 2M / 61k',
@@ -136,10 +145,12 @@ const PANE_FRAMES: Record<number, string[]> = {
     '   Hit ratio                                                                                    93%',
     '   Rebuilds                                                                            1 · ~$0.40 ?',
     '',
-    ' Next turn                                                                                        ?',
-    '   if warm                                                                     ~$0.03 · <0.1% of 5h',
-    '   if cold                                                                      ~$0.40 · 0.2% of 5h',
-    '   on Sonnet 5.5                                                                ~$0.20, then ~$0.02',
+    ' Next prompt · cache warm                                                                         ?',
+    '   Fable 5.1                                                                    ~$0.67, then ~$0.05',
+    ' ● Opus 5.5                                                                    ~$0.03 · <0.1% of 5h',
+    '     if the cache expires                                                       ~$0.40 · 0.2% of 5h',
+    '   Sonnet 5.5                                                                   ~$0.20, then ~$0.02',
+    '   Haiku 5.5                                                                    ~$0.07, then <$0.01',
     '',
     ' Session',
     '   Tokens in / out                                                                         2M / 61k',
@@ -158,7 +169,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
     ' ✻       1: Live 2: Ctx 3: Hist 4: Tips',
     '',
     ' Context · Opus 5.5          46k / 200k',
-    ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    ' ███████▋░░░░░░░░░░░░░░░░░░░│░░░░░  23%',
     ' Auto-compact at 167k · 121k to go',
     '',
     ' By category                          ?',
@@ -196,7 +207,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
     ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
     '',
     ' Context · Opus 5.5                              46k / 200k',
-    ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    ' ████████████▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░  23%',
     ' Auto-compact at 167k · 121k to go',
     '',
     ' By category                                              ?',
@@ -234,7 +245,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
     ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
     '',
     ' Context · Opus 5.5                                                                      46k / 200k',
-    ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
+    ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░  23%',
     ' Auto-compact at 167k · 121k to go',
     '',
     ' By category                                                                                      ?',
@@ -271,13 +282,13 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), insights: insightsReport(), insightsLag: null, toasts: [], played: [], histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, historyStatus: null, insightsStatus: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
+  const wiring: Wiring = { session: 's1', model: 'claude-opus-5-5', served: snapshot(), report: contextReport(), insights: insightsReport(), insightsLag: null, toasts: [], played: [], histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, historyStatus: null, insightsStatus: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], holdingRuns: false, heldRuns: [], knowsUnlessStopped: true, opened: [], closed: [], statuses: [], blits: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
   on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: wiring.theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
   on('config.set', ($, e) => ({ value: e.value }))
-  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.model', () => ({ value: wiring.model }))
   on('session.turns', () => ({ value: 14 }))
   on('session.usage', ($, e) => {
     wiring.usages.push(e)
@@ -295,6 +306,10 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     wiring.closed.push(e.id)
     return { value: undefined }
   })
+  on('ui.blit', ($, e) => {
+    if ('cells' in e) wiring.blits.push({ key: e.key, cells: e.cells })
+    return { value: {} }
+  })
   on('ui.status', ($, e) => {
     wiring.statuses.push(e.text)
     return { value: undefined }
@@ -307,8 +322,12 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     wiring.played.push(e.clip)
     return { value: undefined }
   })
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     wiring.ran.push(e.argv)
+    if (wiring.holdingRuns) await new Promise<void>(resolve => wiring.heldRuns.push(resolve))
+    if (!wiring.knowsUnlessStopped && e.argv.includes('--unless-stopped')) {
+      return { value: { exitCode: 2, stdout: '', stderr: "error: unexpected argument '--unless-stopped' found\n", isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (wiring.serving === 'older' && wiring.ensureCures) wiring.serving = 'current'
     return { value: { exitCode: wiring.exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -370,6 +389,10 @@ function servedBody(wiring: Wiring): unknown {
 
 async function start($: Engine): Promise<void> {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+}
+
+async function plus($: Engine): Promise<void> {
+  await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
 }
 
 async function hint($: Engine, fullscreen: boolean): Promise<void> {
@@ -695,7 +718,7 @@ describe('plus mod', () => {
     await clock.advance(1000)
     expect(kinds(wiring)).toContain('turn.step')
     const ui = await mount($, 40)
-    expect((await ui.find({ key: 'cache' }))?.text).toBe('Cache ✻ warm (~1h)        59:59 left?')
+    expect(paintTree((await ui.find({ key: 'cache' })) as Parameters<typeof paintTree>[0], 38)).toEqual(['Cache ✻ warm (~1h)        59:59 left ?'])
     expect((await ui.find({ key: 'session-step' }))?.text).toBe('  Last request      25.3k in · 800 out')
   })
 
@@ -740,6 +763,88 @@ describe('plus mod', () => {
     const ui = await mount($, 40)
     expect((await ui.find({ key: 'daemon' }))?.text).toBe('claude-plus is not installed yet. Install it, or set its path in the plugin options')
     expect((await ui.find({ key: 'context' }))?.text).toBe('Context                     46k / 200k')
+  })
+
+  test('a daemon that dies after the first half minute is ensured again at once, leaving one stopped by hand alone', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(40_000)
+    wiring.down = true
+    await clock.advance(5000)
+    expect(wiring.ran).toEqual([
+      ['claude-plus', 'daemon', '--ensure'],
+      ['claude-plus', 'daemon', '--ensure', '--unless-stopped'],
+    ])
+  })
+
+  test('a daemon stopped by hand stays stopped, with a steady notice, until /plus starts it', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(40_000)
+    const ui = await mount($, 60)
+    wiring.down = true
+    wiring.exitCode = 3
+    const shown: (string | undefined)[] = []
+    for (let second = 0; second < 90; second += 1) {
+      await clock.advance(1000)
+      if (second >= 5) shown.push((await ui.find({ key: 'daemon' }))?.text)
+    }
+    expect([...new Set(shown)]).toEqual(['The claude-plus daemon is stopped · run /plus to start it'])
+    expect(wiring.ran.every(argv => argv.length === 3 || argv[3] === '--unless-stopped')).toBe(true)
+    wiring.down = false
+    wiring.exitCode = 0
+    await $.command.run({ command: 'plus', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+    await clock.advance(1000)
+    expect(wiring.ran.at(-1)).toEqual(['claude-plus', 'daemon', '--ensure'])
+    expect(await ui.find({ key: 'daemon' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('/plus while the daemon is being ensured shares that run', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { holdingRuns: true })
+    await start($)
+    await plus($)
+    await plus($)
+    wiring.holdingRuns = false
+    for (const release of wiring.heldRuns.splice(0)) release()
+    await clock.advance(1000)
+    expect(wiring.ran).toEqual([['claude-plus', 'daemon', '--ensure']])
+  })
+
+  test('/plus during a retry that leaves a stopped daemon alone ensures once more after it', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(40_000)
+    wiring.down = true
+    wiring.holdingRuns = true
+    await clock.advance(5000)
+    await plus($)
+    await plus($)
+    wiring.holdingRuns = false
+    for (const release of wiring.heldRuns.splice(0)) release()
+    await clock.advance(1000)
+    expect(wiring.ran).toEqual([
+      ['claude-plus', 'daemon', '--ensure'],
+      ['claude-plus', 'daemon', '--ensure', '--unless-stopped'],
+      ['claude-plus', 'daemon', '--ensure'],
+    ])
+  })
+
+  test('an older binary that does not know --unless-stopped is ensured without it', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { knowsUnlessStopped: false })
+    await start($)
+    await clock.advance(40_000)
+    wiring.down = true
+    await clock.advance(5000)
+    expect(wiring.ran.slice(1, 3)).toEqual([
+      ['claude-plus', 'daemon', '--ensure', '--unless-stopped'],
+      ['claude-plus', 'daemon', '--ensure'],
+    ])
   })
 
   test('a daemon older than the pane is replaced and read again', async ($, on) => {
@@ -868,23 +973,39 @@ describe('plus mod', () => {
     expect((await ui.find({ key: 'headline' }))?.text.endsWith('$5.18')).toBe(true)
   })
 
-  test('the heartbeat breathes while the cache is warm', async ($, on) => {
+  test('the heartbeat breathes in place at 10 fps while the cache is warm, without redrawing the pane', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
-    wire(on)
+    const wiring = wire(on)
     await start($)
     await clock.advance(1000)
     const ui = await mount($, 40)
-    const glyphs: string[] = []
-    for (let second = 0; second < 4; second += 1) {
-      glyphs.push(glyph(await ui.find({ key: 'cache' })))
-      await clock.advance(1000)
-    }
-    expect(glyphs.map(drawn => JSON.parse(drawn).props)).toEqual([
-      { color: 'claude' },
-      { color: 'claude', bold: true },
-      { color: 'claude' },
-      { color: 'claude', dimColor: true },
-    ])
+    const drawn = await ui.find({ key: 'heartbeat' })
+    expect([drawn?.type, drawn?.props.columns, drawn?.props.rows]).toEqual(['Raster', 1, 1])
+    await clock.advance(1000)
+    wiring.blits.length = 0
+    await clock.advance(4000)
+    const cells = wiring.blits.map(blit => decoded(blit.cells))
+    expect(new Set(wiring.blits.map(blit => blit.key))).toEqual(new Set(['heartbeat']))
+    expect(cells.length).toBeGreaterThanOrEqual(38)
+    expect(cells.every(words => words[0] === '✻'.charCodeAt(0))).toBe(true)
+    const colors = cells.map(words => words[1] ?? 0)
+    const channels = colors.map(color => [16, 8, 0].map(shift => (color >> shift) & 0xff))
+    expect(colors).toContain(0xd77757)
+    expect(new Set(colors).size).toBeGreaterThan(15)
+    expect(Math.max(...channels.slice(1).flatMap((now, index) => now.map((value, channel) => Math.abs(value - (channels[index]?.[channel] ?? 0)))))).toBeLessThan(12)
+  })
+
+  test('the heartbeat stops breathing on another tab', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-context' })
+    await clock.advance(1000)
+    wiring.blits.length = 0
+    await clock.advance(2000)
+    expect(wiring.blits).toEqual([])
   })
 
   test('animations=false jumps to new numbers and keeps the heartbeat still', { options: { animations: false } }, async ($, on) => {
@@ -1022,6 +1143,22 @@ describe('plus mod', () => {
     expect(wiring.usages.length).toBe(3)
   })
 
+  test('the Live view asks for a breakdown within a minute while it holds none for the current model', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await $.turn.complete({ turnId: 't1', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+    await clock.advance(1000)
+    expect(wiring.usages.length).toBe(1)
+    wiring.model = 'claude-sonnet-5-5'
+    await $.session.measure(MEASURE)
+    await $.turn.complete({ turnId: 't2', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+    await clock.advance(30_000)
+    expect(wiring.usages.length).toBe(1)
+    await clock.advance(30_000)
+    expect(wiring.usages.length).toBe(2)
+  })
+
   test('a pane that is not shown asks for no breakdown and polls no context report', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)
@@ -1144,7 +1281,7 @@ describe('plus mod', () => {
       }
       const rows = paintTree(await ui.drawn(), columns)
       expect(rows.filter(row => row.length > columns)).toEqual([])
-      expect(trimmed(rows.slice(0, 4))).toEqual([HISTORY_HEADERS[columns], '', ' r: 7 days  g: Cost', ''])
+      expect(trimmed(rows.slice(0, 4))).toEqual([HISTORY_HEADERS[columns], '', columns === 40 ? ' r: 7 days  g: Cost' : ' r: 24h 7d 30d 90d  g: Cost Tokens % of 5h', ''])
       const screen = historyScreen({ width: columns, range: '7d', metric: 'cost', reports: { '7d': historyReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [], theme: 'dark' })
       expect(trimmed(rows.slice(4))).toEqual(trimmed(painted(screen, columns)))
       await ui.unmount()
@@ -1160,11 +1297,16 @@ describe('plus mod', () => {
     const ui = await mount($, 60)
     await ui.press({ key: 'tab-history' })
     for (const _ of [0, 1, 2]) await ui.press({ key: 'range' })
+    await ui.press({ key: 'metric' })
     await clock.advance(1000)
     expect((await ui.find({ key: 'range' }))?.props.label).toBe('24 hours')
-    expect((await ui.find({ key: 'hist-hit-chart' }))?.type).toBe('Raster')
     const rows = paintTree(await ui.drawn(), 60)
-    const screen = historyScreen({ width: 60, range: '24h', metric: 'cost', reports: { '24h': dayReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [], theme: 'dark' })
+    expect(rows[2]?.trimEnd()).toBe(' r: 24h 7d 30d 90d  g: Cost Tokens % of 5h')
+    const marked = async (key: string) => ((await ui.find({ key }))?.children ?? []).flatMap(child => (typeof child === 'object' && child !== null && 'props' in child && (child.props as { bold?: boolean }).bold === true ? [child] : []))
+    expect((await marked('range')).map(child => paintTree(child as Parameters<typeof paintTree>[0], 60).join(''))).toEqual(['24h'])
+    expect((await marked('metric')).map(child => paintTree(child as Parameters<typeof paintTree>[0], 60).join(''))).toEqual(['Tokens'])
+    expect((await ui.find({ key: 'hist-hit-chart' }))?.type).toBe('Raster')
+    const screen = historyScreen({ width: 60, range: '24h', metric: 'tokens', reports: { '24h': dayReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [], theme: 'dark' })
     expect(trimmed(rows.slice(4))).toEqual(trimmed(painted(screen, 60)))
     expect(rows.some(row => row.includes('▇'))).toBe(true)
     await ui.unmount()
@@ -1359,7 +1501,7 @@ describe('plus mod', () => {
     await clock.advance(1000)
     expect(await ui.find({ key: 'hist-loading' })).toBeUndefined()
     expect((await ui.find({ key: 'hist-failed' }))?.text).toBe('This claude-plus daemon is older than the pane and has no History')
-    expect((await ui.find({ key: 'hist-retry' }))?.text).toBe('Run claude-plus daemon stop to restart it')
+    expect((await ui.find({ key: 'hist-retry' }))?.text).toBe('Run claude-plus daemon stop, then /plus')
     expect(asked()).toBe(1)
     await clock.advance(30_000)
     expect(asked()).toBe(2)
@@ -1475,7 +1617,7 @@ describe('plus mod', () => {
     await clock.advance(1000)
     expect(await ui.find({ key: 'ins-loading' })).toBeUndefined()
     expect((await ui.find({ key: 'ins-failed' }))?.text).toBe('This claude-plus daemon is older than the pane and has no Insights')
-    expect((await ui.find({ key: 'ins-retry' }))?.text).toBe('Run claude-plus daemon stop to restart it')
+    expect((await ui.find({ key: 'ins-retry' }))?.text).toBe('Run claude-plus daemon stop, then /plus')
     expect(wiring.toasts).toEqual([])
     const before = asked()
     await clock.advance(60_000)

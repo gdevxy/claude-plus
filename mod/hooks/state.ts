@@ -1,8 +1,9 @@
 import type { ThemeKey, TurnUsage } from 'claude-code'
 
-import type { Daemon, DaemonStatus, LimitWindow, Local, Motion, Snapshot, Step } from '../types'
+import type { Daemon, DaemonStatus, LimitWindow, LiveContext, Local, ModelCost, Motion, Snapshot, Step } from '../types'
 import type { Grid } from './chart'
 import {
+  approx,
   bar,
   countdown,
   duration,
@@ -19,8 +20,11 @@ export const PADDING = 1
 export const MIN_CONTENT = 24
 export const EASE_MS = 300
 export const FRAME_MS = 50
-export const BREATH_MS = 1000
-export const QUICK_BREATH_MS = 500
+export const BREATH_MS = 4000
+export const QUICK_BREATH_MS = 1000
+export const BREATH_FRAME_MS = 100
+export const HEARTBEAT = '✻'
+export const MARK = '│'
 export const TICK_MS = 1000
 export const LAST_MINUTE_MS = 60_000
 export const HOUR_MS = 3_600_000
@@ -33,7 +37,7 @@ export const WINDOW_ORDER = ['five_hour', 'seven_day', 'spend_limit']
 export const RESET_TOLERANCE_MS = 60_000
 export const PAIRS_NEEDED = 20
 
-export type Segment = { text: string; color?: ThemeKey; dim?: true; bold?: true }
+export type Segment = { text: string; color?: ThemeKey; dim?: true; bold?: true; glow?: number }
 export type Line = { key: string; segments: Segment[]; why?: string; toggle?: string; wrap?: true; indent?: number; chart?: Grid }
 
 export type ScreenInput = {
@@ -46,6 +50,8 @@ export type ScreenInput = {
   expanded: readonly string[]
   motions: Readonly<Record<string, Motion>>
 }
+
+export type ContextGauge = { tokens: number | null; window: number; percent: number | null; modelWindow: number | null; threshold: number | null }
 
 export type CacheClock = {
   state: 'warm' | 'cold' | 'none'
@@ -67,6 +73,7 @@ export const EMPTY_LOCAL: Local = {
 }
 
 export const MISSING_EXIT = 127
+export const LEFT_STOPPED_EXIT = 3
 
 export function stepOf(usage: TurnUsage, atMs: number): Step {
   return {
@@ -82,6 +89,7 @@ export function stepOf(usage: TurnUsage, atMs: number): Step {
 export function ensureOutcome(exitCode: number, stderr: string): Daemon {
   if (exitCode === 0) return { status: 'ok', detail: null }
   if (exitCode === MISSING_EXIT) return { status: 'missing', detail: null }
+  if (exitCode === LEFT_STOPPED_EXIT) return { status: 'stopped', detail: null }
   return { status: 'failed', detail: firstLine(stderr) ?? `exit code ${exitCode}` }
 }
 
@@ -124,20 +132,32 @@ export function cacheClock(snapshot: Snapshot | null, local: Local, nowMs: numbe
   }
 }
 
+export type Breath = { color: ThemeKey; anchorMs: number; periodMs: number }
+
+function glyphColor(clock: CacheClock): ThemeKey {
+  return clock.remainingMs <= LAST_MINUTE_MS ? 'warning' : 'claude'
+}
+
+export function breathOf(clock: CacheClock, animations: boolean, working: boolean): Breath | null {
+  if (clock.state !== 'warm' || !animations || working) return null
+  const color = glyphColor(clock)
+  return { color, anchorMs: clock.expiresAtMs ?? 0, periodMs: color === 'warning' ? QUICK_BREATH_MS : BREATH_MS }
+}
+
+export function glowOf(breathing: Breath, nowMs: number): number {
+  return breath(nowMs - breathing.anchorMs, breathing.periodMs)
+}
+
 export function heartbeat(clock: CacheClock, nowMs: number, animations: boolean, working: boolean): Segment {
   if (clock.state !== 'warm') return { text: '·', dim: true }
-  const urgent = clock.remainingMs <= LAST_MINUTE_MS
-  const color: ThemeKey = urgent ? 'warning' : 'claude'
-  if (!animations || working) return { text: '✻', color }
-  if (urgent) {
-    return Math.floor(nowMs / QUICK_BREATH_MS) % 2 === 0
-      ? { text: '✻', color, bold: true }
-      : { text: '✻', color, dim: true }
-  }
-  const phase = Math.floor(nowMs / BREATH_MS) % 4
-  if (phase === 0) return { text: '✻', color, dim: true }
-  if (phase === 2) return { text: '✻', color, bold: true }
-  return { text: '✻', color }
+  const breathing = breathOf(clock, animations, working)
+  if (breathing === null) return { text: HEARTBEAT, color: glyphColor(clock) }
+  return { text: HEARTBEAT, color: breathing.color, glow: glowOf(breathing, nowMs) }
+}
+
+export function breath(sinceMs: number, periodMs: number): number {
+  const phase = (((sinceMs % periodMs) + periodMs) % periodMs) / periodMs
+  return Math.round((0.5 - 0.5 * Math.cos(2 * Math.PI * phase)) * 1000) / 1000
 }
 
 export function eased(motion: Motion, nowMs: number): number {
@@ -180,7 +200,7 @@ export function easables(sources: Sources): Record<string, number> {
   const values: Record<string, number> = {}
   const cost = costOf(sources)
   if (cost !== null) values.cost = cost
-  const context = sources.local.measure?.contextPercent ?? null
+  const context = contextGauge(sources.local)?.percent ?? null
   if (context !== null) values.context = context
   const hit = sources.snapshot?.live.cache.hit_ratio ?? null
   if (hit !== null) values.hit = hit * 100
@@ -209,11 +229,14 @@ export function retarget(
   return next
 }
 
-export function tickPeriod(input: Pick<ScreenInput, 'animations' | 'motions' | 'nowMs' | 'snapshot' | 'local'>): number {
+export type TickInput = Pick<ScreenInput, 'animations' | 'motions' | 'nowMs' | 'snapshot' | 'local'> & { breathing: boolean }
+
+export function tickPeriod(input: TickInput): number {
   if (!input.animations) return TICK_MS
   if (isMoving(input.motions, input.nowMs)) return FRAME_MS
   const clock = cacheClock(current(input), input.local, input.nowMs)
-  return clock.state === 'warm' && clock.remainingMs <= LAST_MINUTE_MS ? QUICK_BREATH_MS : TICK_MS
+  if (clock.state !== 'warm' || input.local.working || input.breathing) return TICK_MS
+  return clock.remainingMs <= LAST_MINUTE_MS ? QUICK_BREATH_MS / 2 : TICK_MS
 }
 
 export function nextTickDelay(periodMs: number, anchorMs: number, nowMs: number): number {
@@ -319,17 +342,56 @@ export function heading(key: string, title: string, width: number, why?: string)
   return line
 }
 
-export function meter(key: string, label: string, fraction: number, value: string, width: number, color: ThemeKey): Line {
+export function meter(key: string, label: string, fraction: number, value: string, width: number, color: ThemeKey, mark: number | null = null): Line {
   const labelled = label.length > 0 ? `${label} ` : ''
-  const cells = bar(fraction, width - labelled.length - value.length - 1)
+  const size = width - labelled.length - value.length - 1
+  const cells = bar(fraction, size)
+  const at = mark === null || mark <= 0 || mark >= 1 ? -1 : Math.floor(mark * size) - cells.filled.length
+  const track: Segment[] =
+    at < 0
+      ? [{ text: cells.track, dim: true }]
+      : [{ text: cells.track.slice(0, at), dim: true }, { text: MARK }, { text: cells.track.slice(at + 1), dim: true }]
+  return { key, segments: [{ text: labelled }, { text: cells.filled, color }, ...track, { text: ` ${value}` }] }
+}
+
+export function contextHead(key: string, title: string, used: number | null, window: number, full: number | null, width: number, accent: Style = {}): Line {
+  const amount = used === null ? tokens(window) : `${tokens(used)} / ${tokens(window)}`
+  const note = full === null ? '' : ` · ${tokens(full)} model`
+  const shownNote = title.length + 1 + amount.length + note.length <= width ? note : ''
+  const line = pair(key, title, `${amount}${shownNote}`, width, {}, { bold: true })
+  const left = line.segments[0]!
+  const right: Segment[] = used === null ? [{ text: amount }] : [{ text: tokens(used), ...accent }, { text: ` / ${tokens(window)}` }]
+  return { key, segments: [left, ...right, ...(shownNote === '' ? [] : [{ text: shownNote, dim: true as const }])] }
+}
+
+export function sameModel(a: string | null, b: string | null): boolean {
+  return a !== null && b !== null && modelName(a) === modelName(b)
+}
+
+export function ownBreakdown(local: Pick<Local, 'breakdown' | 'model'>): LiveContext | null {
+  const breakdown = local.breakdown
+  return breakdown !== null && breakdown.max_tokens > 0 && sameModel(breakdown.model, local.model) ? breakdown : null
+}
+
+export function modelWindowBeyond(local: Pick<Local, 'measure' | 'model'>, model: string, window: number): number | null {
+  const full = local.measure?.contextWindow ?? null
+  return full !== null && full > window && sameModel(model, local.model) ? full : null
+}
+
+export function contextGauge(local: Local): ContextGauge | null {
+  const measure = local.measure
+  if (measure === null) return null
+  const breakdown = ownBreakdown(local)
+  if (breakdown === null) {
+    return { tokens: measure.contextTokens, window: measure.contextWindow, percent: measure.contextPercent, modelWindow: null, threshold: null }
+  }
+  const window = breakdown.max_tokens
   return {
-    key,
-    segments: [
-      { text: labelled },
-      { text: cells.filled, color },
-      { text: cells.track, dim: true },
-      { text: ` ${value}` },
-    ],
+    tokens: measure.contextTokens,
+    window,
+    percent: measure.contextTokens === null ? null : (measure.contextTokens / window) * 100,
+    modelWindow: modelWindowBeyond(local, breakdown.model, window),
+    threshold: breakdown.auto_compact_threshold,
   }
 }
 
@@ -356,6 +418,11 @@ export function notice(input: Pick<ScreenInput, 'daemon'>, width: number): Line[
     const whole = 'The daemon is not answering · run claude-plus daemon --ensure'
     if (whole.length <= width) return [prose('daemon', whole, { color: 'warning' })]
     return [prose('daemon', 'The daemon is not answering', { color: 'warning' }), prose('daemon-fix', 'Run claude-plus daemon --ensure', { color: 'warning' })]
+  }
+  if (status === 'stopped') {
+    const whole = 'The claude-plus daemon is stopped · run /plus to start it'
+    if (whole.length <= width) return [prose('daemon', whole, { color: 'warning' })]
+    return [prose('daemon', 'The claude-plus daemon is stopped', { color: 'warning' }), prose('daemon-fix', 'Run /plus to start it', { color: 'warning' })]
   }
   return [prose('daemon', `The daemon could not start: ${detail ?? 'no reason given'}`, { color: 'error' })]
 }
@@ -384,17 +451,16 @@ function headline(input: ScreenInput, snapshot: Snapshot | null, width: number):
 }
 
 function context(input: ScreenInput, width: number): Line[] {
-  const measure = input.local.measure
-  if (measure === null || measure.contextPercent === null) {
+  const gauge = contextGauge(input.local)
+  if (gauge === null || gauge.percent === null) {
     return [plain('context', 'Context', { bold: true }), prose('context-empty', 'Context shows after your first prompt', { dim: true })]
   }
-  const used = shown(input.motions, 'context', measure.contextPercent, input.nowMs)
-  const amount =
-    measure.contextTokens === null ? tokens(measure.contextWindow) : `${tokens(measure.contextTokens)} / ${tokens(measure.contextWindow)}`
+  const used = shown(input.motions, 'context', gauge.percent, input.nowMs)
   const color: ThemeKey = used >= CONTEXT_WARNING ? 'warning' : 'text'
+  const mark = gauge.threshold === null ? null : gauge.threshold / gauge.window
   return [
-    pair('context', 'Context', amount, width, {}, { bold: true }),
-    meter('context-bar', '', used / 100, percent(used).padStart(4), width, color),
+    contextHead('context', 'Context', gauge.tokens, gauge.window, gauge.modelWindow, width),
+    meter('context-bar', '', used / 100, percent(used).padStart(4), width, color, mark),
   ]
 }
 
@@ -435,7 +501,7 @@ function cache(input: ScreenInput, snapshot: Snapshot | null, width: number): Li
   })
   const live = snapshot?.live.cache
   if (clock.state === 'cold' && forecast?.cold_usd != null) {
-    const price = `~${money(forecast.cold_usd)}`
+    const price = approx(forecast.cold_usd)
     const whole = `Cache went cold while you were away, rewarming will cost ${price}`
     if (whole.length <= width) {
       lines.push(prose('cache-note', whole))
@@ -452,7 +518,7 @@ function cache(input: ScreenInput, snapshot: Snapshot | null, width: number): Li
     lines.push(pair('cache-hits', '  Hit ratio', percent(hit), width, {}, { dim: true }))
   }
   if (live !== undefined && live.rebuilds > 0) {
-    const value = `${live.rebuilds} · ~${money(live.rebuild_usd)}`
+    const value = `${live.rebuilds} · ${approx(live.rebuild_usd)}`
     lines.push({ ...pair('cache-rebuilds', '  Rebuilds', value, width - WHY_COLUMNS, {}, { dim: true }), why: 'rebuilds' })
   }
   if (input.expanded.includes('cache')) lines.push(...cacheWhy(clock))
@@ -483,30 +549,66 @@ function rebuildWhy(cause: string, agoMs: number): string {
 function forecast(input: ScreenInput, snapshot: Snapshot | null, width: number): Line[] {
   const next = snapshot?.live.forecast ?? null
   if (next === null || (next.warm_usd === null && next.cold_usd === null)) return []
-  const clock = cacheClock(snapshot, input.local, input.nowMs)
+  const warm = cacheClock(snapshot, input.local, input.nowMs).state === 'warm'
   const cost = (usd: number | null, pct: number | null) =>
-    usd === null ? 'price unknown' : pct === null ? `~${money(usd)}` : `~${money(usd)} · ${finePercent(pct)} of 5h`
-  const warmFirst = clock.state === 'warm'
+    usd === null ? 'price unknown' : pct === null ? approx(usd) : `${approx(usd)} · ${finePercent(pct)} of 5h`
+  const warmCost = cost(next.warm_usd, next.warm_pct_5h)
+  const coldCost = cost(next.cold_usd, next.cold_pct_5h)
+  const current = currentModel(next.model, warm ? warmCost : coldCost, width)
+  const later = warm ? coldCost : warmCost
+  const when = warm ? fitting(width - later.length - 1, '    if the cache expires', '    if it expires') : '    then'
+  const after = pair('next-after', when, later, width, { dim: true }, { dim: true })
+  const others = next.lineup.filter(entry => entry.model !== next.model)
+  const above = next.lineup.findIndex(entry => entry.model === next.model)
+  const switched = (entry: ModelCost) =>
+    pair(`next-${entry.model}`, `  ${modelName(entry.model)}`, `${approx(entry.cold_usd)}, then ${approx(entry.warm_usd)}`, width, {}, { dim: true })
   const lines: Line[] = [
-    heading('next', 'Next turn', width, 'forecast'),
-    pair('next-warm', '  if warm', cost(next.warm_usd, next.warm_pct_5h), width, warmFirst ? {} : { dim: true }, { dim: true }),
-    pair('next-cold', '  if cold', cost(next.cold_usd, next.cold_pct_5h), width, warmFirst ? { dim: true } : {}, { dim: true }),
+    forecastHeading(warm, width),
+    ...others.slice(0, Math.max(0, above)).map(switched),
+    current,
+    after,
+    ...others.slice(Math.max(0, above)).map(switched),
   ]
-  if (next.alternative !== null) {
-    const value = `~${money(next.alternative.first_usd)}, then ~${money(next.alternative.next_usd)}`
-    lines.push(pair('next-alternative', `  on ${modelName(next.alternative.model)}`, value, width, { dim: true }, { dim: true }))
-  }
   if (input.expanded.includes('forecast')) {
     lines.push(
       prose(
         'explain-forecast',
         `Your ${tokens(next.prefix_tokens)} token prompt is read from the cache when warm and written again when cold. ` +
+          `Each model keeps its own cache, so switching starts cold. ` +
           `${tokens(next.new_tokens)} new and ${tokens(next.output_tokens)} output tokens are typical of your last ${next.samples} requests.`,
         { dim: true },
       ),
     )
   }
   return lines
+}
+
+function forecastHeading(warm: boolean, width: number): Line {
+  const title = 'Next prompt'
+  const room = width - WHY_COLUMNS
+  const state = ` · cache ${warm ? 'warm' : 'cold'}`
+  const shown = title.length + state.length <= room ? state : ''
+  return {
+    key: 'next',
+    why: 'forecast',
+    segments: [
+      { text: title, bold: true },
+      { text: shown.padEnd(room - title.length), dim: true },
+    ],
+  }
+}
+
+function currentModel(model: string, value: string, width: number): Line {
+  const marker = '● '
+  const [label, price] = pair('next-current', `${marker}${modelName(model)}`, value, width).segments
+  return {
+    key: 'next-current',
+    segments: [
+      { text: marker, color: 'claude' },
+      { text: (label?.text ?? '').slice(marker.length), bold: true },
+      { text: price?.text ?? '', bold: true },
+    ],
+  }
 }
 
 function session(input: ScreenInput, snapshot: Snapshot | null, width: number): Line[] {

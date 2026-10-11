@@ -7,12 +7,18 @@ import { ALERT_TOAST_MS, CHIME, EMPTY_ALERTED, alertsOf, merged, ownAlerts, want
 import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchInsights, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
 import { contextScreen } from './context'
 import { money } from './format'
-import { historyScreen, metricLabel, nextMetric, nextRange, rangeLabel, shownMetric } from './history'
+import { historyScreen, metricChoices, metricLabel, nextMetric, nextRange, rangeChoices, rangeLabel, shownMetric } from './history'
 import { insightsScreen, recapText } from './insights'
+import { glowCell } from './chart'
+import type { Palette } from './palette'
 import { paletteOf } from './palette'
+import type { Breath } from './state'
 import {
+  BREATH_FRAME_MS,
   EMPTY_LOCAL,
+  HEARTBEAT,
   TICK_MS,
+  breathOf,
   cacheClock,
   current,
   easables,
@@ -24,10 +30,13 @@ import {
   statusText,
   stepOf,
   nextTickDelay,
+  ownBreakdown,
   tickPeriod,
+  glowOf,
   toggled,
 } from './state'
 import { PaneBody } from './views/pane'
+import { HEARTBEAT_KEY } from './views/widgets'
 
 export const PANE_ID = 'plus'
 export const PANE_TITLE = 'claude-plus'
@@ -64,6 +73,8 @@ const now = atom({ plugin: 'plus', key: 'now' } as const, 0)
 const expanded = atom({ plugin: 'plus', key: 'expanded' } as const, [] as string[])
 const motions = atom({ plugin: 'plus', key: 'motions' } as const, {} as Record<string, Motion>)
 
+type Breathing = { breath: Breath; palette: Palette; timer: Timer }
+
 type Runtime = {
   binary: string
   animations: boolean
@@ -72,8 +83,9 @@ type Runtime = {
   interactive: boolean
   outbox: Outbox
   timer: Timer | null
+  breathing: Breathing | null
   socket: string | null | undefined
-  ensuring: Promise<void> | null
+  ensuring: { mode: EnsureMode; done: Promise<void> } | null
   ensuredAtMs: number
   replaceTried: boolean
   posting: { sinceMs: number } | null
@@ -103,6 +115,7 @@ function fresh(options: PluginOptions): Runtime {
     interactive: false,
     outbox: new Outbox(),
     timer: null,
+    breathing: null,
     socket: undefined,
     ensuring: null,
     ensuredAtMs: -Infinity,
@@ -165,6 +178,7 @@ async function delayToNextTick($: EngineInterface): Promise<number> {
       nowMs: await $.clock.now(),
       snapshot: await read($, snapshot),
       local: await read($, local),
+      breathing: runtime.breathing !== null,
     }
     return nextTickDelay(tickPeriod(input), cacheClock(current(input), input.local, input.nowMs).expiresAtMs ?? 0, input.nowMs)
   } catch {
@@ -187,20 +201,51 @@ async function tick($: EngineInterface): Promise<void> {
     const historyWanted = shownView === 'history' && !runtime.historyRunning && at - runtime.historyPolledAtMs >= HISTORY_POLL_MS
     const insightsWanted = shownView === 'insights' && !runtime.insightsRunning && at - runtime.insightsPolledAtMs >= INSIGHTS_POLL_MS
     if ((usageWanted || contextWanted || historyWanted || insightsWanted) && (await paneShown($))) {
-      const usageGap = shownView === 'context' ? USAGE_GAP_MS : USAGE_IDLE_GAP_MS
+      const held = ownBreakdown(await read($, local)) !== null
+      const usageGap = shownView === 'context' || !held ? USAGE_GAP_MS : USAGE_IDLE_GAP_MS
       if (usageWanted && at - runtime.usageAtMs >= usageGap) quietly(collectUsage($))
       if (contextWanted) await pollContext($)
       if (historyWanted) quietly(pollHistory($))
       if (insightsWanted) quietly(pollInsights($))
     }
     const status = (await read($, daemon)).status
-    if (needsEnsure(status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($))
+    if (needsEnsure(status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($, 'unless-stopped'))
     if (greetAgainWanted(status, at)) quietly(greet($, Promise.resolve()))
+    await steerBreath($)
   } catch {
     return
   } finally {
     arm($, await delayToNextTick($))
   }
+}
+
+async function wantedBreath($: EngineInterface): Promise<{ breath: Breath; palette: Palette } | null> {
+  if (!runtime.animations || (await read($, view)) !== 'live') return null
+  const palette = paletteOf(await read($, theme))
+  if (palette === null) return null
+  const known = await read($, local)
+  const breath = breathOf(cacheClock(current({ snapshot: await read($, snapshot), local: known }), known, await $.clock.now()), runtime.animations, known.working)
+  if (breath === null || !(await paneShown($))) return null
+  return { breath, palette }
+}
+
+async function steerBreath($: EngineInterface): Promise<void> {
+  const wanted = await wantedBreath($)
+  const running = runtime.breathing
+  if (running !== null && wanted !== null && running.palette === wanted.palette && JSON.stringify(running.breath) === JSON.stringify(wanted.breath)) return
+  running?.timer.cancel()
+  runtime.breathing = null
+  if (wanted === null) return
+  try {
+    runtime.breathing = { ...wanted, timer: $.clock.every(BREATH_FRAME_MS, () => quietly(breathe($, wanted.breath, wanted.palette))) }
+  } catch {
+    runtime.breathing = null
+  }
+}
+
+async function breathe($: EngineInterface, breath: Breath, palette: Palette): Promise<void> {
+  const cells = glowCell(HEARTBEAT, breath.color, glowOf(breath, await $.clock.now()), palette)
+  if (cells !== null) await $.ui.blit({ requestId: PANE_ID, key: HEARTBEAT_KEY, cells })
 }
 
 async function paneShown($: EngineInterface): Promise<boolean> {
@@ -269,7 +314,7 @@ async function poll($: EngineInterface): Promise<void> {
     if (status !== next) await update($, daemon, (): Daemon => ({ status: next, detail: null }))
     if (next === 'outdated') {
       runtime.replaceTried = true
-      quietly((runtime.ensuring ?? Promise.resolve()).then(() => ensureDaemon($)))
+      quietly(afterwards(runtime.ensuring?.done).then(() => ensureDaemon($)))
     }
     return
   }
@@ -500,14 +545,15 @@ function settlesOnPoll(status: DaemonStatus): boolean {
   return status === 'outdated' || status === 'behind' || status === 'newer'
 }
 
-function ensureDaemon($: EngineInterface): Promise<void> {
-  runtime.ensuring ??= (async () => {
+type EnsureMode = 'always' | 'unless-stopped'
+
+function ensureDaemon($: EngineInterface, mode: EnsureMode = 'always'): Promise<void> {
+  const running = runtime.ensuring
+  if (running !== null) return covers(running.mode, mode) ? running.done : afterwards(running.done).then(() => ensureDaemon($, mode))
+  const done = (async () => {
     try {
       runtime.ensuredAtMs = await $.clock.now()
-      const outcome = await $.process.run([runtime.binary, 'daemon', '--ensure'], { timeoutMs: ENSURE_TIMEOUT_MS }).then(
-        result => ensureOutcome(result.exitCode, result.stderr),
-        ensureError,
-      )
+      const outcome = await runEnsure($, mode)
       await update($, daemon, known => (outcome.status === 'ok' && settlesOnPoll(known.status) ? known : outcome))
       if (outcome.status !== 'ok') return
       await flush($)
@@ -516,7 +562,23 @@ function ensureDaemon($: EngineInterface): Promise<void> {
       runtime.ensuring = null
     }
   })()
-  return runtime.ensuring
+  runtime.ensuring = { mode, done }
+  return done
+}
+
+function afterwards(running: Promise<void> | undefined): Promise<void> {
+  return (running ?? Promise.resolve()).catch(() => undefined)
+}
+
+function covers(running: EnsureMode, wanted: EnsureMode): boolean {
+  return running === 'always' || wanted === 'unless-stopped'
+}
+
+async function runEnsure($: EngineInterface, mode: EnsureMode): Promise<Daemon> {
+  const argv = [runtime.binary, 'daemon', '--ensure', ...(mode === 'unless-stopped' ? ['--unless-stopped'] : [])]
+  const outcome = await $.process.run(argv, { timeoutMs: ENSURE_TIMEOUT_MS }).then(result => ensureOutcome(result.exitCode, result.stderr), ensureError)
+  const unknownFlag = mode === 'unless-stopped' && outcome.status === 'failed' && (outcome.detail ?? '').includes('--unless-stopped')
+  return unknownFlag ? runEnsure($, 'always') : outcome
 }
 
 async function open($: EngineInterface, fullscreen: boolean): Promise<string> {
@@ -718,8 +780,8 @@ export const register: Register = (on, options) => {
         controls={
           shownView === 'history'
             ? [
-                { key: 'range', hotkey: 'r', label: rangeLabel(chosen.range), onPress: () => quietly(cycleRange($)) },
-                { key: 'metric', hotkey: 'g', label: metricLabel(shownMetric(chosen.metric, shown)), onPress: () => quietly(cycleMetric($)) },
+                { key: 'range', hotkey: 'r', label: rangeLabel(chosen.range), choices: rangeChoices(chosen.range), onPress: () => quietly(cycleRange($)) },
+                { key: 'metric', hotkey: 'g', label: metricLabel(shownMetric(chosen.metric, shown)), choices: metricChoices(chosen.metric, shown), onPress: () => quietly(cycleMetric($)) },
               ]
             : []
         }

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { HistoryInput } from '../hooks/history'
-import { amount, hitFloor, historyScreen, metricsOf, nextMetric, nextRange, shownMetric } from '../hooks/history'
+import { amount, hitFloor, historyScreen, metricChoices, metricsOf, nextMetric, nextRange, rangeChoices, shownMetric } from '../hooks/history'
 import type { Line } from '../hooks/state'
 import type { HistoryReport } from '../types'
 import { DAY_MS, OCT_5_MS, OPUS, bucket, contextReport, dayReport, historyReport, local, spend } from './fixtures'
@@ -43,6 +43,16 @@ describe('history screen', () => {
     expect([nextMetric('cost', learning), nextMetric('tokens', learning), nextMetric('pct', learning)]).toEqual(['tokens', 'cost', 'tokens'])
     expect([metricsOf(null), shownMetric('pct', learning), shownMetric('pct', calibrated)]).toEqual([['cost', 'tokens'], 'cost', 'pct'])
     expect([amount(15.97, 'cost'), amount(1_597_000, 'tokens'), amount(31.94, 'pct')]).toEqual(['$15.97', '1.6M', '~32%'])
+  })
+
+  test('the controls list every choice and mark the one shown', () => {
+    const active = (choices: { text: string; isActive: boolean }[]) => choices.filter(choice => choice.isActive).map(choice => choice.text)
+    expect(rangeChoices('30d').map(choice => choice.text)).toEqual(['24h', '7d', '30d', '90d'])
+    expect(active(rangeChoices('30d'))).toEqual(['30d'])
+    expect(metricChoices('tokens', historyReport()).map(choice => choice.text)).toEqual(['Cost', 'Tokens', '% of 5h'])
+    expect(active(metricChoices('tokens', historyReport()))).toEqual(['Tokens'])
+    const learning = historyReport({ calibration: { calibrated: false, pairs: 4, needed: 20 } })
+    expect(metricChoices('pct', learning)).toEqual([{ text: 'Cost', isActive: true }, { text: 'Tokens', isActive: false }])
   })
 
   test('draws the week at 40 columns with the charts as cells', () => {
@@ -251,7 +261,7 @@ describe('history screen', () => {
     expect(failed.map(text)).toEqual(['Last 30 days', 'Could not load the last 30 days: no answer within 3000 ms', 'Trying again every 30 s'])
     expect(failed.slice(1).map(found => found.segments[0]?.dim)).toEqual([true, true])
     const older = historyScreen(input({ range: '30d', context: null, failures: { '30d': { kind: 'missing', reason: 'this daemon has no History' } } }))
-    expect(older.map(text)).toEqual(['Last 30 days', 'This claude-plus daemon is older than the pane and has no History', 'Run claude-plus daemon stop to restart it'])
+    expect(older.map(text)).toEqual(['Last 30 days', 'This claude-plus daemon is older than the pane and has no History', 'Run claude-plus daemon stop, then /plus'])
     const other = historyScreen(input({ range: '30d', context: null, failures: { '7d': { kind: 'failed', reason: 'boom' } } }))
     expect(other.map(text)).toEqual(['Last 30 days', 'Loading the last 30 days… ✻'])
   })

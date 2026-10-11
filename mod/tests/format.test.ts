@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  approx,
   bar,
   countdown,
   duration,
@@ -24,6 +25,10 @@ describe('format', () => {
       '$999.99',
       '$1,235',
     ])
+  })
+
+  test('approx marks estimates without doubling up on a tiny amount', () => {
+    expect([0, 0.004, 0.34].map(approx)).toEqual(['~$0.00', '<$0.01', '~$0.34'])
   })
 
   test('tokens scale to k and M with one decimal below a hundred and no trailing zero', () => {
