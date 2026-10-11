@@ -11,13 +11,13 @@ claude-plus runs on macOS and Linux and needs Claude Code 2.1.296 or newer.
 Install the binary with Homebrew:
 
 ```bash
-brew install @GITHUB_OWNER@/tap/claude-plus
+brew install gdevxy/tap/claude-plus
 ```
 
 Or with the install script, which puts it in `~/.local/bin`:
 
 ```bash
-curl -fsSL https://github.com/@GITHUB_OWNER@/claude-plus/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/gdevxy/claude-plus/releases/latest/download/install.sh | sh
 ```
 
 The script checks the archive against the release's `SHA256SUMS`, which guards against a broken download but comes from the same place as the archive, so it does not prove who built it.
@@ -36,7 +36,7 @@ Start a new Claude Code session: the pane docks beside the conversation when the
 The mod alone can also be installed from Claude Code's prompt; it still needs the `claude-plus` binary on `PATH`:
 
 ```
-/plugin install plus --marketplace @GITHUB_OWNER@/claude-plus
+/plugin install plus --marketplace gdevxy/claude-plus
 ```
 
 ## The pane
