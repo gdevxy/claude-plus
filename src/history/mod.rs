@@ -160,6 +160,8 @@ pub struct HistoryReport {
     pub account: Option<String>,
     #[serde(default)]
     pub accounts: Vec<AccountRef>,
+    #[serde(default)]
+    pub unknown: bool,
     pub calibration: Calibration,
     pub totals: Totals,
     pub buckets: Vec<Bucket>,
@@ -276,7 +278,9 @@ where
         .filter(|a| scope.keeps(&kept, &a.session_id))
         .collect();
     let spending = store.sessions_spending_between(since, until)?;
-    let accounts = accounts_in(store, &spending, scope)?;
+    let attributed = store.session_accounts()?;
+    let accounts = accounts_in(store, &spending, &attributed, scope)?;
+    let unknown = spending.iter().any(|s| !attributed.contains_key(&s.id));
     let sessions: Vec<SessionInfo> = spending
         .into_iter()
         .filter(|s| scope.keeps(&kept, &s.id))
@@ -332,12 +336,17 @@ where
     Ok(HistoryReport {
         account: scope.account().map(String::from),
         accounts,
+        unknown,
         ..report
     })
 }
 
-fn accounts_in(store: &Store, spending: &[SessionInfo], scope: &Scope) -> Result<Vec<AccountRef>> {
-    let attributed = store.session_accounts()?;
+fn accounts_in(
+    store: &Store,
+    spending: &[SessionInfo],
+    attributed: &HashMap<String, String>,
+    scope: &Scope,
+) -> Result<Vec<AccountRef>> {
     let mut shown: HashSet<&str> = spending
         .iter()
         .filter_map(|s| attributed.get(&s.id).map(String::as_str))
@@ -589,6 +598,7 @@ pub fn build(range: Range, spans: &Spans, inputs: &Inputs, now_ms: i64) -> Histo
         until_ms: spans.until * 1000,
         account: None,
         accounts: Vec::new(),
+        unknown: false,
         calibration: Calibration {
             calibrated: rates.fallback.is_some(),
             pairs: rates.pairs,

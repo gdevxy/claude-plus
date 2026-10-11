@@ -248,6 +248,7 @@ fn the_week_report_matches_the_contract() {
             "until_ms": oct5 + 7 * day,
             "account": "oauth:me",
             "accounts": [{"id": "oauth:me", "label": "Me", "kind": "oauth"}],
+            "unknown": false,
             "calibration": {"calibrated": true, "pairs": 25, "needed": 20},
             "totals": {"requests": 6, "unpriced": 1, "cost_usd": 6.0, "reconciled_usd": 0.25, "tokens": 165_930, "pct_5h": 12.0, "sessions": 2, "hit_ratio": 0.308204, "saved_usd": 0.19, "rebuilds": 2, "rebuild_usd": 0.7878, "idle_rebuilds": 2, "compactions": 1, "peak_5h_pct": 30.5},
             "buckets": [
@@ -549,4 +550,46 @@ fn a_report_from_an_older_daemon_without_accounts_still_reads() {
     let older: HistoryReport = serde_json::from_value(value).unwrap();
     assert_eq!(older.account, None);
     assert!(older.accounts.is_empty());
+}
+
+#[test]
+fn a_report_says_when_spend_in_range_has_no_account() {
+    let mut store = two_account_store();
+    let prices = PriceTable::bundled();
+    let unknown_of = |store: &Store, range| {
+        read(store, &prices, range, now_ms(), &Utc, &me())
+            .unwrap()
+            .unknown
+    };
+    assert!(!unknown_of(&store, Range::Week));
+    let mut w = store.writer().unwrap();
+    w.session(&SessionRow {
+        id: "earlier".into(),
+        project: "-earlier".into(),
+        cwd: Some("/earlier".into()),
+        ts: Some(utc("2026-10-05T00:00:00Z")),
+    })
+    .unwrap();
+    w.request(&RequestRow {
+        key: "earlier-0".into(),
+        session_id: "earlier".into(),
+        ts: utc("2026-10-05T10:00:00Z"),
+        sent_ts: None,
+        model: OPUS.into(),
+        tokens: tokens(10, 100, 0, 0, 0),
+        cost_usd: Some(1.0),
+        is_sidechain: false,
+        agent_id: None,
+        skill: None,
+        mcp_server: None,
+        effort: None,
+    })
+    .unwrap();
+    w.commit().unwrap();
+    assert!(unknown_of(&store, Range::Week));
+    assert!(!unknown_of(&store, Range::Day));
+    let mut value = serde_json::to_value(report(Range::Week)).unwrap();
+    value.as_object_mut().unwrap().remove("unknown");
+    let older: HistoryReport = serde_json::from_value(value).unwrap();
+    assert!(!older.unknown);
 }
