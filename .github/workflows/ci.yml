@@ -2,38 +2,72 @@ name: ci
 on:
   push:
   pull_request:
+permissions:
+  contents: read
+env:
+  RUST_TOOLCHAIN: 1.99.0
+  MSRV_TOOLCHAIN: 1.88.0
+  NODE_VERSION: 22.23.3
+  DISABLE_AUTOUPDATER: 1
 jobs:
   rust:
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
+      - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy && rustup default "$RUST_TOOLCHAIN"
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88
-      - run: cargo check --locked --all-targets
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$MSRV_TOOLCHAIN" --profile minimal
+      - run: cargo "+$MSRV_TOOLCHAIN" check --locked --all-targets
   mod:
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 22
-      - run: curl -fsSL https://claude.ai/install.sh | bash -s 2.1.296
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: sh .github/scripts/install-claude-code.sh
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: claude plugin validate mod
+      - run: claude plugin validate .
       - run: claude plugin test mod
       - run: npx --yes -p typescript@6.0.3 tsc -p mod-dev/tsconfig.json
+  install:
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
+      - run: sh .github/scripts/install-claude-code.sh
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: cargo build --locked
+      - run: sh packaging/e2e-install.sh target/debug/claude-plus
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: shellcheck --shell=sh packaging/*.sh .github/scripts/*.sh tests/fake-claude/claude
+      - run: sh .github/scripts/actionlint.sh

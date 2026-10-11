@@ -229,3 +229,94 @@ fn release_assets_need_all_four_builds() {
         )
     );
 }
+
+fn workflows() -> Vec<(String, String)> {
+    let dir = root().join(".github/workflows");
+    let mut found: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, std::fs::read_to_string(&path).unwrap())
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+fn is_pinned(action: &str) -> bool {
+    let Some((name, rest)) = action.split_once('@') else {
+        return false;
+    };
+    let Some((sha, tag)) = rest.split_once(" # ") else {
+        return false;
+    };
+    name.split('/').count() == 2
+        && sha.len() == 40
+        && sha
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        && tag.strip_prefix('v').is_some_and(|version| {
+            version.split('.').count() == 3 && version.split('.').all(|n| n.parse::<u32>().is_ok())
+        })
+}
+
+#[test]
+fn workflows_pin_every_action_to_a_commit_and_every_runner_to_an_image() {
+    let found = workflows();
+    assert_eq!(
+        found
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["ci.yml", "release.yml"]
+    );
+    for (name, text) in &found {
+        for line in text.lines().map(str::trim) {
+            if let Some(action) = line.trim_start_matches("- ").strip_prefix("uses: ") {
+                assert!(is_pinned(action), "{name}: {line}");
+            }
+            if let Some(runner) = line.trim_start_matches("- ").strip_prefix("os: ") {
+                for image in runner.trim_matches(['[', ']']).split(", ") {
+                    assert!(!image.ends_with("-latest"), "{name}: {line}");
+                }
+            }
+            assert!(
+                !line.contains("| bash") && !line.contains("| sh"),
+                "{name}: {line}"
+            );
+            assert!(
+                !line.contains("@stable") && !line.contains("@master"),
+                "{name}: {line}"
+            );
+        }
+    }
+    assert!(!is_pinned("actions/checkout@v4"));
+    assert!(!is_pinned(
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    ));
+    assert!(is_pinned(
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+    ));
+}
+
+#[test]
+fn the_release_only_drafts_and_the_tag_must_match_the_version() {
+    let (_, release) = workflows()
+        .into_iter()
+        .find(|(name, _)| name == "release.yml")
+        .unwrap();
+    assert!(release.contains("on:\n  push:\n    tags: [\"v*\"]\n"));
+    assert!(
+        release.contains(
+            "gh release create \"$GITHUB_REF_NAME\" --repo \"$GITHUB_REPOSITORY\" --draft "
+        )
+    );
+    assert_eq!(release.matches("contents: write").count(), 1);
+    for target in TARGETS {
+        assert!(
+            release.contains(&format!("          - target: {target}\n")),
+            "{target}"
+        );
+    }
+}

@@ -1,0 +1,62 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+env:
+  RUST_TOOLCHAIN: 1.99.0
+  CC_x86_64_unknown_linux_musl: musl-gcc
+  CC_aarch64_unknown_linux_musl: musl-gcc
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the tag names this version
+        run: test "claude-plus ${GITHUB_REF_NAME#v}" = "claude-plus $(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+      - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "${{ matrix.target }}" && rustup default "$RUST_TOOLCHAIN"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Check that the binary runs and names its version
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: test "$("target/${{ matrix.target }}/release/claude-plus" --version)" = "claude-plus ${GITHUB_REF_NAME#v}"
+      - run: sh packaging/package.sh "${{ matrix.target }}" "target/${{ matrix.target }}/release/claude-plus" dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: claude-plus-${{ matrix.target }}
+          path: dist/claude-plus-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+  draft:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: claude-plus-*
+          path: dist
+          merge-multiple: true
+      - run: sh packaging/release-assets.sh "${GITHUB_REF_NAME#v}" "$GITHUB_REPOSITORY_OWNER" dist
+      - name: Create a draft release for a person to publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "claude-plus ${GITHUB_REF_NAME#v}" --generate-notes dist/*
