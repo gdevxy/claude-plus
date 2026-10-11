@@ -17,6 +17,10 @@ export function money(usd: number): string {
   return `$${grouped(Math.round(usd))}`
 }
 
+export function count(value: number): string {
+  return grouped(Math.round(value))
+}
+
 export function tokens(count: number): string {
   if (count < 1000) return String(Math.round(count))
   return scaled(count / 1000, 0)

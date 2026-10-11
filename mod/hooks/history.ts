@@ -4,7 +4,7 @@ import type { Bucket, ContextReport, Daemon, HistoryRange, HistoryReport, Local,
 import type { Layout, Piece } from './chart'
 import { area, bars, grouped, layout, markers, MARKER, stacked } from './chart'
 import { compositionOf, reportOf } from './context'
-import { FULL_BLOCK, money, modelName, percent, spread, tokens } from './format'
+import { FULL_BLOCK, count, money, modelName, percent, spread, tokens } from './format'
 import type { Line } from './state'
 import { LIMIT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, fitting, gap, notice, pair, plain, prose } from './state'
 
@@ -101,12 +101,12 @@ function headline(input: HistoryInput, report: HistoryReport | null, metric: Met
   const why = metric === 'pct' ? 'hist-pct' : undefined
   const head = pair('hist-head', title, value, why === undefined ? width : width - WHY_COLUMNS, { color: 'claude', bold: true }, { bold: true })
   const lines: Line[] = [why === undefined ? head : { ...head, why }]
-  const sessions = `${totals.sessions} ${totals.sessions === 1 ? 'session' : 'sessions'}`
-  const requests = `${totals.requests} ${totals.requests === 1 ? 'request' : 'requests'}`
+  const sessions = `${count(totals.sessions)} ${totals.sessions === 1 ? 'session' : 'sessions'}`
+  const requests = `${count(totals.requests)} ${totals.requests === 1 ? 'request' : 'requests'}`
   lines.push(plain('hist-sub', `${sessions} · ${requests}`, { dim: true }))
   if (totals.unpriced > 0) {
     const noun = totals.unpriced === 1 ? 'request on an unknown model is' : 'requests on unknown models are'
-    lines.push(prose('hist-unpriced', fitting(width, `${totals.unpriced} ${noun} not priced`, `${totals.unpriced} unpriced`), { dim: true }))
+    lines.push(prose('hist-unpriced', fitting(width, `${count(totals.unpriced)} ${noun} not priced`, `${count(totals.unpriced)} unpriced`), { dim: true }))
   }
   if (why !== undefined && input.expanded.includes(why)) {
     const { pairs } = report.calibration

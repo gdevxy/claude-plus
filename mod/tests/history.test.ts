@@ -144,6 +144,13 @@ describe('history screen', () => {
     expect(text(line(historyScreen(input({ metric: 'pct', reports: { '7d': learning } })), 'hist-head'))).toBe('Last 7 days                     $15.97')
   })
 
+  test('session and request counts are grouped by thousands as stats prints them', () => {
+    const busy = historyReport({ totals: { ...historyReport().totals, sessions: 1234, requests: 14_577, unpriced: 1500 } })
+    const lines = historyScreen(input({ reports: { '7d': busy } }))
+    expect(text(line(lines, 'hist-sub'))).toBe('1,234 sessions · 14,577 requests')
+    expect(text(line(lines, 'hist-unpriced'))).toBe('1,500 unpriced')
+  })
+
   test('the hit ratio scale starts at the lowest tenth and says so', () => {
     expect([hitFloor([0.76, 0.95]), hitFloor([1, 1]), hitFloor([]), hitFloor([0.05])]).toEqual([0.7, 0.9, 0, 0])
     const lines = historyScreen(input({ expanded: ['hist-hit'] }))
