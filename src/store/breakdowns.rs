@@ -24,6 +24,13 @@ impl Writer<'_> {
             .execute(params![row.session_id, row.ts_ms, row.received_ms, row.json])?;
         Ok(changed > 0)
     }
+
+    pub fn prune_breakdowns(&mut self, before_ms: i64) -> Result<usize> {
+        Ok(self
+            .tx
+            .prepare_cached("DELETE FROM live_breakdowns WHERE ts_ms < ?1")?
+            .execute([before_ms])?)
+    }
 }
 
 impl Store {
@@ -97,6 +104,23 @@ mod tests {
             .collect();
         assert_eq!(recent, vec!["s1", "s2"]);
         assert_eq!(store.recent_breakdowns(1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn breakdowns_older_than_the_transcripts_are_pruned() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.live_breakdown(&usage("old", 100, "{}")).unwrap();
+        w.live_breakdown(&usage("kept", 200, "{}")).unwrap();
+        assert_eq!(w.prune_breakdowns(200).unwrap(), 1);
+        w.commit().unwrap();
+        let left: Vec<String> = store
+            .recent_breakdowns(5)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.session_id)
+            .collect();
+        assert_eq!(left, vec!["kept"]);
     }
 
     #[test]

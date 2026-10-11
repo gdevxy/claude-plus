@@ -58,7 +58,8 @@ fn run_locked(
         }
         lock => lock?,
     };
-    let store = Store::open(&paths.database())?;
+    let mut store = Store::open(&paths.database())?;
+    prune_breakdowns(&mut store, paths, log)?;
     let reader = Store::open_read_only(&paths.database())?;
     let listener = api::listen(&paths.socket())?;
     let (writer, writer_thread) =
@@ -111,6 +112,33 @@ fn run_locked(
     let _ = std::fs::remove_file(paths.socket());
     log.info("stopped");
     served
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+fn breakdowns_kept_since(now_ms: i64, retention_days: Option<u64>) -> i64 {
+    let days = retention_days.unwrap_or(Paths::DEFAULT_RETENTION_DAYS);
+    i64::try_from(days)
+        .ok()
+        .and_then(|days| days.checked_mul(DAY_MS))
+        .and_then(|kept| now_ms.checked_sub(kept))
+        .unwrap_or(i64::MIN)
+}
+
+fn prune_breakdowns(store: &mut Store, paths: &Paths, log: &Log) -> Result<()> {
+    let since = breakdowns_kept_since(
+        api::epoch_ms(std::time::SystemTime::now()),
+        paths.retention_days(),
+    );
+    let mut writer = store.writer()?;
+    let pruned = writer.prune_breakdowns(since)?;
+    writer.commit()?;
+    if pruned > 0 {
+        log.info(format!(
+            "pruned {pruned} context breakdowns older than the transcripts"
+        ));
+    }
+    Ok(())
 }
 
 async fn join_before_aborting<T: Send + 'static>(
@@ -202,6 +230,14 @@ async fn next_batch(changes: &mut Option<Changes>) -> Option<Batch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn breakdowns_are_kept_as_long_as_claude_code_keeps_transcripts() {
+        let day_ms = 86_400_000;
+        assert_eq!(breakdowns_kept_since(100 * day_ms, None), 70 * day_ms);
+        assert_eq!(breakdowns_kept_since(100 * day_ms, Some(7)), 93 * day_ms);
+        assert_eq!(breakdowns_kept_since(day_ms, Some(u64::MAX)), i64::MIN);
+    }
 
     #[tokio::test]
     async fn signals_are_still_handled_while_the_writer_finishes() {
