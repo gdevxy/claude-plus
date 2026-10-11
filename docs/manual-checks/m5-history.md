@@ -67,6 +67,7 @@ Check this first when an M4 daemon is still running, before the `daemon stop` of
 - [ ] With `% of 5h`, every value has a `~`, the headline has a `?`, and its explanation names how many limit readings it learned from.
 - [ ] "Cache hit ratio" matches what the Live view reported for today's sessions, and its `?` says where the bars start.
 - [ ] "Saved by cache hits" and "Rebuilds" are present and plausible.
+- [ ] "Rebuilds" counts main-thread rebuilds only, and a subagent's compaction never hides one: over `30 days` it is at least the rebuilds the Insights view counts over its two weeks (idle rebuilds plus mid-session rewrites).
 - [ ] "5h limit, highest" appears only when the daemon has 5h readings in the range, and bars at 80% or more are amber.
 - [ ] "Top projects" names each project by its folder (with its parent folder when two share a name), and "Top sessions" shows titles, with `Untitled` and the id start for a session without one.
 - [ ] "Context this session" draws a curve that rises with the session and drops at a `┊` marker after a compaction, with `<tokens> / <window>` matching `/context`.

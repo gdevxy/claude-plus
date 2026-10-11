@@ -65,12 +65,14 @@ Check this first when an M5 daemon is still running, before the `daemon stop` of
 - [ ] Token amounts in the evidence read like `~287k`, `1.2M` or `18.4B`, never `18408M`, and counts of a thousand or more are grouped like `1,284`.
 - [ ] Each tip ends with a dim line naming its share of a 5h window a week (or of 5h/wk, when calibrated) and its confidence, with a `?` that opens how the tip was worked out.
 - [ ] The idle rebuild tip, if shown, agrees with the rebuilds of the History view over the last two weeks, and its typical break is plausible.
+  Its weekly saving is less than half the cost in its first evidence line, since that cost covers two weeks and a fresh start still writes the smallest context of each session.
 - [ ] A cache bust tip blames MCP only when a session's MCP tools changed between two requests; a bust with no cause in the transcripts reads `n rewrite(s) mid-session with no cause in the transcripts` with no saving and low confidence.
 - [ ] The late compaction tip, if shown, reads `run /compact once a session passes ...k tokens`, its evidence names sessions that really ran above that size, and its `?` says the saving is net of the `/compact` request and the rewrite after it.
 - [ ] The unused MCP server and skill tips name only things the Context view lists under `Not used in 14 days`.
 - [ ] The memory tip, if shown, names files you load in every session; edit a CLAUDE.md to repeat a long line from another one, wait a minute, and the tip counts it.
 - [ ] The large tool results tip lists files relative to the project and commands by program and first argument (`Bash git diff`, never a whole command line), a long path cut at its head with `…`, and its tip names the costliest file or program.
 - [ ] The retention tip appears while `cleanupPeriodDays` is under 90 in `~/.claude/settings.json` (or unset), and its `?` says what to add and that only that file was read; do not edit the file for this check.
+  Its first evidence line says what that file holds, `cleanupPeriodDays is n in ~/.claude/settings.json` or `~/.claude/settings.json leaves cleanupPeriodDays at its default of 30`.
 - [ ] In a project with no requests in the last 14 days the view says `Insights need a few sessions of history ✻`.
 - [ ] Every right-aligned value ends in the same column; no row is cut or overlaps a `?`, at 40, 60 and 100 columns.
 - [ ] Leaving the Insights view open for two minutes neither flickers nor slows the composer; the cache countdown keeps ticking every second.
@@ -91,6 +93,7 @@ Check this first when an M5 daemon is still running, before the `daemon stop` of
 - [ ] When the Live view shows `full in ... at this pace` for the 5h window, a toast says the same once for that window.
 - [ ] An alert never replaces the recap or another alert: it waits until the toast on screen is gone, and two alerts due together show as one toast joined by ` · `.
 - [ ] After `/model` to a model with another context window, the context alert compares against the new auto-compact threshold.
+- [ ] After the context alert fired, `/model` to a model with a larger window and then context passing 90% of its threshold shows the alert again.
 - [ ] `/clear` shows `That session: $x.xx · cache hits saved you $x.xx ✻` for the session that ended.
 - [ ] A `claude -p "say hi"` run with the mod loaded shows no recap and no alert.
 - [ ] The Live, Context and History views still behave as in the M3, M4 and M5 checks.

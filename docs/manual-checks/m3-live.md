@@ -65,6 +65,8 @@ Check at 40, 60 and 100 columns of pane width (resize the terminal; the pane doc
 - [ ] From a shell where `claude-plus` is not on `PATH` and no daemon runs, the pane shows `claude-plus is not installed yet. Install it, or set its path in the plugin options` and still shows context, limits and cost.
 - [ ] `/clear` empties the session numbers and the pane follows the new session.
 - [ ] A subagent run (for example a codebase search with the Explore agent) does not change the main countdown.
+- [ ] A subagent that compacts its own context, or announces its own tools, neither hides a rebuild of the main thread nor explains one: `Rebuilds` counts the same rebuilds for this session as the History view's `Rebuilds` over the same time.
+- [ ] When the `?` of `Rebuilds` names a changed context, it reads `because the MCP tools, CLAUDE.md, skills or agents changed`; a rebuild within the cache lifetime with no such change reads `because no cause could be told from the transcript`.
 - [ ] Freeze the daemon, send a short prompt within 5 s, then let the daemon go, and count the stored events.
   The pane's posts time out while the daemon is frozen and are sent again, yet each event must be stored once: the two counts must be equal.
 
