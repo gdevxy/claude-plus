@@ -1,6 +1,6 @@
 {
   "name": "plus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Token usage, context, cache and cost in a pane beside the conversation",
   "author": { "name": "Gabriel Dinant" },
   "types": "./types/index.d.ts",
