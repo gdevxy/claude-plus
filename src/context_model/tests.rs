@@ -15,6 +15,7 @@ fn scan() -> Scan {
         kind,
         scope,
         name: name.into(),
+        alias: None,
         path: path.map(String::from),
         plugin: None,
         loading,

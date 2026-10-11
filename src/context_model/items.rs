@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::breakdown::Breakdown;
 use super::ratios::{Ratios, TextKind};
-use crate::config_scan::{Loading, Scan, Scope, SourceKind};
+use crate::config_scan::{Loading, Scan, Scope, Source, SourceKind};
 
 pub const MAX_ITEMS: usize = 100;
 
@@ -106,14 +106,24 @@ fn measured(breakdown: &Breakdown, scan: &Scan, uses: &Uses) -> Vec<Item> {
             uses_14d: None,
         })
         .collect();
-    items.extend(breakdown.skills.iter().map(|skill| Item {
-        kind: ItemKind::Skill,
-        name: skill.name.clone(),
-        detail: skill.plugin.clone(),
-        tokens: skill.tokens,
-        estimated: false,
-        uses_session: Some(count(&uses.session_skills, &skill.name)),
-        uses_14d: Some(count(&uses.recent_skills, &skill.name)),
+    items.extend(breakdown.skills.iter().map(|skill| {
+        let source = scan
+            .sources
+            .iter()
+            .find(|s| s.kind == SourceKind::Skill && s.answers_to(&skill.name));
+        let names: Vec<&str> = match source {
+            Some(source) => source.names().collect(),
+            None => vec![skill.name.as_str()],
+        };
+        Item {
+            kind: ItemKind::Skill,
+            name: names[0].to_string(),
+            detail: skill.plugin.clone(),
+            tokens: skill.tokens,
+            estimated: false,
+            uses_session: Some(count_any(&uses.session_skills, &names)),
+            uses_14d: Some(count_any(&uses.recent_skills, &names)),
+        }
     }));
     let mut servers: BTreeMap<&str, (u64, Vec<&str>)> = BTreeMap::new();
     for tool in &breakdown.mcp_tools {
@@ -171,8 +181,8 @@ fn estimated(scan: &Scan, ratios: &Ratios, uses: &Uses) -> Vec<Item> {
                 },
                 tokens: ratios.tokens(source.chars, TextKind::Prose),
                 estimated: true,
-                uses_session: skill.then(|| count(&uses.session_skills, &source.name)),
-                uses_14d: skill.then(|| count(&uses.recent_skills, &source.name)),
+                uses_session: skill.then(|| count_named(&uses.session_skills, source)),
+                uses_14d: skill.then(|| count_named(&uses.recent_skills, source)),
             })
         })
         .collect()
@@ -180,6 +190,17 @@ fn estimated(scan: &Scan, ratios: &Ratios, uses: &Uses) -> Vec<Item> {
 
 fn count(uses: &BTreeMap<String, u64>, name: &str) -> u64 {
     uses.get(name).copied().unwrap_or(0)
+}
+
+fn count_any(uses: &BTreeMap<String, u64>, names: &[&str]) -> u64 {
+    names
+        .iter()
+        .find_map(|name| uses.get(*name).copied())
+        .unwrap_or(0)
+}
+
+fn count_named(uses: &BTreeMap<String, u64>, source: &Source) -> u64 {
+    count_any(uses, &source.names().collect::<Vec<_>>())
 }
 
 fn file_name(path: &str) -> String {
@@ -213,6 +234,7 @@ mod tests {
             kind,
             scope,
             name: name.into(),
+            alias: None,
             path: path.map(String::from),
             plugin: None,
             loading,
@@ -441,5 +463,98 @@ mod tests {
             ]
         );
         assert_eq!(dead_weight(&all).len(), 1);
+    }
+}
+#[cfg(test)]
+mod naming {
+    use super::super::breakdown::Entry;
+    use super::*;
+    use crate::config_scan::Source;
+
+    fn skill(name: &str, alias: &str) -> Source {
+        Source {
+            kind: SourceKind::Skill,
+            scope: Scope::User,
+            name: name.into(),
+            alias: Some(alias.into()),
+            path: None,
+            plugin: None,
+            loading: Loading::Listing,
+            chars: 350,
+            file_chars: 350,
+        }
+    }
+
+    fn scan() -> Scan {
+        Scan {
+            sources: vec![
+                skill(
+                    "spring-boot-4-migration-skill",
+                    "migrating-to-spring-boot-4",
+                ),
+                skill("paddle:billing-history", "paddle:paddle-billing-history"),
+            ],
+            memory_dirs: vec![],
+        }
+    }
+
+    fn uses() -> Uses {
+        Uses {
+            recent_skills: BTreeMap::from([
+                ("spring-boot-4-migration-skill".into(), 3),
+                ("migrating-to-spring-boot-4".into(), 7),
+                ("paddle:paddle-billing-history".into(), 2),
+            ]),
+            ..Uses::default()
+        }
+    }
+
+    fn named(items: &[Item]) -> Vec<(&str, Option<u64>)> {
+        items
+            .iter()
+            .map(|item| (item.name.as_str(), item.uses_14d))
+            .collect()
+    }
+
+    #[test]
+    fn a_skill_counts_its_uses_under_its_directory_name_first_then_its_frontmatter_name() {
+        let all = items(None, &scan(), &Ratios::default(), &uses());
+        assert_eq!(
+            named(&all),
+            vec![
+                ("paddle:billing-history", Some(2)),
+                ("spring-boot-4-migration-skill", Some(3)),
+            ]
+        );
+        assert!(dead_weight(&all).is_empty());
+    }
+
+    #[test]
+    fn a_breakdown_skill_named_by_its_frontmatter_takes_the_directory_name() {
+        let breakdown = Breakdown {
+            ts_ms: 1,
+            model: String::new(),
+            total_tokens: 0,
+            max_tokens: 0,
+            percentage: 0.0,
+            auto_compact_threshold: None,
+            categories: vec![],
+            memory_files: vec![],
+            mcp_tools: vec![],
+            agents: vec![],
+            skills: vec![Entry {
+                name: "migrating-to-spring-boot-4".into(),
+                source: "userSettings".into(),
+                plugin: None,
+                tokens: 90,
+            }],
+            skills_total: 1,
+            skills_included: 1,
+        };
+        let all = items(Some(&breakdown), &scan(), &Ratios::default(), &uses());
+        assert_eq!(
+            named(&all),
+            vec![("spring-boot-4-migration-skill", Some(3))]
+        );
     }
 }

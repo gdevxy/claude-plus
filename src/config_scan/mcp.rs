@@ -30,6 +30,7 @@ pub fn servers(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
                     Loading::Unknown
                 },
                 name,
+                alias: None,
                 path: Some(display(origin)),
                 plugin: plugin.map(String::from),
                 chars: 0,

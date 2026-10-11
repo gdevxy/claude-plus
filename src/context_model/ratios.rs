@@ -95,7 +95,7 @@ pub fn calibrate(scan: &Scan, recent_first: &[Breakdown]) -> Ratios {
                         SourceKind::ClaudeMd | SourceKind::Memory => {
                             source.path.as_deref() == Some(key)
                         }
-                        _ => source.name == key,
+                        _ => source.answers_to(key),
                     }
             });
             if let Some(source) = source {
@@ -136,6 +136,7 @@ mod tests {
             kind,
             scope: Scope::User,
             name: name.into(),
+            alias: None,
             path: path.map(String::from),
             plugin: None,
             loading: Loading::Listing,

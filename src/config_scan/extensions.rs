@@ -30,6 +30,7 @@ pub fn plugins(roots: &Roots, settings: &Settings, sources: &mut Vec<Source>) ->
             kind: SourceKind::Plugin,
             scope,
             name: key.clone(),
+            alias: None,
             path: Some(display(&dir)),
             plugin: Some(short.clone()),
             loading: if is_enabled {
@@ -58,18 +59,22 @@ pub fn skills(roots: &Roots, plugins: &[Plugin], seen: &mut Seen, sources: &mut 
                 continue;
             };
             let fields = frontmatter(text.content.as_deref().unwrap_or(""));
-            let own = fields
+            let name = qualified(plugin, &file_name(&skill_dir));
+            let alias = fields
                 .get("name")
-                .cloned()
-                .unwrap_or_else(|| stem(&skill_dir));
-            let name = qualified(plugin, &own);
+                .map(|own| qualified(plugin, own))
+                .filter(|alias| *alias != name);
             let listed = fields
                 .get("disable-model-invocation")
                 .is_none_or(|value| value != "true");
             let (loading, chars) = if listed {
+                let listed_as = match &alias {
+                    Some(alias) => format!("{name} ({alias})"),
+                    None => name.clone(),
+                };
                 (
                     Loading::Listing,
-                    listing_chars(&name, fields.get("description")),
+                    listing_chars(&listed_as, fields.get("description")),
                 )
             } else {
                 (Loading::OnDemand, text.chars)
@@ -78,6 +83,7 @@ pub fn skills(roots: &Roots, plugins: &[Plugin], seen: &mut Seen, sources: &mut 
                 kind: SourceKind::Skill,
                 scope,
                 name,
+                alias,
                 path: Some(display(&file)),
                 plugin: plugin.map(String::from),
                 loading,
@@ -113,6 +119,7 @@ pub fn agents(roots: &Roots, plugins: &[Plugin], seen: &mut Seen, sources: &mut 
                 scope,
                 chars: listing_chars(&name, fields.get("description")),
                 name,
+                alias: None,
                 path: Some(display(&file)),
                 plugin: plugin.clone(),
                 loading: Loading::Listing,
@@ -144,6 +151,7 @@ pub fn output_styles(
                 kind: SourceKind::OutputStyle,
                 scope,
                 name,
+                alias: None,
                 path: Some(display(&file)),
                 plugin: plugin.clone(),
                 loading: if active {
@@ -225,6 +233,12 @@ fn qualified(plugin: Option<&str>, name: &str) -> String {
     }
 }
 
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 fn stem(path: &Path) -> String {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -283,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_are_listed_by_their_frontmatter_and_measured_whole() {
+    fn skills_are_listed_by_their_directory_and_measured_whole() {
         let home = Home::new();
         installed(&home);
         home.write(
@@ -332,6 +346,44 @@ mod tests {
             .find(|s| s.name.starts_with("superpowers:"))
             .unwrap();
         assert_eq!(plugin.plugin.as_deref(), Some("superpowers"));
+    }
+
+    #[test]
+    fn a_skill_is_named_by_its_directory_as_claude_code_lists_it() {
+        let home = Home::new();
+        installed(&home);
+        home.write(
+            "home/.claude/skills/spring-boot-4-migration-skill/SKILL.md",
+            "---\nname: migrating-to-spring-boot-4\ndescription: Migrate\n---\n",
+        );
+        home.write(
+            "plugins/superpowers/skills/billing-history/SKILL.md",
+            "---\nname: paddle-billing-history\ndescription: Bills\n---\n",
+        );
+        let found = scan(&home.roots(Some("work/app")));
+        let skills: Vec<(&str, Option<&str>, u64)> = found
+            .sources
+            .iter()
+            .filter(|s| s.kind == SourceKind::Skill)
+            .map(|s| (s.name.as_str(), s.alias.as_deref(), s.chars))
+            .collect();
+        assert_eq!(
+            skills,
+            vec![
+                (
+                    "spring-boot-4-migration-skill",
+                    Some("migrating-to-spring-boot-4"),
+                    "- spring-boot-4-migration-skill (migrating-to-spring-boot-4): Migrate".len()
+                        as u64
+                ),
+                (
+                    "superpowers:billing-history",
+                    Some("superpowers:paddle-billing-history"),
+                    "- superpowers:billing-history (superpowers:paddle-billing-history): Bills"
+                        .len() as u64
+                ),
+            ]
+        );
     }
 
     #[test]

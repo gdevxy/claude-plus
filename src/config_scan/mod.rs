@@ -57,11 +57,22 @@ pub struct Source {
     pub kind: SourceKind,
     pub scope: Scope,
     pub name: String,
+    pub alias: Option<String>,
     pub path: Option<String>,
     pub plugin: Option<String>,
     pub loading: Loading,
     pub chars: u64,
     pub file_chars: u64,
+}
+
+impl Source {
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.name.as_str()).chain(self.alias.as_deref())
+    }
+
+    pub fn answers_to(&self, name: &str) -> bool {
+        self.names().any(|own| own == name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
