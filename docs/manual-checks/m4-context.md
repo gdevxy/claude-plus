@@ -6,8 +6,9 @@ Nothing here writes to `~/.claude/dev-mods`; `--plugin-dir` loads the mod for on
 ## Setup
 
 Build the daemon from the working tree and make sure the running one is this build.
-The store moves to schema 12, so `--ensure` replaces a daemon that still runs an older build.
-Expected: a line starting with `✻`, then `claude-plus doctor` reports schema 12.
+The store moves to schema 14, so `--ensure` replaces a daemon that still runs an older build.
+Schema 14 rebuilds the derived tables once, so the first minute may show `Rebuilding the claude-plus index…`.
+Expected: a line starting with `✻`, then `claude-plus doctor` reports schema 14.
 
 ```bash
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH" && cargo build --release --locked
@@ -34,6 +35,8 @@ Keep `/context` at hand: it is the reference for every number in the view.
   Under "Largest items" a CLAUDE.md file reads `CLAUDE.md · Project` or `CLAUDE.md · User`, not a full path.
 - [ ] Skill names in the breakdown match the `attributionSkill` of transcript records (for example `superpowers:brainstorming`).
   Invoke one listed skill, wait a minute, and confirm it leaves "Not used in 14 days".
+- [ ] A skill whose folder name differs from its frontmatter `name` (for example the folder `spring-boot-4-migration-skill` with `name: migrating-to-spring-boot-4`) is listed under its folder name, as Claude Code's own skill listing names it.
+  Use it once and confirm it leaves "Not used in 14 days"; note whether the breakdown names it by its folder or its frontmatter name.
 - [ ] A full breakdown after a turn does not slow the prompt down; the composer stays responsive right after each answer.
 
 ## Checklist
@@ -49,19 +52,37 @@ Keep `/context` at hand: it is the reference for every number in the view.
 - [ ] Tab reaches `▸ Memory files`; Enter turns it into `▾` and lists the files `/context` lists, with the same tokens; Enter closes it again.
 - [ ] `▸ MCP tools` opens to one line per server with its tool count; `▸ Skills` opens to the listed skills, at most 8 and then `+ N more`.
 - [ ] "Largest items" lists the six largest items, largest first, with the kind in front (`MCP`, `Skill`, `Agent`, `Style`) except for CLAUDE.md files.
-- [ ] "Not used in 14 days" lists only skills and MCP servers you have not used in 14 days, with `<tokens> a turn` on the right.
-- [ ] After Claude reads a large file, "Largest tool results" names `Read` with a `~` value; an MCP tool reads as `<server> <tool>`.
+- [ ] "Not used in 14 days" lists only skills and MCP servers you have not used in 14 days, with `<tokens> a turn` on the right, and never a built-in skill such as `init`.
+  With more than four, a dim `+ N more` row ends the list with what the rest cost.
+- [ ] After Claude reads a large file, "Largest tool results" names `Read` with a `~` value; an MCP tool reads as `<server> <tool>`, a plugin's MCP tool without its `plugin_<name>_` prefix.
+- [ ] Results a subagent read never show under "Largest tool results", and after `/compact` the list starts over with what came after it.
 - [ ] "Configured" counts match what you have: CLAUDE.md files (with `on demand` for nested ones), skills, MCP servers (`/mcp`) and plugins (`off` for disabled ones).
 - [ ] Each `?` (Tab to it, then Enter) opens its dim explanation under its section and closes it again, and the times in it ("counted 2m ago", "Read from disk <1m ago") are plausible.
 - [ ] Every right-aligned value ends in the same column; no value is cut, wrapped or overlapping the `?` or a `▸`, at 40, 60 and 100 columns.
 - [ ] Resume a session that ran before this build (`claude --resume` with the same `--plugin-dir`) and open the Context view before prompting.
   It shows "Estimated from the transcript" with `~` values and `~<n> injected since your first request` when attachments came later; after the first prompt it switches to "By category".
+  If the session's last breakdown is older than five minutes, the heading reads `By category · <age> ago` until the next one.
+  An open row in the estimate starts with a dim `Configured now` line, the sum of what is on disk today.
 - [ ] `./target/release/claude-plus daemon stop` makes the view show `The daemon is not answering` and how to start it again within 3 s, and the view keeps its last numbers; after the next prompt the headline and "By category" still follow Claude Code.
 - [ ] After `daemon --ensure` again, the notice goes away within 3 s.
 - [ ] From a shell where `claude-plus` is not on `PATH` and no daemon runs, the Context view shows `claude-plus is not installed yet. Install it, or set its path in the plugin options` and, after a prompt, still shows the headline and "By category".
 - [ ] `/clear` empties the view, which fills again after the next prompt, for the new session only.
 - [ ] Switching views while Claude works does not flicker, and the Live view still behaves as in the M3 check.
-- [ ] `claude-plus doctor` still reports a healthy daemon and schema 12.
+- [ ] Closing the pane (ctrl+x x) stops the breakdowns: with the pane closed, answer two prompts a minute apart and confirm the latest breakdown time does not move.
+  Reopen it with `/plus` and confirm a new breakdown arrives within a minute of the next prompt.
+
+  ```bash
+  sqlite3 "file:$HOME/.claude-plus/data.db?mode=ro" "SELECT session_id, datetime(ts_ms / 1000, 'unixepoch', 'localtime') FROM live_breakdowns ORDER BY ts_ms DESC LIMIT 1"
+  ```
+
+- [ ] `/context` answers quickly on a busy store: while Claude works through a long task, time it a few times with this session's id (`/status` shows it).
+  Every call takes under 0.2 s.
+
+  ```bash
+  for i in 1 2 3 4 5; do curl -s -o /dev/null -w '%{time_total}\n' --unix-socket ~/.claude-plus/daemon.sock "http://claude-plus/context?session=<id>"; sleep 2; done
+  ```
+
+- [ ] `claude-plus doctor` still reports a healthy daemon and schema 14.
 
 ## Outcome
 
