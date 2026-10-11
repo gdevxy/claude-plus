@@ -5,40 +5,7 @@ use super::{
     Confidence, Draft, Finding, InsightContext, MIN_WEEKLY_USD, Rebuilt, Rule, RuleId,
     WEEKS_IN_WINDOW, median,
 };
-use crate::cache_model::RebuildCause;
-use crate::store::PrefixChange;
-
-pub const SETUP_KINDS: &[&str] = &[
-    "skill_listing",
-    "instructions",
-    "nested_memory",
-    "agent_listing_delta",
-];
-pub const MCP_TOOL_PREFIX: &str = "mcp__";
-
-pub fn mcp_changes(changes: &[PrefixChange]) -> Vec<bool> {
-    let mut tools: BTreeSet<&str> = BTreeSet::new();
-    let mut servers: BTreeSet<&str> = BTreeSet::new();
-    changes
-        .iter()
-        .map(|change| {
-            let (known, only_mcp) = match change.kind.as_str() {
-                "deferred_tools_delta" => (&mut tools, true),
-                "mcp_instructions_delta" => (&mut servers, false),
-                _ => return false,
-            };
-            let counted = |name: &&String| !only_mcp || name.starts_with(MCP_TOOL_PREFIX);
-            let mut changed = false;
-            for name in change.names.iter().filter(counted) {
-                changed |= known.insert(name);
-            }
-            for name in change.removed.iter().filter(counted) {
-                changed |= known.remove(name.as_str());
-            }
-            changed
-        })
-        .collect()
-}
+use crate::cache_model::{RebuildCause, SETUP_KINDS};
 
 pub struct IdleRebuilds;
 
@@ -363,42 +330,6 @@ mod tests {
         let mut trivial = Fixture::new();
         trivial.rebuilt("s1", RebuildCause::Unknown, 0.19, 60_000, &[]);
         assert!(CacheBusts.evaluate(&trivial.ctx()).is_empty());
-    }
-
-    fn change(kind: &str, names: &[&str], removed: &[&str]) -> PrefixChange {
-        PrefixChange {
-            ts: 0,
-            kind: kind.into(),
-            names: names.iter().map(|n| n.to_string()).collect(),
-            removed: removed.iter().map(|n| n.to_string()).collect(),
-        }
-    }
-
-    #[test]
-    fn only_a_delta_that_adds_or_removes_mcp_tools_or_servers_changes_them() {
-        let changes = [
-            change("mcp_instructions_delta", &["linear"], &[]),
-            change(
-                "deferred_tools_delta",
-                &["WebFetch", "mcp__linear__search"],
-                &[],
-            ),
-            change("deferred_tools_record", &["mcp__docs__find"], &[]),
-            change("deferred_tools_delta", &["mcp__linear__search"], &[]),
-            change("mcp_instructions_delta", &["linear"], &[]),
-            change("deferred_tools_delta", &["WebSearch"], &[]),
-            change("deferred_tools_delta", &[], &["mcp__linear__search"]),
-            change("deferred_tools_delta", &["mcp__linear__search"], &[]),
-            change("mcp_instructions_delta", &["docs"], &[]),
-            change("mcp_instructions_delta", &[], &["docs"]),
-            change("instructions", &["mcp__x__y"], &[]),
-        ];
-        assert_eq!(
-            mcp_changes(&changes),
-            [
-                true, true, false, false, false, false, true, true, true, true, false
-            ]
-        );
     }
 
     #[test]

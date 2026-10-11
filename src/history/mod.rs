@@ -7,7 +7,7 @@ use anyhow::Result;
 use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 
-use crate::cache_model::{self, Context, Rebuild, RebuildCause};
+use crate::cache_model::{self, Causes, Rebuild, RebuildCause};
 use crate::forecast::family;
 use crate::limits::{self, Fit, PAIRS_NEEDED};
 use crate::pricing::{PriceTable, normalize_model};
@@ -264,27 +264,21 @@ where
             previous.insert(session, point);
         }
     }
-    let mut prefix = Vec::new();
-    let mut compactions = Vec::new();
+    let mut causes = BTreeMap::new();
     for session in sessions_of(&requests) {
         let from = previous
             .get(session)
             .map_or(since, |point| point.ts.min(since));
-        prefix.extend(
-            store
-                .prefix_changes_between(session, from, until)?
-                .into_iter()
-                .map(|ts| (session.to_string(), ts)),
-        );
-        compactions.extend(store.compactions_between(session, from, until)?);
+        causes.insert(session, Causes::read(store, session, from, until)?);
     }
-    let rebuilds = rebuilds_in(&requests, &previous, &prefix, &compactions, prices, now_ms)
+    let rebuilds = rebuilds_in(&requests, &previous, &causes, prices, now_ms)
         .into_iter()
         .filter(|rebuild| rebuild.ts_ms >= since * 1000)
         .collect::<Vec<_>>();
     let samples = store.limit_samples_between(FIVE_HOUR, since * 1000, until * 1000)?;
-    let in_range: Vec<CompactionPoint> = compactions
-        .into_iter()
+    let in_range: Vec<CompactionPoint> = causes
+        .into_values()
+        .flat_map(|causes| causes.compactions)
         .filter(|compaction| compaction.ts >= since)
         .collect();
     Ok(build(
@@ -311,8 +305,7 @@ fn sessions_of(requests: &[SpentRequest]) -> BTreeSet<&str> {
 fn rebuilds_in(
     requests: &[SpentRequest],
     previous: &HashMap<&str, RequestPoint>,
-    prefix: &[(String, i64)],
-    compactions: &[CompactionPoint],
+    causes: &BTreeMap<&str, Causes>,
     prices: &PriceTable,
     now_ms: i64,
 ) -> Vec<Rebuild> {
@@ -329,45 +322,26 @@ fn rebuilds_in(
             })
             .push(request.point.clone());
     }
+    let none = Causes::default();
     by_session
         .into_iter()
         .flat_map(|(session, points)| {
-            let changes: Vec<i64> = prefix
-                .iter()
-                .filter(|(owner, _)| owner == session)
-                .map(|(_, ts)| *ts)
-                .collect();
-            let compacted: Vec<i64> = compactions
-                .iter()
-                .filter(|compaction| compaction.session_id == session)
-                .map(|compaction| compaction.ts)
-                .collect();
-            session_rebuilds(&points, &changes, &compacted, prices, now_ms)
+            let causes = causes.get(session).unwrap_or(&none);
+            session_rebuilds(&points, causes, prices, now_ms)
         })
         .collect()
 }
 
 pub fn session_rebuilds(
     points: &[RequestPoint],
-    prefix_changes: &[i64],
-    compactions: &[i64],
+    causes: &Causes,
     prices: &PriceTable,
     now_ms: i64,
 ) -> Vec<Rebuild> {
     let timeline = Timeline::build(points, &[]);
     let main = timeline.main();
     let (ttl, _) = cache_model::ttl_of(&Thread::Main, &main, false);
-    cache_model::rebuilds(
-        &main,
-        ttl,
-        &Context {
-            prices,
-            prefix_changes,
-            compactions,
-            subscription: false,
-            now_ms,
-        },
-    )
+    cache_model::rebuilds(&main, ttl, &causes.context(prices, false, now_ms))
 }
 
 struct Ledger<'a> {

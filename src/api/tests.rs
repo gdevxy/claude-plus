@@ -482,6 +482,81 @@ fn the_history_route_reports_the_asked_range_in_local_time() {
 }
 
 #[test]
+fn live_history_and_insights_count_the_same_main_thread_rebuilds_past_a_subagent_s_compaction() {
+    let server = Server::start();
+    let session = "33333333-3333-3333-3333-333333333333";
+    let start = chrono::Utc::now() - chrono::Duration::days(1);
+    let at = |seconds: i64| {
+        (start + chrono::Duration::seconds(seconds))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    let request = |seconds: i64, read: u64, write: u64| {
+        json!({"type": "assistant", "sessionId": session, "timestamp": at(seconds),
+               "requestId": format!("req_{seconds}"),
+               "message": {"model": "claude-opus-5-5", "content": [], "usage": {
+                   "input_tokens": 10, "output_tokens": 100, "cache_read_input_tokens": read,
+                   "cache_creation_input_tokens": write,
+                   "cache_creation": {"ephemeral_5m_input_tokens": write, "ephemeral_1h_input_tokens": 0}}}})
+    };
+    let lines = |records: &[serde_json::Value]| {
+        records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>()
+    };
+    let projects = server.temp.path().join("claude/projects/-work-demo");
+    std::fs::write(
+        projects.join(format!("{session}.jsonl")),
+        lines(&[
+            request(0, 0, 10_000),
+            request(30, 10_000, 290_000),
+            request(1_200, 0, 300_000),
+            request(1_260, 0, 300_000),
+        ]),
+    )
+    .unwrap();
+    let subagents = projects.join(format!("{session}/subagents"));
+    std::fs::create_dir_all(&subagents).unwrap();
+    std::fs::write(
+        subagents.join("agent-a.jsonl"),
+        lines(&[
+            json!({"type": "system", "subtype": "compact_boundary", "sessionId": session,
+                   "isSidechain": true, "agentId": "a", "timestamp": at(600),
+                   "compactMetadata": {"trigger": "auto", "preTokens": 180_000, "postTokens": 20_000}}),
+            json!({"type": "attachment", "sessionId": session, "isSidechain": true, "agentId": "a",
+                   "timestamp": at(1_230),
+                   "attachment": {"type": "deferred_tools_record", "entries": []}}),
+        ]),
+    )
+    .unwrap();
+    server.client().import().unwrap();
+    let live = server.client().snapshot(session).unwrap().live.cache;
+    assert_eq!(live.rebuilds, 2);
+    assert_eq!(
+        live.last_rebuild.map(|r| r.cause),
+        Some(crate::cache_model::RebuildCause::Unknown)
+    );
+    let history = server.client().history(Range::Month).unwrap().totals;
+    assert_eq!((history.rebuilds, history.idle_rebuilds), (2, 1));
+    let insights = server.client().insights(session).unwrap();
+    let evidence = |rule| {
+        insights
+            .findings
+            .iter()
+            .find(|f| f.rule == rule)
+            .map(|f| f.evidence[0].clone())
+    };
+    assert_eq!(
+        evidence(crate::insights::RuleId::IdleRebuilds),
+        Some("1\u{a0}cache rebuild after a break, in 1\u{a0}session, $1.44".into())
+    );
+    assert_eq!(
+        evidence(crate::insights::RuleId::CacheBusts),
+        Some("1\u{a0}rewrite mid-session with no cause in the transcripts, $1.44".into())
+    );
+}
+
+#[test]
 fn the_insights_route_answers_with_ranked_findings_wins_and_a_recap() {
     let server = Server::start();
     std::fs::write(

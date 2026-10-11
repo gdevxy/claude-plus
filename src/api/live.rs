@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cache_model::{self, Cache, Context};
+use crate::cache_model::{self, Cache, Causes};
 use crate::forecast::{self, Forecast};
 use crate::limits::{self, LimitWindow};
 use crate::pricing::PriceTable;
@@ -53,15 +53,10 @@ impl Live {
             now_ms,
             &reported,
         );
+        let causes = Causes::read(store, session, i64::MIN, i64::MAX)?;
         let cache = cache_model::model(
             &timeline,
-            &Context {
-                prices,
-                prefix_changes: &store.prefix_changes(session)?,
-                compactions: &store.compaction_times(session)?,
-                subscription: !reported.is_empty(),
-                now_ms,
-            },
+            &causes.context(prices, !reported.is_empty(), now_ms),
         );
         let pct_per_usd_5h = limits
             .iter()

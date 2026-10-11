@@ -1,12 +1,23 @@
+use std::collections::BTreeSet;
+
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::pricing::{PriceTable, normalize_model};
+use crate::store::{CompactionPoint, PrefixChange, Store};
 use crate::timeline::{Observed, Source, Thread, Timeline};
 use crate::transcript::TokenCounts;
 
 pub const FIVE_MINUTES_MS: i64 = 300_000;
 pub const ONE_HOUR_MS: i64 = 3_600_000;
 pub const MIN_REBUILD_PREFIX: u64 = 2048;
+pub const SETUP_KINDS: &[&str] = &[
+    "skill_listing",
+    "instructions",
+    "nested_memory",
+    "agent_listing_delta",
+];
+pub const MCP_TOOL_PREFIX: &str = "mcp__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ttl {
@@ -90,6 +101,88 @@ pub struct Context<'a> {
     pub compactions: &'a [i64],
     pub subscription: bool,
     pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Causes {
+    pub changes: Vec<(PrefixChange, bool)>,
+    pub compactions: Vec<CompactionPoint>,
+    prefix_changes: Vec<i64>,
+    main_compactions: Vec<i64>,
+}
+
+impl Causes {
+    pub fn read(store: &Store, session_id: &str, from_ts: i64, until_ts: i64) -> Result<Self> {
+        let announced = store.prefix_kinds_between(session_id, i64::MIN, until_ts)?;
+        let changed = mcp_changes(&announced);
+        let changes = announced
+            .into_iter()
+            .zip(changed)
+            .filter(|(change, _)| change.ts >= from_ts)
+            .collect();
+        Ok(Self::of(
+            changes,
+            store.compactions_between(session_id, from_ts, until_ts)?,
+        ))
+    }
+
+    pub fn of(changes: Vec<(PrefixChange, bool)>, compactions: Vec<CompactionPoint>) -> Self {
+        let prefix_changes = changes
+            .iter()
+            .filter(|(change, mcp)| *mcp || SETUP_KINDS.contains(&change.kind.as_str()))
+            .map(|(change, _)| change.ts)
+            .collect();
+        let main_compactions = compactions
+            .iter()
+            .filter(|c| c.main)
+            .map(|c| c.ts)
+            .collect();
+        Self {
+            changes,
+            compactions,
+            prefix_changes,
+            main_compactions,
+        }
+    }
+
+    pub fn context<'a>(
+        &'a self,
+        prices: &'a PriceTable,
+        subscription: bool,
+        now_ms: i64,
+    ) -> Context<'a> {
+        Context {
+            prices,
+            prefix_changes: &self.prefix_changes,
+            compactions: &self.main_compactions,
+            subscription,
+            now_ms,
+        }
+    }
+}
+
+pub fn mcp_changes(changes: &[PrefixChange]) -> Vec<bool> {
+    let mut tools: BTreeSet<&str> = BTreeSet::new();
+    let mut servers: BTreeSet<&str> = BTreeSet::new();
+    changes
+        .iter()
+        .map(|change| {
+            let (known, only_mcp) = match change.kind.as_str() {
+                "deferred_tools_delta" => (&mut tools, true),
+                "mcp_instructions_delta" => (&mut servers, false),
+                _ => return false,
+            };
+            let counted = |name: &&String| !only_mcp || name.starts_with(MCP_TOOL_PREFIX);
+            let mut changed = false;
+            for name in change.names.iter().filter(counted) {
+                changed |= known.insert(name);
+            }
+            for name in change.removed.iter().filter(counted) {
+                changed |= known.remove(name.as_str());
+            }
+            changed
+        })
+        .collect()
 }
 
 pub fn ttl_of(thread: &Thread, requests: &[&Observed], subscription: bool) -> (Ttl, TtlSource) {
@@ -486,5 +579,77 @@ mod tests {
         assert_eq!(model.rebuilds, 1);
         assert_eq!(model.last_rebuild.unwrap().extra_usd, None);
         assert_eq!((model.rebuild_usd, model.saved_usd), (0.0, 0.0));
+    }
+
+    fn change(kind: &str, names: &[&str], removed: &[&str]) -> PrefixChange {
+        PrefixChange {
+            ts: 0,
+            kind: kind.into(),
+            names: names.iter().map(|n| n.to_string()).collect(),
+            removed: removed.iter().map(|n| n.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn only_a_delta_that_adds_or_removes_mcp_tools_or_servers_changes_them() {
+        let changes = [
+            change("mcp_instructions_delta", &["linear"], &[]),
+            change(
+                "deferred_tools_delta",
+                &["WebFetch", "mcp__linear__search"],
+                &[],
+            ),
+            change("deferred_tools_record", &["mcp__docs__find"], &[]),
+            change("deferred_tools_delta", &["mcp__linear__search"], &[]),
+            change("mcp_instructions_delta", &["linear"], &[]),
+            change("deferred_tools_delta", &["WebSearch"], &[]),
+            change("deferred_tools_delta", &[], &["mcp__linear__search"]),
+            change("deferred_tools_delta", &["mcp__linear__search"], &[]),
+            change("mcp_instructions_delta", &["docs"], &[]),
+            change("mcp_instructions_delta", &[], &["docs"]),
+            change("instructions", &["mcp__x__y"], &[]),
+        ];
+        assert_eq!(
+            mcp_changes(&changes),
+            [
+                true, true, false, false, false, false, true, true, true, true, false
+            ]
+        );
+    }
+
+    #[test]
+    fn only_setup_records_and_real_mcp_changes_explain_a_rewrite_and_only_main_compactions_hide_one()
+     {
+        let at = |ts: i64, kind: &str, mcp: bool| {
+            (
+                PrefixChange {
+                    ts,
+                    ..change(kind, &[], &[])
+                },
+                mcp,
+            )
+        };
+        let compaction = |ts: i64, main: bool| CompactionPoint {
+            session_id: "s1".into(),
+            ts,
+            main,
+            post_tokens: None,
+        };
+        let causes = Causes::of(
+            vec![
+                at(10, "deferred_tools_record", false),
+                at(20, "deferred_tools_delta", false),
+                at(30, "deferred_tools_delta", true),
+                at(40, "nested_memory", false),
+                at(50, "mcp_instructions_delta", true),
+            ],
+            vec![compaction(60, false), compaction(70, true)],
+        );
+        let prices = PriceTable::bundled();
+        let context = causes.context(&prices, false, 0);
+        assert_eq!(context.prefix_changes, [30, 40, 50]);
+        assert_eq!(context.compactions, [70]);
+        assert_eq!(causes.changes.len(), 5);
+        assert_eq!(causes.compactions.len(), 2);
     }
 }

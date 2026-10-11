@@ -76,31 +76,12 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
-
-    pub fn prefix_changes(&self, session_id: &str) -> Result<Vec<i64>> {
-        let placeholders = vec!["?"; PREFIX_KINDS.len()].join(", ");
-        let sql = format!(
-            "SELECT ts FROM attachments WHERE session_id = ? AND ts IS NOT NULL AND kind IN ({placeholders}) ORDER BY ts"
-        );
-        let mut statement = self.conn.prepare_cached(&sql)?;
-        let params = std::iter::once(session_id).chain(PREFIX_KINDS.iter().copied());
-        let rows = statement.query_map(rusqlite::params_from_iter(params), |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn compaction_times(&self, session_id: &str) -> Result<Vec<i64>> {
-        let mut statement = self.conn.prepare_cached(
-            "SELECT ts FROM compactions WHERE session_id = ?1 AND ts IS NOT NULL ORDER BY ts",
-        )?;
-        let rows = statement.query_map([session_id], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{AttachmentRow, CompactionRow, EventRow, RequestRow};
+    use crate::store::{EventRow, RequestRow};
 
     fn request(key: &str, session: &str, ts: i64, agent: Option<&str>) -> RequestRow {
         RequestRow {
@@ -174,44 +155,5 @@ mod tests {
             .map(|e| e.ts_ms)
             .collect();
         assert_eq!(since, vec![20, 30]);
-    }
-
-    #[test]
-    fn prefix_changes_and_compactions_are_listed_by_time() {
-        let mut store = Store::open_in_memory().unwrap();
-        let mut w = store.writer().unwrap();
-        let file = w.file("/p/proj/s1.jsonl", 0, 0).unwrap();
-        for (line_no, kind, ts) in [
-            (1, "deferred_tools_delta", Some(300)),
-            (2, "environment", Some(100)),
-            (3, "instructions", Some(50)),
-            (4, "skill_listing", None),
-        ] {
-            w.attachment(&AttachmentRow {
-                file_id: file,
-                line_no,
-                session_id: "s1".into(),
-                ts,
-                kind: kind.into(),
-                chars: 10,
-                names: vec![],
-                removed: vec![],
-            })
-            .unwrap();
-        }
-        w.compaction(&CompactionRow {
-            file_id: file,
-            line_no: 5,
-            session_id: "s1".into(),
-            ts: Some(400),
-            trigger: Some("auto".into()),
-            pre_tokens: Some(9),
-            post_tokens: Some(3),
-        })
-        .unwrap();
-        w.commit().unwrap();
-        assert_eq!(store.prefix_changes("s1").unwrap(), vec![50, 300]);
-        assert_eq!(store.compaction_times("s1").unwrap(), vec![400]);
-        assert_eq!(store.prefix_changes("s2").unwrap(), Vec::<i64>::new());
     }
 }

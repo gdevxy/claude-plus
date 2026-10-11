@@ -1,10 +1,9 @@
 use anyhow::Result;
-use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params};
 
 use super::context::MAIN_THREAD;
 use super::timeline::{POINT_COLUMNS, point_of};
-use super::{LimitSample, PREFIX_KINDS, RequestPoint, Store};
+use super::{LimitSample, RequestPoint, Store};
 use crate::transcript::TokenCounts;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,14 +78,6 @@ const LIMIT_SAMPLES_BETWEEN: &str =
     "SELECT ts_ms, session_id, model, window, used_pct, resets_at_ms
      FROM limit_samples WHERE window = ?1 AND ts_ms >= ?2 AND ts_ms < ?3 ORDER BY ts_ms, id";
 
-fn prefix_changes_sql() -> String {
-    let kinds = vec!["?"; PREFIX_KINDS.len()].join(", ");
-    format!(
-        "SELECT ts FROM attachments
-         WHERE session_id = ? AND ts >= ? AND ts < ? AND kind IN ({kinds}) ORDER BY ts"
-    )
-}
-
 fn compactions_sql() -> String {
     format!(
         "SELECT c.ts, {MAIN_THREAD}, c.post_tokens FROM compactions c JOIN files f ON f.id = c.file_id
@@ -102,7 +93,6 @@ fn history_statements() -> Vec<String> {
         ADJUSTMENTS_BETWEEN.to_string(),
         SESSIONS_SPENDING_BETWEEN.to_string(),
         LIMIT_SAMPLES_BETWEEN.to_string(),
-        prefix_changes_sql(),
         compactions_sql(),
     ]
 }
@@ -195,27 +185,6 @@ impl Store {
                 resets_at_ms: r.get(5)?,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn prefix_changes_between(
-        &self,
-        session_id: &str,
-        since_ts: i64,
-        until_ts: i64,
-    ) -> Result<Vec<i64>> {
-        let mut statement = self.conn.prepare_cached(&prefix_changes_sql())?;
-        let mut values: Vec<Value> = vec![
-            session_id.to_string().into(),
-            since_ts.into(),
-            until_ts.into(),
-        ];
-        values.extend(
-            PREFIX_KINDS
-                .iter()
-                .map(|kind| Value::from(kind.to_string())),
-        );
-        let rows = statement.query_map(rusqlite::params_from_iter(values), |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -476,13 +445,8 @@ mod tests {
     }
 
     #[test]
-    fn prefix_changes_and_compactions_in_a_span_tell_the_main_thread_apart() {
+    fn compactions_in_a_span_tell_the_main_thread_apart() {
         let store = filled();
-        assert_eq!(store.prefix_changes_between("s1", 50, 200).unwrap(), [110]);
-        assert_eq!(
-            store.prefix_changes_between("s2", 0, 200).unwrap(),
-            [] as [i64; 0]
-        );
         assert_eq!(store.compactions_between("s1", 141, 200).unwrap().len(), 1);
         assert_eq!(
             store.compactions_between("s1", 0, 200).unwrap(),

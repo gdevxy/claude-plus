@@ -5,14 +5,13 @@ use anyhow::Result;
 use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 
-use super::cache::mcp_changes;
 use super::usage::LARGE_RESULT_CHARS;
 use super::words::{count, money};
 use super::{
     DAY_S, Finding, INSIGHTS_VERSION, InsightContext, MemoryText, Rebuilt, WINDOW_DAYS, evaluate,
     is_main,
 };
-use crate::cache_model::{self, Context};
+use crate::cache_model::{self, Causes};
 use crate::config_scan::{self, Loading, Scan, SourceKind};
 use crate::context_model::{self, Uses, breakdown, items};
 use crate::history::{Range, Rates, calendar};
@@ -295,37 +294,20 @@ fn rebuilds(
                 .filter(|r| r.session_id == session)
                 .map(|r| r.point.clone()),
         );
-        let announced = store.prefix_kinds_between(session, i64::MIN, until)?;
-        let changed = mcp_changes(&announced);
-        let kinds: Vec<(&PrefixChange, bool)> = announced
-            .iter()
-            .zip(changed)
-            .filter(|(k, _)| k.ts >= from)
-            .collect();
-        let compacted = store.compactions_between(session, from, until)?;
+        let causes = Causes::read(store, session, from, until)?;
         let timeline = Timeline::build(&points, &[]);
         let main = timeline.main();
         let (ttl, _) = cache_model::ttl_of(&Thread::Main, &main, false);
-        let changes: Vec<i64> = kinds.iter().map(|(k, _)| k.ts).collect();
-        let compacted_ts: Vec<i64> = compacted.iter().filter(|c| c.main).map(|c| c.ts).collect();
-        let found = cache_model::rebuilt_requests(
-            &main,
-            ttl,
-            &Context {
-                prices,
-                prefix_changes: &changes,
-                compactions: &compacted_ts,
-                subscription: false,
-                now_ms,
-            },
-        );
+        let found =
+            cache_model::rebuilt_requests(&main, ttl, &causes.context(prices, false, now_ms));
         for (request, rebuild) in found.into_iter().filter(|(_, r)| r.ts_ms >= since * 1000) {
             let before = main
                 .iter()
                 .rev()
                 .find(|o| o.ts_ms < rebuild.ts_ms)
                 .map_or(rebuild.ts_ms, |o| o.ts_ms);
-            let between: Vec<&(&PrefixChange, bool)> = kinds
+            let between: Vec<&(PrefixChange, bool)> = causes
+                .changes
                 .iter()
                 .filter(|(k, _)| before < k.ts * 1000 && k.ts * 1000 <= rebuild.ts_ms)
                 .collect();
@@ -340,7 +322,7 @@ fn rebuilds(
                 rebuild,
             });
         }
-        compactions.extend(compacted.into_iter().filter(|c| c.ts >= since));
+        compactions.extend(causes.compactions.into_iter().filter(|c| c.ts >= since));
     }
     Ok((rebuilt, compactions))
 }
