@@ -627,6 +627,7 @@ fn help_describes_every_command() {
     for line in [
         "  import   Read new Claude Code transcripts into the local store\n",
         "  stats    Show daily cost per model, importing first\n",
+        "  export   Print stored usage per day, project and model, importing first\n",
         "  doctor   Check the setup and compare totals with Claude Code, read-only\n",
         "  reindex  Rebuild every derived table from the stored records\n",
         "  daemon   Run the daemon that keeps the store live, in the foreground\n",
@@ -657,4 +658,66 @@ fn an_interrupted_reindex_is_reported_and_finished_by_the_next_import() {
         "✻ Imported 0 lines from 0 changed files · 0 new requests · 0 unparsable lines\n  History: 5 requests across 2 sessions · $0.0812 priced\n"
     );
     assert!(!stdout_of(&env, &["doctor"]).contains("Reindex:"));
+}
+
+const EXPORT_CSV: &str = "\
+day,project,model,requests,unpriced,input,output,cache_read,cache_write_5m,cache_write_1h,cost_usd,reconciled_usd
+2026-10-01,demo,claude-opus-5-5,1,0,10,1000,20000,0,5000,0.064040,0.000000
+2026-10-02,demo,claude-haiku-4-5-20251001,1,0,100,62,0,0,0,0.000410,0.000000
+2026-10-02,demo,claude-sonnet-5-5,1,0,5,200,0,1000,0,0.004510,0.000000
+2026-10-03,demo,claude-haiku-4-5-20251001,0,0,1000,20,0,0,0,0.001100,0.001100
+2026-10-03,demo,claude-sonnet-5-5,2,0,10,1105,1000,0,0,0.011170,0.010000
+";
+
+#[test]
+fn export_csv_is_exact_and_matches_stats() {
+    let env = env();
+    assert_eq!(stdout_of(&env, &["export", "--format", "csv"]), EXPORT_CSV);
+}
+
+#[test]
+fn export_json_carries_the_same_rows() {
+    let env = env();
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout_of(&env, &["export", "--format", "json"])).unwrap();
+    assert_eq!(json["v"], 1);
+    let rows = json["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 5);
+    let total: f64 = rows
+        .iter()
+        .map(|row| row["cost_usd"].as_f64().unwrap())
+        .sum();
+    assert!((total - 0.08123).abs() < 1e-9, "{total}");
+    assert_eq!(rows[3]["requests"], 0);
+    assert_eq!(rows[3]["reconciled_usd"], 0.0011);
+}
+
+#[test]
+fn export_days_keeps_the_last_calendar_days() {
+    let env = env();
+    let today: String = EXPORT_CSV
+        .lines()
+        .filter(|line| !line.starts_with("2026-10-0") || line.starts_with("2026-10-03"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_eq!(
+        stdout_of(&env, &["export", "--format", "csv", "--days", "1"]),
+        today
+    );
+    cmd(&env, &["export", "--format", "csv", "--days", "0"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn export_rejects_an_unknown_format() {
+    let env = env();
+    cmd(&env, &["export", "--format", "xml"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[possible values: json, csv]"));
+    cmd(&env, &["export"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--format <FORMAT>"));
 }

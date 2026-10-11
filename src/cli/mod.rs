@@ -1,5 +1,6 @@
 mod daemon;
 mod doctor;
+mod export;
 pub mod format;
 mod import;
 mod reindex;
@@ -47,6 +48,17 @@ enum Command {
         )]
         days: u32,
     },
+    #[command(about = "Print stored usage per day, project and model, importing first")]
+    Export {
+        #[arg(long, value_enum, help = "Output format")]
+        format: export::Format,
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u32).range(1..=36500),
+            help = "Number of calendar days to include, today included [default: all]"
+        )]
+        days: Option<u32>,
+    },
     #[command(about = "Check the setup and compare totals with Claude Code, read-only")]
     Doctor,
     #[command(about = "Rebuild every derived table from the stored records")]
@@ -80,6 +92,7 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Import => import::run(&paths, &prices),
         Command::Stats { days } => stats::run(&paths, &prices, days),
+        Command::Export { format, days } => export::run(&paths, &prices, format, days),
         Command::Doctor => doctor::run(&paths, &prices),
         Command::Reindex => reindex::run(&paths, &prices),
         Command::Daemon {
