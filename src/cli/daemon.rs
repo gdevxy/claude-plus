@@ -32,10 +32,12 @@ pub fn ensure(paths: &Paths) -> Result<()> {
 }
 
 fn refreshed(from: &str) -> String {
-    format!(
-        "✻ Updated the plus mod from v{from} to v{} · new Claude Code sessions load it",
-        bundle::VERSION
-    )
+    let what = if from == bundle::VERSION {
+        format!("v{from} to this build")
+    } else {
+        format!("from v{from} to v{}", bundle::VERSION)
+    };
+    format!("✻ Updated the plus mod {what} · new Claude Code sessions load it")
 }
 
 pub fn ensured(ensured: &Ensured) -> Vec<String> {
@@ -129,6 +131,24 @@ mod tests {
         assert_eq!(
             restarted(&health("0.1.0", 9, 7), &health("0.1.0", 10, 42)),
             "✻ Restarted the claude-plus daemon on v0.1.0 (was an older build) · pid 42"
+        );
+    }
+
+    #[test]
+    fn a_refresh_names_the_version_or_the_build_it_replaced() {
+        assert_eq!(
+            refreshed("0.0.1"),
+            format!(
+                "✻ Updated the plus mod from v0.0.1 to v{} · new Claude Code sessions load it",
+                bundle::VERSION
+            )
+        );
+        assert_eq!(
+            refreshed(bundle::VERSION),
+            format!(
+                "✻ Updated the plus mod v{} to this build · new Claude Code sessions load it",
+                bundle::VERSION
+            )
         );
     }
 

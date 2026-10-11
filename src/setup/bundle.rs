@@ -13,6 +13,7 @@ pub const MARKETPLACE: &str = "claude-plus";
 pub const PLUGIN_ID: &str = "plus@claude-plus";
 const MANIFEST: &str = "mod/.claude-plugin/plugin.json";
 const MARKETPLACE_MANIFEST: &str = ".claude-plugin/marketplace.json";
+const HASH_FILE: &str = ".bundle-hash";
 
 pub fn write(dir: &Path) -> Result<()> {
     let _lock = lock(dir)?;
@@ -33,6 +34,10 @@ pub fn refresh(dir: &Path) -> Result<Option<String>> {
 
 fn outdated(dir: &Path) -> Option<String> {
     match version_in(dir) {
+        Some(installed) if installed == VERSION => {
+            let hash = std::fs::read_to_string(dir.join(HASH_FILE)).ok();
+            (hash.as_deref() != Some(bundle_hash().as_str())).then_some(installed)
+        }
         Some(installed) => is_older(&installed, VERSION).then_some(installed),
         None => (!dir.exists())
             .then(|| version_in(&sibling(dir, "old")))
@@ -97,6 +102,7 @@ fn replace(dir: &Path) -> Result<()> {
         create_private_dirs(path.parent().expect("a bundled file has a parent"))?;
         write_private(&path, bytes)?;
     }
+    write_private(&staging.join(HASH_FILE), bundle_hash().as_bytes())?;
     match swap(&staging, dir) {
         Ok(()) => remove_if_present(&staging),
         Err(error) if error == rustix::io::Errno::NOENT => std::fs::rename(&staging, dir)
@@ -117,6 +123,25 @@ fn replace(dir: &Path) -> Result<()> {
 fn swap(staging: &Path, dir: &Path) -> rustix::io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, staging, CWD, dir, RenameFlags::EXCHANGE)
+}
+
+fn bundle_hash() -> String {
+    hash_of(FILES)
+}
+
+fn hash_of(files: &[(&str, &[u8])]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for (name, bytes) in files {
+        for part in [name.as_bytes(), &(bytes.len() as u64).to_le_bytes(), bytes] {
+            for byte in part {
+                hash = (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+            }
+        }
+        hash = (hash ^ 0xff).wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 pub fn version_in(dir: &Path) -> Option<String> {
@@ -266,6 +291,32 @@ mod tests {
         with_version(&dir, "999.0.0");
         assert_eq!(refresh(&dir).unwrap(), None);
         assert_eq!(version_in(&dir).as_deref(), Some("999.0.0"));
+    }
+
+    #[test]
+    fn a_folder_of_this_version_from_another_build_is_refreshed() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("marketplace");
+        write(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(HASH_FILE)).unwrap(),
+            bundle_hash()
+        );
+        std::fs::write(dir.join(HASH_FILE), "another build").unwrap();
+        assert_eq!(refresh(&dir).unwrap().as_deref(), Some(VERSION));
+        assert_eq!(refresh(&dir).unwrap(), None);
+        std::fs::remove_file(dir.join(HASH_FILE)).unwrap();
+        assert_eq!(refresh(&dir).unwrap().as_deref(), Some(VERSION));
+        with_version(&dir, "999.0.0");
+        std::fs::write(dir.join(HASH_FILE), "another build").unwrap();
+        assert_eq!(refresh(&dir).unwrap(), None);
+    }
+
+    #[test]
+    fn the_bundle_hash_names_every_file_and_its_bytes() {
+        assert_eq!(bundle_hash().len(), 16);
+        assert_eq!(bundle_hash(), bundle_hash());
+        assert_ne!(hash_of(&[("a", b"bc")]), hash_of(&[("ab", b"c")]));
     }
 
     #[test]
