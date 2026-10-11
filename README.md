@@ -89,11 +89,12 @@ claude-plus keeps each account apart: logging out of a company account and into 
 It learns which account is signed in from Claude Code's `.claude.json`, which it only reads.
 An API key, a gateway (`ANTHROPIC_BASE_URL`) or Bedrock, Vertex or Foundry each count as their own account.
 Sessions from before the upgrade show as Unknown under All accounts.
+The 5h calibration (`Learning how your plan counts tokens… x of 20 readings`) is kept per account, so it starts over once after the upgrade.
 
 `claude-plus budget set 700` sets a monthly budget for the current account, reset on the 1st at 00:00 UTC.
 With a reported spend limit it turns the percent into dollars.
 Without one it is measured against what Claude Code on this machine spent.
-The pane warns once per period when the pace would run out before the reset, and again at 90% used.
+The pane warns once per period and account when the pace would run out before the reset, and again at 90% used.
 
 Prices default to Anthropic's own.
 An optional `~/.claude-plus/prices.toml` (or `$CLAUDE_PLUS_HOME/prices.toml`) overrides them, and it needs only the models whose prices differ, for example:
@@ -105,6 +106,9 @@ output = 15
 cache_read = 0.15
 ```
 
+The daemon reads `prices.toml` when it starts, and costs already stored keep the price they were imported with.
+After editing it, run `claude-plus daemon stop` and then `claude-plus reindex`; the next Claude Code session restarts the daemon with the new prices.
+
 ## Upgrade
 
 Upgrade the binary with `brew upgrade claude-plus` or by running the install script again.
@@ -112,6 +116,7 @@ The next Claude Code session restarts the daemon on the new version and updates 
 An older `claude-plus` found first on `PATH` never replaces a newer mod: `claude-plus install` keeps a newer mod in `~/.claude-plus/marketplace` and says so.
 When the `plus` mod comes from another marketplace, such as the GitHub one above, `claude-plus install` asks before it points the `claude-plus` marketplace at its own folder.
 If that mod is newer than the binary, it stops instead and changes nothing: upgrade `claude-plus`, or run `claude plugin uninstall plus@claude-plus` first to switch to the binary's version.
+Until `claude-plus install` or the next session updates the mod, a pane from before accounts and budgets may show a raw `budget` label next to its limits.
 
 ## Uninstall
 

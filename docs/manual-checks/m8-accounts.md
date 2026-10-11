@@ -30,7 +30,7 @@ claude-plus --version
 - [ ] Run `claude-plus stats --days 1`: it shows the company account; `claude-plus stats --days 1 --account all` shows both sessions.
 - [ ] Run `claude-plus export --format csv | head -n 2`: the header has an `account` column after `project`.
 - [ ] Switch back to the private login and start a session: its 5h bar continues from the value it had, with no reset and no "Learning" restart.
-- [ ] Look at every new line at 24, 60 and 144 columns in the dark and light themes: nothing is cut mid-word or misaligned.
+- [ ] Look at every new line at 26 (the narrowest supported pane), 60 and 144 columns in the dark and light themes: nothing is cut mid-word or misaligned.
 
 ## Outcome
 

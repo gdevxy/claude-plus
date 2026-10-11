@@ -170,6 +170,7 @@ Budget alerts reuse the existing limit toast: one toast when the projection firs
 - The section heading "Plan limits" becomes "Limits".
 - The cache note says the lifetime is "assumed from your account" instead of "from your plan".
 - History: `a` cycles current account, each other account with data, and all accounts (Unknown included).
+The control shows whenever that cycle has two entries or more, and the report's `unknown` flag adds a dim line saying spend with no account shows under All.
   The selected account appears in the view title.
   The `pct` metric is offered only when a single account with a calibrated `five_hour` fit is selected.
 - Insights: computed for the current account; savings in percent of 5h only when that account has a calibrated fit.
@@ -203,6 +204,7 @@ Budget alerts reuse the existing limit toast: one toast when the projection firs
 - A `session.start` without `auth` (an older mod): the daemon falls back to the timeline.
 - Two OAuth accounts in one session's lifetime: the session keeps its start account.
 - Reported percent above 100 on an exceeded spend limit: the bar is drawn full in the warning color with the real percent.
+The detail says how much is over and when it resets, for example `$28 over · resets in 20d 15h`, with no pace and no pace toast.
 - Budget set for an account with no sessions: allowed, so a budget can be set before first use.
 
 ## 11. Testing
