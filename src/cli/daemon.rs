@@ -8,6 +8,7 @@ use crate::daemon::control::{self, Ensured, Stopped};
 use crate::daemon::{self as service, Mode};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
+use crate::setup::bundle;
 
 pub fn run(paths: &Paths, prices: PriceTable, detached: bool, rescan_secs: u64) -> Result<()> {
     let mode = if detached {
@@ -19,10 +20,22 @@ pub fn run(paths: &Paths, prices: PriceTable, detached: bool, rescan_secs: u64) 
 }
 
 pub fn ensure(paths: &Paths) -> Result<()> {
+    match bundle::refresh(&paths.marketplace_dir()) {
+        Ok(Some(from)) => println!("{}", refreshed(&from)),
+        Ok(None) => {}
+        Err(error) => eprintln!("claude-plus: could not update the plus mod: {error:#}"),
+    }
     for line in ensured(&control::ensure(paths)?) {
         println!("{line}");
     }
     Ok(())
+}
+
+fn refreshed(from: &str) -> String {
+    format!(
+        "✻ Updated the plus mod from v{from} to v{} · new Claude Code sessions load it",
+        bundle::VERSION
+    )
 }
 
 pub fn ensured(ensured: &Ensured) -> Vec<String> {

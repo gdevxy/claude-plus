@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rustix::fs::{FlockOperation, flock};
 
+use crate::daemon::control::is_older;
+
 include!(concat!(env!("OUT_DIR"), "/bundle.rs"));
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -14,6 +16,19 @@ const MANIFEST: &str = "mod/.claude-plugin/plugin.json";
 pub fn write(dir: &Path) -> Result<()> {
     let _lock = lock(dir)?;
     replace(dir)
+}
+
+pub fn refresh(dir: &Path) -> Result<Option<String>> {
+    let outdated = |dir: &Path| version_in(dir).filter(|installed| is_older(installed, VERSION));
+    if outdated(dir).is_none() {
+        return Ok(None);
+    }
+    let _lock = lock(dir)?;
+    let Some(installed) = outdated(dir) else {
+        return Ok(None);
+    };
+    replace(dir)?;
+    Ok(Some(installed))
 }
 
 fn lock(dir: &Path) -> Result<File> {
@@ -178,6 +193,58 @@ mod tests {
         assert_eq!(mode(&dir.join("mod/hooks/register.tsx")), 0o600);
         write(&dir).unwrap();
         assert_eq!(version_in(&dir).as_deref(), Some(VERSION));
+    }
+
+    fn with_version(dir: &Path, version: &str) {
+        let manifest = dir.join(MANIFEST);
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let old = text.replace(
+            &format!("\"version\": \"{VERSION}\""),
+            &format!("\"version\": \"{version}\""),
+        );
+        std::fs::write(&manifest, old).unwrap();
+    }
+
+    #[test]
+    fn an_older_mod_folder_is_refreshed_and_a_newer_or_missing_one_left_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("marketplace");
+        assert_eq!(refresh(&dir).unwrap(), None);
+        assert!(!dir.exists());
+        write(&dir).unwrap();
+        with_version(&dir, "0.0.1");
+        std::fs::write(dir.join("mod/hooks/stale.ts"), "old").unwrap();
+        assert_eq!(refresh(&dir).unwrap().as_deref(), Some("0.0.1"));
+        assert_eq!(version_in(&dir).as_deref(), Some(VERSION));
+        assert!(!dir.join("mod/hooks/stale.ts").exists());
+        assert_eq!(refresh(&dir).unwrap(), None);
+        with_version(&dir, "999.0.0");
+        assert_eq!(refresh(&dir).unwrap(), None);
+        assert_eq!(version_in(&dir).as_deref(), Some("999.0.0"));
+    }
+
+    #[test]
+    fn sessions_starting_together_refresh_the_folder_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("marketplace");
+        write(&dir).unwrap();
+        with_version(&dir, "0.0.1");
+        let refreshed: Vec<Option<String>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| refresh(&dir).unwrap()))
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect()
+        });
+        assert_eq!(
+            refreshed.iter().filter(|r| r.is_some()).count(),
+            1,
+            "{refreshed:?}"
+        );
+        assert_eq!(version_in(&dir).as_deref(), Some(VERSION));
+        assert!(dir.join("mod/hooks/register.tsx").is_file());
     }
 
     #[test]

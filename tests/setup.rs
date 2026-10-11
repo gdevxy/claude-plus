@@ -276,3 +276,48 @@ fn uninstalling_twice_finds_nothing_left() {
         .success()
         .stdout("No claude-plus daemon is running\n✻ claude-plus is uninstalled · close open Claude Code sessions, or their pane starts the daemon again\n");
 }
+
+#[test]
+fn daemon_ensure_brings_an_older_installed_mod_up_to_this_binary() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    let manifest = marketplace(&env).join("mod/.claude-plugin/plugin.json");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        text.replace(
+            &format!("\"version\": \"{VERSION}\""),
+            "\"version\": \"0.0.1\"",
+        ),
+    )
+    .unwrap();
+    let before = env.claude_calls();
+    cmd(&env, &["daemon", "--ensure"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(format!(
+            "✻ Updated the plus mod from v0.0.1 to v{VERSION} · new Claude Code sessions load it\n✻ claude-plus daemon is running · pid "
+        )));
+    assert!(
+        std::fs::read_to_string(&manifest)
+            .unwrap()
+            .contains(&format!("\"version\": \"{VERSION}\""))
+    );
+    assert_eq!(env.claude_calls(), before);
+    cmd(&env, &["daemon", "--ensure"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(
+            "✻ claude-plus daemon is running · pid ",
+        ));
+}
+
+#[test]
+fn daemon_ensure_without_an_installed_mod_writes_no_folder() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["daemon", "--ensure"]).assert().success();
+    assert!(!marketplace(&env).exists());
+    assert!(!env.plus.join("marketplace.lock").exists());
+}
