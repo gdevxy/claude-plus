@@ -559,7 +559,7 @@ export const register: Register = (on, options) => {
       shownView === 'context'
         ? contextScreen({ width: e.props.bodyColumns, nowMs, report: await read($, context), local: known, daemon: status, expanded: open })
         : shownView === 'history'
-          ? historyScreen({ width: e.props.bodyColumns, range: chosen.range, metric: chosen.metric, reports, failures: await read($, failures), context: await read($, context), local: known, daemon: status, expanded: open })
+          ? historyScreen({ width: e.props.bodyColumns, range: chosen.range, metric: chosen.metric, reports, failures: await read($, failures), context: await read($, context), local: known, daemon: status, expanded: open, theme: await read($, theme) })
           : screen({
               width: e.props.bodyColumns,
               nowMs,

@@ -57,6 +57,7 @@ Check this first when an M4 daemon is still running, before the `daemon stop` of
 - [ ] "Cost by day" has seven bars, today on the right above `today`, the first day's label under the first bar, and the bar heights follow the daily totals of `stats --days 7`.
 - [ ] Each bar is stacked by model in the colors of the legend under it, the largest model at the bottom, and a day with any spend at all shows at least a sliver.
 - [ ] (daltonized) In all four color themes, every model swatch of the legend and `Other` can be told from its neighbours, and from the bars' pieces next to it; `Other` is a dim grey.
+  Each theme has its own series, so the swatches differ between themes; in `light-daltonized` the pairs are closest (CIEDE2000 12.6 at worst), so look at it first.
   Real data with five or more models shows all six series; use the 90 days range if the week has fewer.
 - [ ] Token amounts of a billion or more read like `18.4B` with the Tokens metric, never `18408M`, and session and request counts are grouped like `14,577`.
 - [ ] `peak $x.xx` on the right of "Cost by day" is the tallest bar's value.

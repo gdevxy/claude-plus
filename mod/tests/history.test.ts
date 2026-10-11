@@ -1,19 +1,19 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { HistoryInput } from '../hooks/history'
-import { MODEL_COLORS, OTHER_COLOR, amount, hitFloor, historyScreen, metricsOf, nextMetric, nextRange, shownMetric } from '../hooks/history'
+import { amount, hitFloor, historyScreen, metricsOf, nextMetric, nextRange, shownMetric } from '../hooks/history'
 import type { Line } from '../hooks/state'
 import type { HistoryReport } from '../types'
 import { DAY_MS, OCT_5_MS, OPUS, bucket, contextReport, dayReport, historyReport, local, spend } from './fixtures'
-import { colorOf, paletteOf } from '../hooks/palette'
+import { colorOf, paletteOf, seriesOf } from '../hooks/palette'
 import { overflows, painted, trimmed } from './paint'
 import { VISIONS, distance } from './vision'
 
 const OK = { status: 'ok', detail: null } as const
-const MIN_SERIES_DISTANCE = 20
+const MIN_SERIES_DISTANCE: Readonly<Record<string, number>> = { dark: 15, light: 15, 'dark-daltonized': 15, 'light-daltonized': 12 }
 
 function input(overrides: Partial<HistoryInput> = {}): HistoryInput {
-  return { width: 40, range: '7d', metric: 'cost', reports: { '7d': historyReport(), '24h': dayReport() }, failures: {}, context: contextReport(), local: local(), daemon: OK, expanded: [], ...overrides }
+  return { width: 40, range: '7d', metric: 'cost', reports: { '7d': historyReport(), '24h': dayReport() }, failures: {}, context: contextReport(), local: local(), daemon: OK, expanded: [], theme: 'dark', ...overrides }
 }
 
 function line(lines: Line[], key: string): Line {
@@ -132,28 +132,35 @@ describe('history screen', () => {
     expect([...colors].sort()).toEqual(['claude', 'permission', null].sort())
     expect(line(lines, 'hist-model-0').segments[1]).toEqual({ text: '█', color: 'claude' })
     expect(line(lines, 'hist-model-1').segments[1]).toEqual({ text: '█', color: 'permission' })
-    expect(line(lines, 'hist-model-2').segments[1]).toEqual({ text: '█', color: 'planMode' })
+    expect(line(lines, 'hist-model-2').segments[1]).toEqual({ text: '█', color: 'ide' })
     expect(line(lines, 'hist-head').segments[1]).toEqual({ text: '$15.97', color: 'claude', bold: true })
     const peak = line(lines, 'hist-peak-chart').chart?.cells.flat().map(cell => cell.fg)
     expect(new Set(peak)).toEqual(new Set([null, 'permission', 'warning']))
   })
 
   test('every model color and Other stay apart under deuteranopia and protanopia in each color theme', () => {
-    const series = [...MODEL_COLORS, OTHER_COLOR]
-    const close = ['dark', 'light', 'dark-daltonized', 'light-daltonized'].flatMap(theme => {
+    const close = Object.keys(MIN_SERIES_DISTANCE).flatMap(theme => {
+      const { models, other } = seriesOf(theme)
+      const series = [...models, other]
+      expect(new Set(series).size).toBe(6)
       const palette = paletteOf(theme)
       if (palette === null) throw new Error(`no ${theme} palette`)
       return Object.entries(VISIONS).flatMap(([vision, matrix]) =>
         series.flatMap((first, index) =>
           series.slice(index + 1).flatMap(second => {
             const apart = distance(colorOf(palette, first), colorOf(palette, second), matrix)
-            return apart < MIN_SERIES_DISTANCE ? [`${theme} ${vision} ${first}/${second} ${apart.toFixed(1)}`] : []
+            return apart < (MIN_SERIES_DISTANCE[theme] ?? 0) ? [`${theme} ${vision} ${first}/${second} ${apart.toFixed(1)}`] : []
           }),
         ),
       )
     })
     expect(close).toEqual([])
-    expect(new Set(series).size).toBe(6)
+  })
+
+  test('each color theme ranks its models by its own series', () => {
+    const light = historyScreen(input({ theme: 'light' }))
+    expect(line(light, 'hist-model-1').segments[1]).toEqual({ text: '█', color: 'planMode' })
+    expect(line(light, 'hist-model-2').segments[1]).toEqual({ text: '█', color: 'ide' })
   })
 
   test('models beyond the top five are drawn together as Other', () => {

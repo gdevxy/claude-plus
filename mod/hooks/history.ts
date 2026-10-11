@@ -5,6 +5,7 @@ import type { Layout, Piece } from './chart'
 import { area, bars, grouped, layout, markers, MARKER, stacked } from './chart'
 import { compositionOf, reportOf } from './context'
 import { FULL_BLOCK, count, fit, money, modelName, percent, spread, tokens } from './format'
+import { seriesOf } from './palette'
 import type { Line } from './state'
 import { LIMIT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, fitting, gap, notice, pair, plain, prose } from './state'
 
@@ -16,8 +17,6 @@ export const PEAK_ROWS = 3
 export const GROWTH_ROWS = 3
 export const TOP_SHOWN = 5
 export const HIT_FLOOR_CAP = 0.9
-export const MODEL_COLORS: readonly ThemeKey[] = ['claude', 'permission', 'planMode', 'ide', 'text']
-export const OTHER_COLOR: ThemeKey = 'subtle'
 export const INDENT = '  '
 export const RETRY_SECONDS = 30
 export const MIN_HEAD = 8
@@ -37,6 +36,7 @@ export type HistoryInput = {
   local: Local
   daemon: Daemon
   expanded: readonly string[]
+  theme: string
 }
 
 export function rangeLabel(range: HistoryRange): string {
@@ -85,7 +85,7 @@ export function historyScreen(input: HistoryInput): Line[] {
     notice(input, width),
     headline(input, report, metric, width),
     ...(report !== null && busy
-      ? [spendChart(report, metric, width), cacheChart(input, report, width), peakChart(report, width), top('projects', report, metric, width), top('sessions', report, metric, width)]
+      ? [spendChart(report, metric, width, input.theme), cacheChart(input, report, width), peakChart(report, width), top('projects', report, metric, width), top('sessions', report, metric, width)]
       : []),
     growth(input, width),
   ].filter(section => section.length > 0)
@@ -149,18 +149,19 @@ function axis(key: string, report: HistoryReport, shape: Layout, groups: Bucket[
   return pair(key, `${' '.repeat(shape.offset + shape.gap)}${first}`, last, width, { dim: true }, { dim: true })
 }
 
-function spendChart(report: HistoryReport, metric: Metric, width: number): Line[] {
+function spendChart(report: HistoryReport, metric: Metric, width: number, theme: string): Line[] {
+  const { models: modelColors, other: otherColor } = seriesOf(theme)
   const shape = layout(report.buckets.length, width)
   const groups = grouped(report.buckets, shape)
   const named = report.models.map(model => model.model)
   const stacks = groups.map(group => {
     const pieces: Piece[] = named.map((model, index) => ({
       value: group.reduce((sum, bucket) => sum + bucket.models.filter(spent => spent.model === model).reduce((s, spent) => s + valueOf(spent, metric), 0), 0),
-      color: MODEL_COLORS[index] ?? OTHER_COLOR,
+      color: modelColors[index] ?? otherColor,
     }))
     const all = group.reduce((sum, bucket) => sum + valueOf(bucket, metric), 0)
     const other = all - pieces.reduce((sum, piece) => sum + piece.value, 0)
-    return other > 1e-9 ? [...pieces, { value: other, color: OTHER_COLOR }] : pieces
+    return other > 1e-9 ? [...pieces, { value: other, color: otherColor }] : pieces
   })
   const totals = stacks.map(pieces => pieces.reduce((sum, piece) => sum + piece.value, 0))
   const max = Math.max(0, ...totals)
@@ -169,9 +170,9 @@ function spendChart(report: HistoryReport, metric: Metric, width: number): Line[
     { key: 'hist-spend-chart', segments: [], chart: bars(stacks, shape, SPEND_ROWS, max) },
     axis('hist-spend-axis', report, shape, groups, width),
   ]
-  const shown = report.models.map((model, index) => ({ name: modelName(model.model), value: valueOf(model, metric), color: MODEL_COLORS[index] ?? OTHER_COLOR }))
+  const shown = report.models.map((model, index) => ({ name: modelName(model.model), value: valueOf(model, metric), color: modelColors[index] ?? otherColor }))
   const rest = valueOf(report.totals, metric) - shown.reduce((sum, model) => sum + model.value, 0)
-  if (rest > 1e-9) shown.push({ name: 'Other', value: rest, color: OTHER_COLOR })
+  if (rest > 1e-9) shown.push({ name: 'Other', value: rest, color: otherColor })
   shown.forEach((model, index) => lines.push(swatch(`hist-model-${index}`, model.name, amount(model.value, metric), model.color, width)))
   return lines
 }

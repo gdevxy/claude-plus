@@ -94,3 +94,18 @@ export function paletteOf(theme: string): Palette | null {
 export function colorOf(palette: Palette, key: ThemeKey | null): number {
   return key === null ? DEFAULT_COLOR : (palette[key] ?? DEFAULT_COLOR)
 }
+
+export type Series = { readonly models: readonly ThemeKey[]; readonly other: ThemeKey }
+
+const DEFAULT_SERIES: Series = { models: ['claude', 'permission', 'planMode', 'ide', 'text'], other: 'subtle' }
+
+const SERIES: Readonly<Record<string, Series>> = {
+  dark: { models: ['claude', 'permission', 'ide', 'text', 'inactive'], other: 'subtle' },
+  light: { models: ['claude', 'planMode', 'ide', 'text', 'remember'], other: 'subtle' },
+  'light-daltonized': { models: ['claude', 'permission', 'planMode', 'text', 'success'], other: 'subtle' },
+  'dark-daltonized': { models: ['claude', 'permission', 'ide', 'text', 'inactive'], other: 'subtle' },
+}
+
+export function seriesOf(theme: string): Series {
+  return SERIES[theme] ?? DEFAULT_SERIES
+}
