@@ -164,6 +164,31 @@ impl Writer<'_> {
     pub fn account_at(&self, at_ms: i64) -> Result<Option<String>> {
         account_at(&self.tx, at_ms)
     }
+
+    pub fn session_started_at(&self, session_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .tx
+            .prepare_cached("SELECT started_at FROM sessions WHERE id = ?1")?
+            .query_row([session_id], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    pub fn account_is_current(&self, row: &AccountRow) -> Result<bool> {
+        Ok(self
+            .tx
+            .prepare_cached(
+                "SELECT 1 FROM accounts
+                 WHERE id = ?1 AND (label_is_custom = 1 OR label = ?2)
+                   AND organization_type IS ?3 AND billing_type IS ?4",
+            )?
+            .exists(params![
+                row.id,
+                row.label,
+                row.organization_type,
+                row.billing_type
+            ])?)
+    }
 }
 
 impl Store {
@@ -197,11 +222,18 @@ impl Store {
         account_at(&self.conn, at_ms)
     }
 
+    #[cfg(test)]
+    pub fn total_changes(&self) -> u64 {
+        self.conn.total_changes()
+    }
+
     pub fn unattributed_sessions(&self) -> Result<Vec<(String, i64)>> {
         let mut statement = self.conn.prepare_cached(
             "SELECT s.id, s.started_at FROM sessions s
              LEFT JOIN session_accounts a ON a.session_id = s.id
-             WHERE a.session_id IS NULL AND s.started_at IS NOT NULL ORDER BY s.started_at, s.id",
+             WHERE a.session_id IS NULL AND s.started_at IS NOT NULL
+               AND s.started_at * 1000 >= (SELECT MIN(from_ms) FROM account_periods)
+             ORDER BY s.started_at, s.id",
         )?;
         let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -302,9 +334,16 @@ fn account_at(conn: &Connection, at_ms: i64) -> Result<Option<String>> {
 
 fn read_account(r: &rusqlite::Row) -> rusqlite::Result<AccountInfo> {
     let kind: String = r.get(1)?;
+    let kind = AccountKind::parse(&kind).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            format!("unknown account kind {kind:?}").into(),
+        )
+    })?;
     Ok(AccountInfo {
         id: r.get(0)?,
-        kind: AccountKind::parse(&kind).unwrap_or(AccountKind::Oauth),
+        kind,
         label: r.get(2)?,
         organization_type: r.get(3)?,
         first_seen_ms: r.get(4)?,
@@ -399,6 +438,7 @@ mod tests {
         session(&mut store, "s2", 20);
         let mut w = store.writer().unwrap();
         w.upsert_account(&oauth("a", "A"), 0).unwrap();
+        w.open_period("oauth:a", 0).unwrap();
         w.attribute("s1", "oauth:a", AttributionSource::Timeline)
             .unwrap();
         w.commit().unwrap();
@@ -459,5 +499,58 @@ mod tests {
             store.account("oauth:a").unwrap().unwrap().label,
             "Acme Corp · Enterprise"
         );
+    }
+
+    #[test]
+    fn sessions_before_the_first_period_are_never_pending() {
+        let mut store = Store::open_in_memory().unwrap();
+        session(&mut store, "old", 10);
+        session(&mut store, "new", 200);
+        assert_eq!(store.unattributed_sessions().unwrap(), vec![]);
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("a", "A"), 0).unwrap();
+        w.open_period("oauth:a", 100_000).unwrap();
+        w.commit().unwrap();
+        assert_eq!(
+            store.unattributed_sessions().unwrap(),
+            vec![("new".to_string(), 200)]
+        );
+    }
+
+    #[test]
+    fn an_unknown_account_kind_is_an_error() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO accounts (id, kind, label, first_seen_ms) VALUES ('x', 'martian', 'X', 0)",
+                [],
+            )
+            .unwrap();
+        assert!(store.accounts().is_err());
+        assert!(store.account("x").is_err());
+    }
+
+    #[test]
+    fn clear_derived_keeps_accounts_periods_attributions_and_budgets() {
+        let mut store = Store::open_in_memory().unwrap();
+        session(&mut store, "s1", 10);
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("a", "A"), 0).unwrap();
+        w.open_period("oauth:a", 0).unwrap();
+        w.attribute("s1", "oauth:a", AttributionSource::Start)
+            .unwrap();
+        w.set_budget("oauth:a", 50.0, 1).unwrap();
+        w.commit().unwrap();
+        let mut w = store.writer().unwrap();
+        w.clear_derived().unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.accounts().unwrap().len(), 1);
+        assert_eq!(store.open_account().unwrap().as_deref(), Some("oauth:a"));
+        assert_eq!(
+            store.session_account("s1").unwrap().as_deref(),
+            Some("oauth:a")
+        );
+        assert!(store.budget("oauth:a").unwrap().is_some());
     }
 }

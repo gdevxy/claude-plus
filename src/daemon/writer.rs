@@ -981,9 +981,12 @@ mod tests {
             r#"{"oauthAccount":{"accountUuid":"u-1"}}"#,
         )
         .unwrap();
+        let after_login = (chrono::Utc::now() + chrono::Duration::hours(1))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
         fx.write(
             "a.jsonl",
-            &line("a", "ra").replace("2026-10-01T10:00:00Z", "2099-01-01T00:00:00Z"),
+            &line("a", "ra").replace("2026-10-01T10:00:00Z", &after_login),
         );
         fx.handle.import().await.unwrap();
         let reader = fx.reader();

@@ -52,7 +52,7 @@ This change makes the account a first-class dimension, adds a per-account monthl
 The daemon reads the `oauthAccount` block of `.claude.json` in the Claude Code config location (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`), read-only.
 It reads it at startup, on every `session.start` event before attributing that session, and on every periodic rescan (60 seconds).
 The existing watcher only covers `projects/`, and an account switch only matters to sessions that start after it, so these three moments are enough.
-It keeps `accountUuid`, `organizationUuid`, `organizationName`, `organizationType`, `billingType`, `seatTier` and `displayName`, and nothing else.
+It keeps `accountUuid`, `organizationName`, `organizationType` and `billingType`, and nothing else.
 The email address is not stored.
 
 When the uuid differs from the open period's, the open period is closed at the change time and a new one is opened.

@@ -79,6 +79,11 @@ pub fn observe(store: &mut Store, claude_json: &Path, now_ms: i64) -> Result<Opt
     let open = writer.open_account()?;
     let now_open = match login {
         Login::SignedIn(row) => {
+            let unchanged =
+                open.as_deref() == Some(row.id.as_str()) && writer.account_is_current(&row)?;
+            if unchanged {
+                return Ok(open);
+            }
             writer.upsert_account(&row, now_ms)?;
             if open.as_deref() != Some(row.id.as_str()) {
                 writer.close_open_period(now_ms)?;
@@ -119,7 +124,8 @@ pub fn auth_account(auth: &Auth) -> Option<AccountRow> {
 }
 
 fn origin_of(base_url: &str) -> Option<(String, String)> {
-    let (scheme, rest) = base_url.trim().split_once("://")?;
+    let base_url = base_url.trim();
+    let (scheme, rest) = base_url.split_once("://").unwrap_or(("https", base_url));
     let scheme = scheme.to_ascii_lowercase();
     let authority = rest.split(['/', '?', '#']).next()?.to_ascii_lowercase();
     let authority = authority
@@ -192,7 +198,10 @@ pub fn account_for_sample(
     if let Some(account) = writer.session_account(session)? {
         return Ok(Some(account));
     }
-    let Some(account) = writer.account_at(at_ms)? else {
+    let started_ms = writer
+        .session_started_at(session)?
+        .map_or(at_ms, |started| started.saturating_mul(1000));
+    let Some(account) = writer.account_at(started_ms)? else {
         return Ok(None);
     };
     writer.attribute(session, &account, AttributionSource::Timeline)?;
@@ -408,5 +417,82 @@ mod tests {
                 kind: AccountKind::Api
             }
         );
+    }
+
+    fn start_session(store: &mut Store, id: &str, started_at: i64) {
+        let mut w = store.writer().unwrap();
+        w.session(&SessionRow {
+            id: id.into(),
+            project: "p".into(),
+            cwd: None,
+            ts: Some(started_at),
+        })
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    #[test]
+    fn a_sample_takes_the_account_of_its_session_start_not_of_the_measure_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let path = login_file(dir.path(), ACME);
+        observe(&mut store, &path, 10_000).unwrap();
+        login_file(dir.path(), MINE);
+        observe(&mut store, &path, 20_000).unwrap();
+        start_session(&mut store, "early", 15);
+        let mut writer = store.writer().unwrap();
+        assert_eq!(
+            account_for_sample(&mut writer, "early", 25_000)
+                .unwrap()
+                .as_deref(),
+            Some("oauth:u-1")
+        );
+        assert_eq!(
+            account_for_sample(&mut writer, "unknown", 25_000)
+                .unwrap()
+                .as_deref(),
+            Some("oauth:u-2")
+        );
+    }
+
+    #[test]
+    fn an_observation_that_changes_nothing_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let path = login_file(dir.path(), ACME);
+        observe(&mut store, &path, 1_000).unwrap();
+        let before = store.total_changes();
+        observe(&mut store, &path, 2_000).unwrap();
+        assert_eq!(store.total_changes(), before);
+        login_file(
+            dir.path(),
+            &ACME.replace("claude_enterprise", "claude_team"),
+        );
+        observe(&mut store, &path, 3_000).unwrap();
+        assert!(store.total_changes() > before);
+        assert_eq!(
+            store.accounts().unwrap()[0].organization_type.as_deref(),
+            Some("claude_team")
+        );
+    }
+
+    #[test]
+    fn a_base_url_without_a_scheme_is_still_a_gateway() {
+        let gateway = |url: &str| {
+            auth_account(&Auth {
+                provider: "anthropic".into(),
+                base_url: Some(url.into()),
+                api_key: false,
+            })
+        };
+        assert_eq!(
+            gateway("llm.corp:8080").unwrap().id,
+            "gateway:https://llm.corp:8080"
+        );
+        let bare = gateway("LLM.corp").unwrap();
+        assert_eq!(bare.id, "gateway:https://llm.corp:443");
+        assert_eq!(bare.label, "llm.corp");
+        assert_eq!(gateway("").map(|row| row.kind), None);
+        assert_eq!(gateway("   ").map(|row| row.kind), None);
     }
 }
