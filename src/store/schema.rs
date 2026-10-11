@@ -142,6 +142,15 @@ CREATE UNIQUE INDEX events_by_client_id ON events(session_id, client_id);
 ALTER TABLE requests ADD COLUMN sent_ts INTEGER;
 INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM requests);
 "#,
+    r#"
+CREATE TABLE live_breakdowns (
+    session_id TEXT PRIMARY KEY,
+    ts_ms INTEGER NOT NULL,
+    received_ms INTEGER NOT NULL,
+    json TEXT NOT NULL
+);
+CREATE INDEX live_breakdowns_by_ts ON live_breakdowns(ts_ms);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {

@@ -1,3 +1,4 @@
+mod breakdowns;
 mod events;
 mod limits;
 mod reconcile;
@@ -16,6 +17,7 @@ use rusqlite::{
 };
 
 use crate::transcript::location::Location;
+pub use breakdowns::StoredBreakdown;
 pub use events::{EventRow, StoredEvent};
 pub use limits::{LimitSample, RESETS_AT_TOLERANCE_MS, SpendPoint};
 pub use reconcile::Reconciliation;
@@ -1124,7 +1126,7 @@ mod tests {
                 })
                 .collect();
             for open in opens {
-                assert_eq!(open.join().unwrap().unwrap(), 11);
+                assert_eq!(open.join().unwrap().unwrap(), 12);
             }
         });
     }
@@ -1157,8 +1159,8 @@ mod tests {
     #[test]
     fn a_new_store_is_at_the_latest_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
-        assert_eq!(Store::latest_schema_version(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(Store::latest_schema_version(), 12);
         assert!(!store.reindex_pending().unwrap());
     }
 
@@ -1181,11 +1183,12 @@ mod tests {
             )
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
         assert_eq!(store.totals().unwrap().requests, 1);
         assert!(store.reindex_pending().unwrap());
         assert_eq!(store.dump("events"), Vec::<String>::new());
         assert_eq!(store.dump("limit_samples"), Vec::<String>::new());
+        assert_eq!(store.dump("live_breakdowns"), Vec::<String>::new());
     }
 
     #[test]

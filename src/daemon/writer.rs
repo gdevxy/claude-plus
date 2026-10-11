@@ -10,7 +10,7 @@ use tokio::sync::{oneshot, watch};
 
 use super::log::Log;
 use crate::api::epoch_ms;
-use crate::api::wire::MEASURE_KIND;
+use crate::api::wire::{MEASURE_KIND, USAGE_KIND};
 use crate::ingest::{IngestReport, Ingestor, Rebuilt, TranscriptFile};
 use crate::limits;
 use crate::pricing::PriceTable;
@@ -434,6 +434,10 @@ impl Worker {
 fn store_events(store: &mut Store, rows: &[EventRow]) -> Result<()> {
     let mut writer = store.writer()?;
     for row in rows {
+        if row.kind == USAGE_KIND {
+            writer.live_breakdown(row)?;
+            continue;
+        }
         if !writer.event(row)? || row.kind != MEASURE_KIND {
             continue;
         }
@@ -551,6 +555,29 @@ mod tests {
         fx.handle.store_events(rows).await.unwrap();
         let latest = fx.reader().latest_event("s1", "session.measure").unwrap();
         assert_eq!(latest.unwrap().json, r#"{"n":3}"#);
+    }
+
+    #[tokio::test]
+    async fn a_usage_event_keeps_only_the_latest_breakdown_of_its_session() {
+        let fx = Fixture::new();
+        let usage = |ts_ms: i64, total: u64| EventRow {
+            client_id: None,
+            session_id: "s1".into(),
+            kind: "session.usage".into(),
+            ts_ms,
+            received_ms: ts_ms,
+            json: format!(r#"{{"totalTokens":{total}}}"#),
+        };
+        fx.handle
+            .store_events(vec![usage(2, 200), usage(1, 100)])
+            .await
+            .unwrap();
+        let reader = fx.reader();
+        assert_eq!(
+            reader.live_breakdown("s1").unwrap().unwrap().json,
+            r#"{"totalTokens":200}"#
+        );
+        assert_eq!(reader.latest_event("s1", "session.usage").unwrap(), None);
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ use crate::transcript::TokenCounts;
 pub const API_VERSION: u32 = 1;
 pub const SNAPSHOT_VERSION: u32 = 1;
 pub const MEASURE_KIND: &str = "session.measure";
+pub const USAGE_KIND: &str = "session.usage";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Health {
