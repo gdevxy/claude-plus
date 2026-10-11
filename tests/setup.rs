@@ -716,7 +716,9 @@ fn a_data_db_without_the_claude_plus_stamp_is_refused_left_as_it_was_and_never_p
 fn a_data_dir_swapped_for_a_symlink_while_purge_asks_is_refused() {
     use std::io::{Read, Write};
     let env = env();
-    for plus in [&env.plus, &env.claude.parent().unwrap().join("victim")] {
+    let victim = env.claude.parent().unwrap().join("victim");
+    let _daemons = [&env.plus, &victim].map(|plus| DaemonAt(&env, plus.clone()));
+    for plus in [&env.plus, &victim] {
         cmd(&env, &["daemon", "--ensure"])
             .env("CLAUDE_PLUS_HOME", plus)
             .assert()
@@ -726,7 +728,6 @@ fn a_data_dir_swapped_for_a_symlink_while_purge_asks_is_refused() {
             .assert()
             .success();
     }
-    let victim = env.claude.parent().unwrap().join("victim");
     let before = names_in(&victim);
     let mut child = common::process(&env, &["uninstall", "--purge"])
         .stdin(std::process::Stdio::piped())
