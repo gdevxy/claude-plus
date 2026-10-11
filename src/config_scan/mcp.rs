@@ -4,10 +4,13 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::extensions::Plugin;
-use super::{Loading, Roots, Scope, Source, SourceKind, display, read_json};
+use super::{Loading, Roots, Scope, Source, SourceKind, display, read_json, read_text_up_to};
+
+pub const CLAUDE_JSON_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 pub fn servers(roots: &Roots, plugins: &[Plugin], sources: &mut Vec<Source>) {
-    let claude_json = read_json(&roots.claude_json);
+    let claude_json = read_text_up_to(&roots.claude_json, CLAUDE_JSON_MAX_BYTES)
+        .and_then(|text| serde_json::from_str::<Value>(&text.content?).ok());
     let project_entry = roots.project.as_ref().and_then(|project| {
         claude_json
             .as_ref()?
@@ -176,6 +179,19 @@ mod tests {
                 (Scope::Plugin, "docs-search", Loading::Unknown, Some("docs")),
             ]
         );
+    }
+
+    #[test]
+    fn a_claude_json_grown_past_the_file_cap_still_lists_its_servers() {
+        let home = Home::new();
+        let history = "x".repeat(super::super::MAX_FILE_BYTES as usize);
+        home.write(
+            "home/.claude.json",
+            &serde_json::json!({"mcpServers": {"context7": {}}, "history": history}).to_string(),
+        );
+        let found = scan(&home.roots(None));
+        let servers: Vec<&str> = found.sources.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(servers, vec!["context7"]);
     }
 
     #[test]
