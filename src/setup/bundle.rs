@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rustix::fs::{FlockOperation, flock};
 
 use crate::daemon::control::is_older;
@@ -12,6 +12,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MARKETPLACE: &str = "claude-plus";
 pub const PLUGIN_ID: &str = "plus@claude-plus";
 const MANIFEST: &str = "mod/.claude-plugin/plugin.json";
+const MARKETPLACE_MANIFEST: &str = ".claude-plugin/marketplace.json";
 
 pub fn write(dir: &Path) -> Result<()> {
     let _lock = lock(dir)?;
@@ -19,7 +20,6 @@ pub fn write(dir: &Path) -> Result<()> {
 }
 
 pub fn refresh(dir: &Path) -> Result<Option<String>> {
-    let outdated = |dir: &Path| version_in(dir).filter(|installed| is_older(installed, VERSION));
     if outdated(dir).is_none() {
         return Ok(None);
     }
@@ -29,6 +29,15 @@ pub fn refresh(dir: &Path) -> Result<Option<String>> {
     };
     replace(dir)?;
     Ok(Some(installed))
+}
+
+fn outdated(dir: &Path) -> Option<String> {
+    match version_in(dir) {
+        Some(installed) => is_older(&installed, VERSION).then_some(installed),
+        None => (!dir.exists())
+            .then(|| version_in(&sibling(dir, "old")))
+            .flatten(),
+    }
 }
 
 fn lock(dir: &Path) -> Result<File> {
@@ -47,14 +56,37 @@ fn lock(dir: &Path) -> Result<File> {
 }
 
 pub fn remove(dir: &Path) -> Result<()> {
-    remove_if_present(dir)?;
+    if !dir.exists() && !sibling(dir, "lock").exists() {
+        return Ok(());
+    }
+    let _lock = lock(dir)?;
+    check_ours(dir)?;
+    for path in [dir.to_path_buf(), sibling(dir, "new"), sibling(dir, "old")] {
+        remove_if_present(&path)?;
+    }
     match std::fs::remove_file(sibling(dir, "lock")) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
         _ => Ok(()),
     }
 }
 
+fn check_ours(dir: &Path) -> Result<()> {
+    let named_ours = || -> Option<bool> {
+        let text = std::fs::read_to_string(dir.join(MARKETPLACE_MANIFEST)).ok()?;
+        let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+        Some(manifest.get("name")?.as_str()? == MARKETPLACE)
+    };
+    if std::fs::symlink_metadata(dir).is_err() || named_ours() == Some(true) {
+        return Ok(());
+    }
+    bail!(
+        "{} holds something that is not the claude-plus marketplace; move it away, then try again",
+        dir.display()
+    )
+}
+
 fn replace(dir: &Path) -> Result<()> {
+    check_ours(dir)?;
     let staging = sibling(dir, "new");
     let previous = sibling(dir, "old");
     for leftover in [&staging, &previous] {
@@ -65,13 +97,26 @@ fn replace(dir: &Path) -> Result<()> {
         create_private_dirs(path.parent().expect("a bundled file has a parent"))?;
         write_private(&path, bytes)?;
     }
-    if dir.exists() {
-        std::fs::rename(dir, &previous)
-            .with_context(|| format!("cannot move {} aside", dir.display()))?;
+    match swap(&staging, dir) {
+        Ok(()) => remove_if_present(&staging),
+        Err(error) if error == rustix::io::Errno::NOENT => std::fs::rename(&staging, dir)
+            .with_context(|| format!("cannot put the mod in {}", dir.display())),
+        Err(error) if error == rustix::io::Errno::INVAL || error == rustix::io::Errno::NOTSUP => {
+            std::fs::rename(dir, &previous)
+                .with_context(|| format!("cannot move {} aside", dir.display()))?;
+            std::fs::rename(&staging, dir)
+                .with_context(|| format!("cannot put the mod in {}", dir.display()))?;
+            remove_if_present(&previous)
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("cannot put the mod in {}", dir.display()))
+        }
     }
-    std::fs::rename(&staging, dir)
-        .with_context(|| format!("cannot put the mod in {}", dir.display()))?;
-    remove_if_present(&previous)
+}
+
+fn swap(staging: &Path, dir: &Path) -> rustix::io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    renameat_with(CWD, staging, CWD, dir, RenameFlags::EXCHANGE)
 }
 
 pub fn version_in(dir: &Path) -> Option<String> {
@@ -180,7 +225,7 @@ mod tests {
     fn writing_the_bundle_replaces_the_folder_and_keeps_it_private() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("marketplace");
-        std::fs::create_dir_all(dir.join("mod/hooks")).unwrap();
+        write(&dir).unwrap();
         std::fs::write(dir.join("mod/hooks/stale.ts"), "old").unwrap();
         std::fs::create_dir_all(temp.path().join("marketplace.new")).unwrap();
         write(&dir).unwrap();
@@ -245,6 +290,62 @@ mod tests {
         );
         assert_eq!(version_in(&dir).as_deref(), Some(VERSION));
         assert!(dir.join("mod/hooks/register.tsx").is_file());
+    }
+
+    #[test]
+    fn a_reader_never_finds_the_folder_missing_while_it_is_rewritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("marketplace");
+        write(&dir).unwrap();
+        let probed = dir.join(".claude-plugin/marketplace.json");
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let (probes, misses) = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let (mut probes, mut misses) = (0u64, 0u64);
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    probes += 1;
+                    if !probed.is_file() {
+                        misses += 1;
+                    }
+                }
+                (probes, misses)
+            });
+            for _ in 0..40 {
+                write(&dir).unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            reader.join().unwrap()
+        });
+        assert!(probes > 0);
+        assert_eq!(misses, 0, "missing in {misses} of {probes} probes");
+        assert_eq!(version_in(&dir).as_deref(), Some(VERSION));
+    }
+
+    #[test]
+    fn a_folder_lost_between_two_renames_is_rebuilt() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("marketplace");
+        write(&dir).unwrap();
+        with_version(&dir, "0.0.1");
+        std::fs::rename(&dir, temp.path().join("marketplace.old")).unwrap();
+        assert_eq!(refresh(&dir).unwrap().as_deref(), Some("0.0.1"));
+        assert_eq!(version_in(&dir).as_deref(), Some(VERSION));
+        assert!(!temp.path().join("marketplace.old").exists());
+    }
+
+    #[test]
+    fn a_folder_of_that_name_that_is_not_ours_is_never_replaced_or_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("marketplace");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("precious"), "keep").unwrap();
+        let refused = format!(
+            "{} holds something that is not the claude-plus marketplace; move it away, then try again",
+            dir.display()
+        );
+        assert_eq!(write(&dir).unwrap_err().to_string(), refused);
+        assert_eq!(remove(&dir).unwrap_err().to_string(), refused);
+        assert!(dir.join("precious").is_file());
     }
 
     #[test]
