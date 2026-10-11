@@ -137,6 +137,22 @@ pub fn outcome(step: &Step, stdout: &str) -> Result<Outcome> {
     }
 }
 
+fn failure_message(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let last = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    serde_json::from_str::<Reply>(last)
+        .map(|reply| reply.message)
+        .unwrap_or_else(|_| last.trim().to_string())
+}
+
 pub fn version_of(text: &str) -> Option<&str> {
     let version = text.split_whitespace().next()?;
     version
@@ -192,10 +208,7 @@ impl ClaudeCode {
         let output = self.output(args)?;
         let command = format!("{PROGRAM} {}", args[..args.len() - 1].join(" "));
         if !output.status.success() {
-            bail!(
-                "{command} failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+            bail!("{command} failed: {}", failure_message(&output));
         }
         serde_json::from_slice(&output.stdout)
             .with_context(|| format!("{command} answered something other than a list"))

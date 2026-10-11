@@ -477,3 +477,23 @@ fn an_older_binary_keeps_a_newer_installed_mod() {
             .contains("\"version\": \"999.0.0\"")
     );
 }
+
+#[test]
+fn uninstall_carries_on_when_claude_code_cannot_list_what_it_installed() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    std::fs::write(
+        env.claude_state().join("fail"),
+        "plugin marketplace list --json",
+    )
+    .unwrap();
+    cmd(&env, &["uninstall", "--yes"])
+        .assert()
+        .success()
+        .stderr("claude-plus: claude plugin marketplace list failed: the fake was told to fail\n")
+        .stdout(predicate::str::starts_with(
+            "Claude Code could not say what it has installed, so the plus mod may still be installed: run claude plugin uninstall plus@claude-plus and claude plugin marketplace remove claude-plus\n✻ Stopped the claude-plus daemon · pid ",
+        ));
+    assert!(!marketplace(&env).exists());
+}

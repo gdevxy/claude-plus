@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use super::daemon::{ensured, stopped};
 use crate::daemon::control::{self, is_older};
 use crate::paths::{MARKER, Paths};
-use crate::setup::bundle::{self, PLUGIN_ID};
+use crate::setup::bundle::{self, MARKETPLACE, PLUGIN_ID};
 use crate::setup::claude::{self, ClaudeCode, Outcome, Step};
 use crate::setup::{Found, install_steps, uninstall_steps};
 
@@ -73,9 +73,13 @@ pub fn uninstall(paths: &Paths, purge: bool, yes: bool) -> Result<()> {
         bail!(refusal);
     }
     let claude = ClaudeCode::default();
-    let found = match claude.version()? {
-        Some(_) => Some(found(&claude)?),
-        None => None,
+    let present = claude.version()?.is_some();
+    let found = if present {
+        found(&claude)
+            .inspect_err(|error| eprintln!("claude-plus: {error:#}"))
+            .ok()
+    } else {
+        None
     };
     let steps = found.as_ref().map(uninstall_steps).unwrap_or_default();
     let deleted = if purge {
@@ -91,9 +95,13 @@ pub fn uninstall(paths: &Paths, purge: bool, yes: bool) -> Result<()> {
         let outcome = claude.run(step)?;
         say!("{}", uninstalled(step, &outcome));
     }
-    if found.is_none() {
+    if !present {
         say!(
             "Claude Code was not found on PATH, so the plus mod may still be installed: run claude plugin uninstall {PLUGIN_ID} where it is"
+        );
+    } else if found.is_none() {
+        say!(
+            "Claude Code could not say what it has installed, so the plus mod may still be installed: run claude plugin uninstall {PLUGIN_ID} and claude plugin marketplace remove {MARKETPLACE}"
         );
     }
     say!("{}", stopped(control::stop(paths)?));
