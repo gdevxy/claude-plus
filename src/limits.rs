@@ -58,6 +58,14 @@ pub struct LimitWindow {
     pub calibration: Calibration,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetView {
+    pub amount_usd: f64,
+    pub local_usd: f64,
+    pub period_start_ms: i64,
+    pub resets_at_ms: i64,
+}
+
 pub fn samples_from_measure(session_id: &str, ts_ms: i64, data: &Value) -> Vec<LimitSample> {
     let model = data.get("model").and_then(Value::as_str).map(String::from);
     data.get("rateLimits")
@@ -343,6 +351,29 @@ pub fn windows(
         )
     });
     windows
+}
+
+pub fn budget_window(budget: &BudgetView, model: Option<&str>, now_ms: i64) -> LimitWindow {
+    let used_pct = budget.local_usd / budget.amount_usd * 100.0;
+    LimitWindow {
+        window: BUDGET.into(),
+        used_pct,
+        resets_at_ms: Some(budget.resets_at_ms),
+        sampled_at_ms: now_ms,
+        reset_since_sample: false,
+        pace: monthly_pace(
+            used_pct,
+            budget.period_start_ms,
+            budget.resets_at_ms,
+            now_ms,
+        ),
+        calibration: Calibration {
+            family: model.map_or("other", family).to_string(),
+            pairs: 0,
+            needed: PAIRS_NEEDED,
+            pct_per_usd: None,
+        },
+    }
 }
 
 pub fn refresh_fit(store: &mut Store, now_ms: i64) -> Result<Vec<Fit>> {
@@ -774,6 +805,41 @@ mod tests {
         assert_eq!(pace.full_at_ms, None);
         let hot = monthly_pace(50.0, oct_1, nov_1, oct_11).unwrap();
         assert!(hot.full_at_ms.unwrap() < nov_1);
+    }
+
+    #[test]
+    fn a_budget_window_shows_an_overrun_above_a_hundred_and_paces_over_its_month() {
+        let at = |text: &str| {
+            DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let oct_11 = at("2026-10-11T12:00:00Z");
+        let budget = BudgetView {
+            amount_usd: 200.0,
+            local_usd: 250.0,
+            period_start_ms: at("2026-10-01T00:00:00Z"),
+            resets_at_ms: at("2026-11-01T00:00:00Z"),
+        };
+        let window = budget_window(&budget, Some("claude-opus-5-5"), oct_11);
+        assert_eq!(window.window, BUDGET);
+        assert_eq!(window.used_pct, 125.0);
+        assert_eq!(window.resets_at_ms, Some(budget.resets_at_ms));
+        assert_eq!(window.sampled_at_ms, oct_11);
+        assert!(!window.reset_since_sample);
+        assert_eq!(
+            window.pace,
+            monthly_pace(125.0, budget.period_start_ms, budget.resets_at_ms, oct_11)
+        );
+        assert_eq!(
+            window.calibration,
+            Calibration {
+                family: "opus".into(),
+                pairs: 0,
+                needed: PAIRS_NEEDED,
+                pct_per_usd: None,
+            }
+        );
     }
 
     #[test]

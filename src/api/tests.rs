@@ -96,6 +96,53 @@ impl Server {
         Client::new(&self.socket)
     }
 
+    fn login(&self, claude_json: &str) {
+        std::fs::write(&self.state.claude_json, claude_json).unwrap();
+    }
+
+    fn send(&self, session: &str, kind: &str, ts_ms: i64, data: serde_json::Value) {
+        let accepted = self
+            .client()
+            .send_events(&json!({"events": [
+                {"session": session, "kind": kind, "ts_ms": ts_ms, "data": data}
+            ]}))
+            .unwrap();
+        assert_eq!(accepted.accepted, 1);
+    }
+
+    fn start_session(&self, session: &str, ts_ms: i64) {
+        self.start_session_with(
+            session,
+            ts_ms,
+            json!({"provider": "anthropic", "base_url": null, "api_key": false}),
+        );
+    }
+
+    fn start_session_with(&self, session: &str, ts_ms: i64, auth: serde_json::Value) {
+        self.send(
+            session,
+            "session.start",
+            ts_ms,
+            json!({"cwd": "/w", "auth": auth}),
+        );
+    }
+
+    fn measure(&self, session: &str, ts_ms: i64, rate_limits: serde_json::Value) {
+        self.send(
+            session,
+            "session.measure",
+            ts_ms,
+            json!({"rateLimits": rate_limits}),
+        );
+    }
+
+    fn set_budget(&self, account_id: &str, amount_usd: f64) {
+        let mut store = Store::open(&self.temp.path().join("data.db")).unwrap();
+        let mut writer = store.writer().unwrap();
+        writer.set_budget(account_id, amount_usd, 0).unwrap();
+        writer.commit().unwrap();
+    }
+
     fn raw(&self, method: Method, path: &str, body: &str) -> (u16, serde_json::Value) {
         let (status, bytes) = self
             .client()
@@ -411,6 +458,104 @@ fn only_this_session_s_own_limits_say_it_runs_on_a_subscription() {
             crate::cache_model::TtlSource::Assumed
         )
     );
+}
+
+#[test]
+fn a_snapshot_shows_only_its_own_account_s_windows() {
+    let server = Server::start();
+    let now_ms = epoch_ms(SystemTime::now());
+    server.login(r#"{"oauthAccount":{"accountUuid":"me","organizationName":"Me","organizationType":"claude_max"}}"#);
+    server.start_session(SESSION, now_ms - 9000);
+    server.measure(
+        SESSION,
+        now_ms - 8000,
+        json!([{"kind": "seven_day", "percentUsed": 40, "resetsAt": "2099-01-01T00:00:00Z"}]),
+    );
+    server.login(r#"{"oauthAccount":{"accountUuid":"work","organizationName":"Acme","organizationType":"claude_enterprise"}}"#);
+    let other = "22222222-2222-2222-2222-222222222222";
+    server.start_session(other, now_ms - 2000);
+    server.measure(
+        other,
+        now_ms - 1000,
+        json!([{"kind": "spend_limit", "percentUsed": 4, "resetsAt": "2099-01-01T00:00:00Z"}]),
+    );
+    let live = server.client().snapshot(other).unwrap().live;
+    assert_eq!(
+        live.limits
+            .iter()
+            .map(|w| w.window.as_str())
+            .collect::<Vec<_>>(),
+        vec!["spend_limit"]
+    );
+    let account = live.account.unwrap();
+    assert_eq!(
+        (account.id.as_str(), account.label.as_str()),
+        ("oauth:work", "Acme · Enterprise")
+    );
+}
+
+#[test]
+fn a_budget_without_a_reported_limit_is_its_own_window() {
+    let server = Server::start();
+    let now_ms = epoch_ms(SystemTime::now());
+    server.start_session_with(
+        SESSION,
+        now_ms - 2000,
+        json!({"provider": "anthropic", "base_url": "https://llm.corp", "api_key": true}),
+    );
+    server.set_budget("gateway:https://llm.corp:443", 700.0);
+    let live = server.client().snapshot(SESSION).unwrap().live;
+    let budget = live.budget.unwrap();
+    assert_eq!(budget.amount_usd, 700.0);
+    assert_eq!(
+        budget.resets_at_ms,
+        crate::limits::next_month_start_utc(now_ms)
+    );
+    assert_eq!(
+        live.limits
+            .iter()
+            .map(|w| w.window.as_str())
+            .collect::<Vec<_>>(),
+        vec!["budget"]
+    );
+}
+
+#[test]
+fn a_budget_of_nothing_is_not_shown() {
+    let server = Server::start();
+    let now_ms = epoch_ms(SystemTime::now());
+    server.start_session_with(
+        SESSION,
+        now_ms - 2000,
+        json!({"provider": "anthropic", "base_url": "https://llm.corp", "api_key": true}),
+    );
+    server.set_budget("gateway:https://llm.corp:443", 0.0);
+    let live = server.client().snapshot(SESSION).unwrap().live;
+    assert_eq!((live.budget, live.limits), (None, vec![]));
+}
+
+#[test]
+fn a_reported_spend_limit_wins_over_the_budget_window() {
+    let server = Server::start();
+    let now_ms = epoch_ms(SystemTime::now());
+    server.login(r#"{"oauthAccount":{"accountUuid":"work","organizationName":"Acme","organizationType":"claude_enterprise"}}"#);
+    server.start_session(SESSION, now_ms - 2000);
+    server.measure(
+        SESSION,
+        now_ms - 1000,
+        json!([{"kind": "spend_limit", "percentUsed": 4, "resetsAt": "2099-01-01T00:00:00Z"}]),
+    );
+    server.set_budget("oauth:work", 700.0);
+    let live = server.client().snapshot(SESSION).unwrap().live;
+    assert_eq!(
+        live.limits
+            .iter()
+            .map(|w| w.window.as_str())
+            .collect::<Vec<_>>(),
+        vec!["spend_limit"]
+    );
+    assert_eq!(live.limits[0].used_pct, 4.0);
+    assert_eq!(live.budget.unwrap().amount_usd, 700.0);
 }
 
 #[test]

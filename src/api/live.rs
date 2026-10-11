@@ -2,8 +2,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::accounts::AccountRef;
 use crate::cache_model::{self, Cache, Causes};
 use crate::forecast::{self, Forecast};
+pub use crate::limits::BudgetView;
 use crate::limits::{self, LimitWindow};
 use crate::pricing::PriceTable;
 use crate::store::{Store, StoredEvent};
@@ -18,6 +20,10 @@ pub struct Live {
     pub cache: Cache,
     pub forecast: Option<Forecast>,
     pub limits: Vec<LimitWindow>,
+    #[serde(default)]
+    pub account: Option<AccountRef>,
+    #[serde(default)]
+    pub budget: Option<BudgetView>,
 }
 
 impl Live {
@@ -46,14 +52,43 @@ impl Live {
             .flatten()
             .filter_map(|limit| limit.get("kind")?.as_str())
             .collect();
-        let limits = limits::windows(
+        let account_id = store.session_account(session)?;
+        let account = match account_id.as_deref() {
+            Some(id) => store.account(id)?.map(AccountRef::from),
+            None => None,
+        };
+        let mut limits = limits::windows(
             &limits::recent_samples(store, now_ms)?,
             &limits::stored_fit(store)?,
             model.as_deref(),
             now_ms,
             &reported,
-            store.session_account(session)?.as_deref(),
+            account_id.as_deref(),
         );
+        let budget = match account_id.as_deref() {
+            Some(id) => store
+                .budget(id)?
+                .filter(|budget| budget.amount_usd.is_finite() && budget.amount_usd > 0.0)
+                .map(|budget| {
+                    let period_start_ms = limits::month_start_utc(now_ms);
+                    Ok::<_, anyhow::Error>(BudgetView {
+                        amount_usd: budget.amount_usd,
+                        local_usd: store
+                            .account_spend_since(id, period_start_ms.div_euclid(1000))?,
+                        period_start_ms,
+                        resets_at_ms: limits::next_month_start_utc(now_ms),
+                    })
+                })
+                .transpose()?,
+            None => None,
+        };
+        if let Some(budget) = &budget
+            && !limits
+                .iter()
+                .any(|window| window.window == limits::SPEND_LIMIT)
+        {
+            limits.push(limits::budget_window(budget, model.as_deref(), now_ms));
+        }
         let causes = Causes::read(store, session, i64::MIN, i64::MAX)?;
         let cache = cache_model::model(
             &timeline,
@@ -69,6 +104,8 @@ impl Live {
             forecast: forecast::next_turn(&timeline.main(), prices, cache.ttl, pct_per_usd_5h),
             cache,
             limits,
+            account,
+            budget,
         })
     }
 }

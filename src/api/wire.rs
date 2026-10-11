@@ -178,9 +178,11 @@ impl From<ModelTotal> for ModelCost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::AccountRef;
     use crate::cache_model::{Cache, CacheState, Rebuild, RebuildCause, Ttl, TtlSource};
     use crate::forecast::{Forecast, ModelCost};
-    use crate::limits::{Calibration, LimitWindow, Pace};
+    use crate::limits::{BudgetView, Calibration, LimitWindow, Pace};
+    use crate::store::AccountKind;
 
     const SNAPSHOT_V1: &str = r#"{
   "v": 1,
@@ -286,7 +288,18 @@ mod tests {
           "pct_per_usd": 0.5
         }
       }
-    ]
+    ],
+    "account": {
+      "id": "oauth:u-1",
+      "label": "Acme · Enterprise",
+      "kind": "oauth"
+    },
+    "budget": {
+      "amount_usd": 700.0,
+      "local_usd": 120.5,
+      "period_start_ms": 1790812800000,
+      "resets_at_ms": 1793491200000
+    }
   }
 }"#;
 
@@ -352,6 +365,17 @@ mod tests {
                     pct_per_usd: Some(0.5),
                 },
             }],
+            account: Some(AccountRef {
+                id: "oauth:u-1".into(),
+                label: "Acme · Enterprise".into(),
+                kind: AccountKind::Oauth,
+            }),
+            budget: Some(BudgetView {
+                amount_usd: 700.0,
+                local_usd: 120.5,
+                period_start_ms: 1_790_812_800_000,
+                resets_at_ms: 1_793_491_200_000,
+            }),
         }
     }
 
@@ -373,6 +397,8 @@ mod tests {
             },
             forecast: None,
             limits: vec![],
+            account: None,
+            budget: None,
         }
     }
 
@@ -430,6 +456,24 @@ mod tests {
         );
         let parsed: Snapshot = serde_json::from_str(SNAPSHOT_V1).unwrap();
         assert_eq!(parsed, snapshot);
+    }
+
+    #[test]
+    fn a_snapshot_without_an_account_or_budget_shows_them_as_null() {
+        let snapshot = Snapshot::of("s9", SessionTotals::default(), None, quiet(), 7).unwrap();
+        let shown = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(shown["live"]["account"], serde_json::Value::Null);
+        assert_eq!(shown["live"]["budget"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_snapshot_from_a_daemon_before_accounts_reads_with_neither() {
+        let mut older: serde_json::Value = serde_json::from_str(SNAPSHOT_V1).unwrap();
+        let live = older["live"].as_object_mut().unwrap();
+        live.remove("account").unwrap();
+        live.remove("budget").unwrap();
+        let parsed: Snapshot = serde_json::from_value(older).unwrap();
+        assert_eq!((parsed.live.account, parsed.live.budget), (None, None));
     }
 
     #[test]
