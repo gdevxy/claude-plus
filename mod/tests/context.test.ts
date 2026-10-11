@@ -255,6 +255,14 @@ describe('context screen', () => {
     expect(text(line(contextScreen(input()), 'ctx-categories'))).toBe('By category'.padEnd(36))
   })
 
+  test('a stored category Claude Code renamed opens its items by their tokens', () => {
+    const report = contextReport()
+    const categories = report.live!.categories.map(category => (category.name === 'Memory files' ? { ...category, name: 'Memory', tokens: 1_600 } : category))
+    const lines = contextScreen(input({ report: { ...report, live: { ...report.live!, categories } } }))
+    expect(line(lines, 'ctx-cat-4').toggle).toBe('open-memory_file')
+    expect(line(lines, 'ctx-cat-6').toggle).toBeUndefined()
+  })
+
   test('colors categories with Claude Code theme keys and falls back to text', () => {
     expect(themeColor('permission')).toBe('permission')
     expect(themeColor('purple_FOR_SUBAGENTS_ONLY')).toBe('text')

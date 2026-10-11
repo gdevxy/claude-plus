@@ -113,7 +113,7 @@ export type Local = {
 
 export type CategoryKind = 'used' | 'free' | 'buffer' | 'deferred'
 
-export type BreakdownCategory = { name: string; tokens: number; color: string; kind: CategoryKind }
+export type BreakdownCategory = { name: string; tokens: number; color: string; kind: CategoryKind; item_kind?: ItemKind }
 
 export type LiveContext = {
   ts_ms: number

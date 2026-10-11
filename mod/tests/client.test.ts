@@ -188,11 +188,27 @@ describe('daemon client', () => {
   })
 
   test('a full usage becomes the live breakdown the pane draws', () => {
-    expect(breakdownOf(usage(), NOW_MS)).toEqual({ ...contextReport().live!, ts_ms: NOW_MS })
+    const live = contextReport().live!
+    const kinds: Record<string, string> = { 'MCP tools': 'mcp_server', 'Memory files': 'memory_file', Skills: 'skill' }
+    const categories = live.categories.map(category => (kinds[category.name] === undefined ? category : { ...category, item_kind: kinds[category.name] }))
+    expect(breakdownOf(usage(), NOW_MS)).toEqual({ ...live, ts_ms: NOW_MS, categories })
     const bare = usage()
     delete bare.context.breakdown
     expect(breakdownOf(bare, NOW_MS)).toBeNull()
     expect(usageData(bare)).toBeNull()
+  })
+
+  test('a category Claude Code renamed still finds its items by its tokens', () => {
+    const renamed = usage()
+    const breakdown = renamed.context.breakdown!
+    breakdown.categories = [
+      { name: 'Memory', tokens: 1_600, color: 'claude', isDeferred: false, kind: 'used' },
+      { name: 'Model Context Protocol', tokens: 4_100, color: 'permission', isDeferred: false, kind: 'used' },
+      { name: 'Agents', tokens: 120, color: 'warning', isDeferred: false, kind: 'used' },
+      { name: 'Conversation', tokens: 20_000, color: 'text', isDeferred: false, kind: 'used' },
+    ]
+    const kinds = breakdownOf(renamed, NOW_MS)!.categories.map(category => category.item_kind)
+    expect(kinds).toEqual(['memory_file', 'mcp_server', 'agent', undefined])
   })
 
   test('the forwarded usage keeps what the daemon reads and drops the grid', () => {

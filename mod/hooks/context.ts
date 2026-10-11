@@ -1,6 +1,6 @@
 import type { ThemeKey } from 'claude-code'
 
-import type { ConfigGroup, ContextItem, ContextReport, Daemon, History, ItemKind, LiveContext, Local, Part, SourceKind } from '../types'
+import type { BreakdownCategory, ConfigGroup, ContextItem, ContextReport, Daemon, History, ItemKind, LiveContext, Local, Part, SourceKind } from '../types'
 import { bar, duration, fit, modelName, percent, tokens } from './format'
 import type { Line } from './state'
 import { CONTEXT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, gap, heading, meter, notice, pair, plain, prose } from './state'
@@ -18,6 +18,34 @@ const CATEGORY_KINDS: Readonly<Record<string, ItemKind>> = {
   Skills: 'skill',
   'MCP tools': 'mcp_server',
   'Custom agents': 'agent',
+}
+
+const DRILL_KINDS: readonly ItemKind[] = ['memory_file', 'mcp_server', 'skill', 'agent']
+
+export type KindTokens = Partial<Record<ItemKind, number>>
+
+export function itemKinds(categories: readonly BreakdownCategory[], sums: KindTokens): (ItemKind | undefined)[] {
+  const claimed = new Set<ItemKind>()
+  const byTokens = categories.map(category => {
+    if (category.kind !== 'used') return undefined
+    const kind = DRILL_KINDS.find(candidate => !claimed.has(candidate) && (sums[candidate] ?? 0) > 0 && sums[candidate] === category.tokens)
+    if (kind !== undefined) claimed.add(kind)
+    return kind
+  })
+  return byTokens.map((kind, index) => {
+    const category = categories[index]!
+    if (kind !== undefined || category.kind !== 'used') return kind
+    const named = CATEGORY_KINDS[category.name]
+    if (named === undefined || claimed.has(named)) return undefined
+    claimed.add(named)
+    return named
+  })
+}
+
+function exactSums(items: readonly ContextItem[]): KindTokens {
+  const sums: KindTokens = {}
+  for (const item of items) if (!item.estimated) sums[item.kind] = (sums[item.kind] ?? 0) + item.tokens
+  return sums
 }
 
 const PART_KINDS: Readonly<Partial<Record<Part, ItemKind>>> = { memory: 'memory_file', skills: 'skill', mcp: 'mcp_server', agents: 'agent' }
@@ -145,12 +173,15 @@ function amountLine(title: string, used: number | null, window: number, width: n
 }
 
 function categories(input: ContextInput, composition: LiveContext, width: number): Line[] {
+  const items = reportOf(input)?.items ?? []
+  const local = composition.categories.some(category => category.item_kind !== undefined)
+  const kinds = local ? composition.categories.map(category => category.item_kind) : itemKinds(composition.categories, exactSums(items))
   const rows: Row[] = composition.categories.flatMap((category, index) =>
     category.kind === 'used'
-      ? [{ key: `ctx-cat-${index}`, name: category.name, tokens: category.tokens, color: themeColor(category.color), kind: CATEGORY_KINDS[category.name] }]
+      ? [{ key: `ctx-cat-${index}`, name: category.name, tokens: category.tokens, color: themeColor(category.color), kind: kinds[index] }]
       : [],
   )
-  const drill = { items: reportOf(input)?.items ?? [], expanded: input.expanded }
+  const drill = { items, expanded: input.expanded }
   const age = Math.max(0, input.nowMs - composition.ts_ms)
   const aged = `By category · ${duration(age)} ago`
   const title = age > STALE_BREAKDOWN_MS && aged.length <= width - WHY_COLUMNS ? aged : 'By category'

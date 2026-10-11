@@ -1,6 +1,7 @@
 import type { HttpInit, HttpResponse, JsonValue, SessionMeasureInput, SessionUsage } from 'claude-code'
 
-import type { ContextReport, LiveContext, Measure, Snapshot } from '../types'
+import type { BreakdownCategory, ContextReport, LiveContext, Measure, Snapshot } from '../types'
+import { itemKinds } from './context'
 
 export const TIMEOUT_MS = 500
 export const OUTBOX_LIMIT = 256
@@ -116,6 +117,19 @@ export function parseContext(text: string): ContextReport | null {
 export function breakdownOf(usage: SessionUsage, atMs: number): LiveContext | null {
   const breakdown = usage.context.breakdown
   if (breakdown === undefined) return null
+  const categories: BreakdownCategory[] = breakdown.categories.map(category => ({
+    name: category.name,
+    tokens: category.tokens,
+    color: category.color,
+    kind: category.isDeferred ? 'deferred' : category.kind,
+  }))
+  const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0)
+  const kinds = itemKinds(categories, {
+    memory_file: sum(breakdown.memoryFiles.map(file => file.tokens)),
+    mcp_server: sum(breakdown.mcpTools.filter(tool => tool.isLoaded).map(tool => tool.tokens)),
+    skill: breakdown.skills?.tokens ?? 0,
+    agent: sum(breakdown.agents.map(agent => agent.tokens)),
+  })
   return {
     ts_ms: atMs,
     model: breakdown.model,
@@ -123,12 +137,10 @@ export function breakdownOf(usage: SessionUsage, atMs: number): LiveContext | nu
     max_tokens: Math.max(breakdown.rawMaxTokens, breakdown.maxTokens),
     percentage: breakdown.percentage,
     auto_compact_threshold: breakdown.autoCompactThreshold ?? null,
-    categories: breakdown.categories.map(category => ({
-      name: category.name,
-      tokens: category.tokens,
-      color: category.color,
-      kind: category.isDeferred ? 'deferred' : category.kind,
-    })),
+    categories: categories.map((category, index) => {
+      const kind = kinds[index]
+      return kind === undefined ? category : { ...category, item_kind: kind }
+    }),
   }
 }
 
