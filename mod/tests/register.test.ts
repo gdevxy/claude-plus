@@ -29,6 +29,7 @@ type Wiring = {
   closed: string[]
   statuses: (string | undefined)[]
   placed: boolean
+  duringUsage: (() => void) | null
 }
 
 const MEASURE = {
@@ -129,7 +130,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), usages: [], serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), usages: [], serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, duringUsage: null, ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -137,6 +138,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
   on('session.turns', () => ({ value: 14 }))
   on('session.usage', ($, e) => {
     wiring.usages.push(e)
+    wiring.duringUsage?.()
     return { value: usage() }
   })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -228,7 +230,7 @@ function glyph(cache: FoundElement | undefined): string {
   return JSON.stringify(row?.children[1])
 }
 
-type Posted = { id?: string; kind: string }
+type Posted = { id?: string; kind: string; session?: string }
 
 function posted(calls: { url: string; init?: HttpInit }[]): Posted[] {
   return calls
@@ -867,6 +869,22 @@ describe('plus mod', () => {
     wiring.placed = true
     await clock.advance(1000)
     expect(wiring.usages.length).toBe(1)
+  })
+
+  test('a breakdown that finishes after /clear is dropped instead of filed under the new session', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { report: contextReport({ live: null }) })
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-context' })
+    wiring.duringUsage = () => {
+      wiring.session = 's2'
+    }
+    await clock.advance(1000)
+    await clock.advance(3000)
+    expect(wiring.usages.length).toBe(1)
+    expect(posted(wiring.delivered).filter(event => event.kind === 'session.usage')).toEqual([])
+    expect(await ui.find({ key: 'ctx-cat-6' })).toBeUndefined()
   })
 
   test('the Context view keeps the breakdown from Claude Code while the daemon is down', async ($, on) => {

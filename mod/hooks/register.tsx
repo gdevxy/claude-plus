@@ -254,9 +254,9 @@ async function collectUsage($: EngineInterface): Promise<void> {
   runtime.usageDue = false
   try {
     runtime.usageAtMs = await $.clock.now()
-    const usage = await $.session.usage({ breakdown: 'full', columns: USAGE_COLUMNS }).catch(() => null)
-    if (usage === null) return
     const id = await follow($)
+    const usage = await $.session.usage({ breakdown: 'full', columns: USAGE_COLUMNS }).catch(() => null)
+    if (usage === null || (await follow($)) !== id) return
     const at = await $.clock.now()
     const breakdown = breakdownOf(usage, at)
     const data = usageData(usage)
