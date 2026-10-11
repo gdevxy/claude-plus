@@ -1,4 +1,4 @@
-export type PlusView = 'live' | 'context'
+export type PlusView = 'live' | 'context' | 'history'
 
 export type Tokens = {
   input: number
@@ -178,6 +178,66 @@ export type ContextReport = {
   config: { scanned_at_ms: number; groups: ConfigGroup[] }
 }
 
+export type HistoryRange = '24h' | '7d' | '30d' | '90d'
+
+export type Metric = 'cost' | 'tokens' | 'pct'
+
+export type Spend = {
+  requests: number
+  unpriced: number
+  cost_usd: number
+  reconciled_usd: number
+  tokens: number
+  pct_5h: number | null
+}
+
+export type ModelSpend = Spend & { model: string }
+
+export type Bucket = Spend & {
+  start_ms: number
+  label: string
+  models: ModelSpend[]
+  prompt_tokens: number
+  cache_read_tokens: number
+  rebuilds: number
+  rebuild_usd: number
+  compactions: number
+  peak_5h_pct: number | null
+}
+
+export type HistoryTotals = Spend & {
+  sessions: number
+  hit_ratio: number | null
+  saved_usd: number
+  rebuilds: number
+  rebuild_usd: number
+  idle_rebuilds: number
+  compactions: number
+  peak_5h_pct: number | null
+}
+
+export type ProjectSpend = Spend & { name: string; path: string | null; sessions: number }
+
+export type SessionSpend = Spend & { id: string; title: string | null; project: string; last_ms: number }
+
+export type HistoryReport = {
+  range: HistoryRange
+  bucket: 'hour' | 'day'
+  generated_at_ms: number
+  since_ms: number
+  until_ms: number
+  calibration: { calibrated: boolean; pairs: number; needed: number }
+  totals: HistoryTotals
+  buckets: Bucket[]
+  models: ModelSpend[]
+  projects: ProjectSpend[]
+  sessions: SessionSpend[]
+}
+
+export type Reports = Partial<Record<HistoryRange, HistoryReport>>
+
+export type Chart = { range: HistoryRange; metric: Metric }
+
 export type DaemonStatus = 'starting' | 'ok' | 'rebuilding' | 'unreachable' | 'outdated' | 'behind' | 'newer' | 'missing' | 'failed'
 
 export type Daemon = { status: DaemonStatus; detail: string | null }
@@ -192,6 +252,9 @@ declare module 'claude-code' {
       view: PlusView
       snapshot: Shaped<Snapshot | null>
       context: Shaped<ContextReport | null>
+      history: Shaped<Reports>
+      chart: Chart
+      theme: string
       local: Shaped<Local>
       pane: PaneState
       daemon: Daemon

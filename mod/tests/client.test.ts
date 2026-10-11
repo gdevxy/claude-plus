@@ -10,9 +10,12 @@ import {
   eventId,
   eventsBody,
   fetchContext,
+  fetchHistory,
+  historyPath,
   fetchSnapshot,
   measureOf,
   parseContext,
+  parseHistory,
   parseSnapshot,
   request,
   send,
@@ -20,7 +23,7 @@ import {
   socketPath,
   usageData,
 } from '../hooks/client'
-import { NOW_MS, contextReport, snapshot, usage } from './fixtures'
+import { NOW_MS, contextReport, historyReport, snapshot, usage } from './fixtures'
 
 function answering(response: Promise<HttpResponse>, seen: [string, HttpInit][] = []): Io {
   return {
@@ -185,6 +188,32 @@ describe('daemon client', () => {
     expect(parseContext(JSON.stringify({ ...good, config: { groups: null } }))).toBeNull()
     expect(parseContext(JSON.stringify({ ...good, live: { categories: 'x' } }))).toBeNull()
     expect(parseContext('nope')).toBeNull()
+  })
+
+  test('a history report is fetched for its range and a rebuilding daemon is told apart', async () => {
+    const seen: [string, HttpInit][] = []
+    const good = JSON.stringify({ v: 1, ...historyReport() })
+    const serving = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: good }), seen)
+    expect(await fetchHistory(serving, '/s.sock', '30d')).toEqual({ kind: 'history', report: { v: 1, ...historyReport() } })
+    expect(seen[0]).toEqual(['http://claude-plus/history?range=30d', { socketPath: '/s.sock' }])
+    expect(historyPath('24h')).toBe('/history?range=24h')
+    const rebuilding = answering(Promise.resolve({ status: 503, ok: false, headers: {}, text: '{"error":"the store is being rebuilt"}' }))
+    expect(await fetchHistory(rebuilding, '/s.sock', '7d')).toEqual({ kind: 'rebuilding' })
+    const refused = answering(Promise.resolve({ status: 400, ok: false, headers: {}, text: '{"error":"range must be 24h, 7d, 30d or 90d"}' }))
+    expect(await fetchHistory(refused, '/s.sock', '7d')).toEqual({ kind: 'failed', reason: '400: range must be 24h, 7d, 30d or 90d' })
+    const garbled = answering(Promise.resolve({ status: 200, ok: true, headers: {}, text: '{"v":1}' }))
+    expect(await fetchHistory(garbled, '/s.sock', '7d')).toEqual({ kind: 'failed', reason: 'unreadable history' })
+  })
+
+  test('only a version 1 history report with its lists is accepted', () => {
+    const good = { v: 1, ...historyReport() }
+    expect(parseHistory(JSON.stringify(good))).toEqual(good)
+    expect(parseHistory(JSON.stringify({ ...good, v: 2 }))).toBeNull()
+    expect(parseHistory(JSON.stringify({ ...good, buckets: {} }))).toBeNull()
+    expect(parseHistory(JSON.stringify({ ...good, sessions: null }))).toBeNull()
+    expect(parseHistory(JSON.stringify({ ...good, calibration: [] }))).toBeNull()
+    expect(parseHistory(JSON.stringify({ ...good, range: 7 }))).toBeNull()
+    expect(parseHistory('nope')).toBeNull()
   })
 
   test('a full usage becomes the live breakdown the pane draws', () => {

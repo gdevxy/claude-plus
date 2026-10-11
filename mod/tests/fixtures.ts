@@ -1,6 +1,6 @@
 import type { SessionUsage } from 'claude-code'
 
-import type { ContextReport, Local, Snapshot } from '../types'
+import type { Bucket, ContextReport, HistoryRange, HistoryReport, Local, ModelSpend, Snapshot, Spend } from '../types'
 
 export const NOW_MS = Date.parse('2026-10-11T09:00:00Z')
 export const MINUTE_MS = 60_000
@@ -137,6 +137,8 @@ export function usage(): SessionUsage {
   }
 }
 
+const GROWTH = [20_000, 34_000, 52_000, 71_000, 96_000, 120_000, 151_000, 38_000, 41_000, 44_000, 46_000]
+
 export function contextReport(overrides: Partial<ContextReport> = {}): ContextReport {
   return {
     session: 's1',
@@ -179,7 +181,12 @@ export function contextReport(overrides: Partial<ContextReport> = {}): ContextRe
       ],
       injected_later_tokens: 12_400,
       compactions: 1,
-      points: [],
+      points: GROWTH.map((prompt_tokens, index) => ({
+        ts_ms: NOW_MS - (GROWTH.length - index) * MINUTE_MS,
+        prompt_tokens,
+        injected_tokens: 0,
+        compacted: index === 7,
+      })),
     },
     ratios: { prose: 3.5, code: 3, schema: 2.5, calibrated: false, pairs: 0 },
     items: [
@@ -209,4 +216,120 @@ export function contextReport(overrides: Partial<ContextReport> = {}): ContextRe
     },
     ...overrides,
   }
+}
+
+export const DAY_MS = 86_400_000
+export const HOUR_MS = 3_600_000
+export const OPUS = 'claude-opus-5-5'
+export const SONNET = 'claude-sonnet-5-5'
+export const HAIKU = 'claude-haiku-4-5'
+
+type Spent = [model: string, usd: number]
+
+export function spend(usd: number, calibrated = true): Spend {
+  return {
+    requests: Math.round(usd * 10),
+    unpriced: 0,
+    cost_usd: usd,
+    reconciled_usd: 0,
+    tokens: Math.round(usd * 100_000),
+    pct_5h: calibrated ? usd * 2 : null,
+  }
+}
+
+function summed(spends: Spend[]): Spend {
+  return spends.reduce(
+    (total, item) => ({
+      requests: total.requests + item.requests,
+      unpriced: total.unpriced + item.unpriced,
+      cost_usd: total.cost_usd + item.cost_usd,
+      reconciled_usd: total.reconciled_usd + item.reconciled_usd,
+      tokens: total.tokens + item.tokens,
+      pct_5h: total.pct_5h === null || item.pct_5h === null ? null : total.pct_5h + item.pct_5h,
+    }),
+    spend(0),
+  )
+}
+
+export function bucket(startMs: number, label: string, spent: Spent[], hit: number, peak: number | null): Bucket {
+  const models: ModelSpend[] = spent.map(([model, usd]) => ({ model, ...spend(usd) }))
+  const total = summed(models)
+  const prompt = total.tokens
+  return {
+    start_ms: startMs,
+    label,
+    ...total,
+    models,
+    prompt_tokens: prompt,
+    cache_read_tokens: Math.round(prompt * hit),
+    rebuilds: 0,
+    rebuild_usd: 0,
+    compactions: 0,
+    peak_5h_pct: peak,
+  }
+}
+
+const WEEK: [string, Spent[], number, number | null][] = [
+  ['Oct 5', [[OPUS, 1.2], [SONNET, 0.3]], 0.82, 12],
+  ['Oct 6', [], 0, null],
+  ['Oct 7', [[OPUS, 2.4], [SONNET, 0.5], [HAIKU, 0.02]], 0.9, 48],
+  ['Oct 8', [[OPUS, 0.8]], 0.76, 20],
+  ['Oct 9', [[OPUS, 3.1], [SONNET, 1.1]], 0.93, 85],
+  ['Oct 10', [[OPUS, 4], [SONNET, 0.4], [HAIKU, 0.05]], 0.95, 62],
+  ['Oct 11', [[OPUS, 2.1]], 0.91, 30],
+]
+
+export const OCT_5_MS = Date.parse('2026-10-05T00:00:00+02:00')
+
+export function historyReport(overrides: Partial<HistoryReport> = {}): HistoryReport {
+  const buckets = WEEK.map(([label, spent, hit, peak], index) => bucket(OCT_5_MS + index * DAY_MS, label, spent, hit, peak))
+  buckets[4] = { ...(buckets[4] as Bucket), rebuilds: 2, rebuild_usd: 0.61, compactions: 1 }
+  const models: ModelSpend[] = [
+    { model: OPUS, ...spend(13.6) },
+    { model: SONNET, ...spend(2.3) },
+    { model: HAIKU, ...spend(0.07) },
+  ]
+  const totals = summed(models)
+  return {
+    range: '7d',
+    bucket: 'day',
+    generated_at_ms: NOW_MS,
+    since_ms: OCT_5_MS,
+    until_ms: OCT_5_MS + 7 * DAY_MS,
+    calibration: { calibrated: true, pairs: 31, needed: 20 },
+    totals: {
+      ...totals,
+      sessions: 9,
+      hit_ratio: 0.91,
+      saved_usd: 21.4,
+      rebuilds: 2,
+      rebuild_usd: 0.61,
+      idle_rebuilds: 1,
+      compactions: 1,
+      peak_5h_pct: 85,
+    },
+    buckets,
+    models,
+    projects: [
+      { name: 'claude-plus', path: '/work/claude-plus', sessions: 5, ...spend(11.2) },
+      { name: 'shop', path: '/work/shop', sessions: 3, ...spend(4.1) },
+      { name: 'notes', path: '/work/notes', sessions: 1, ...spend(0.67) },
+    ],
+    sessions: [
+      { id: 'a1b2c3d4-0000-0000-0000-000000000001', title: 'Plan the History view', project: 'claude-plus', last_ms: NOW_MS - 2 * HOUR_MS, ...spend(6.4) },
+      { id: 'a1b2c3d4-0000-0000-0000-000000000002', title: null, project: 'shop', last_ms: NOW_MS - DAY_MS, ...spend(3.9) },
+    ],
+    ...overrides,
+  }
+}
+
+export function dayReport(): HistoryReport {
+  const start = Date.parse('2026-10-10T10:00:00Z')
+  const buckets = Array.from({ length: 24 }, (_, index) => {
+    const at = new Date(start + index * HOUR_MS)
+    const label = `${String((at.getUTCHours() + 2) % 24).padStart(2, '0')}:00`
+    const usd = index % 5 === 0 ? 0 : (index % 7) * 0.15
+    return bucket(start + index * HOUR_MS, label, usd === 0 ? [] : [[OPUS, usd]], 0.9, usd === 0 ? null : usd * 10)
+  })
+  return historyReport({ range: '24h' as HistoryRange, bucket: 'hour', since_ms: start, until_ms: start + 24 * HOUR_MS, buckets })
 }

@@ -1,9 +1,10 @@
 import type { HttpInit, HttpResponse, JsonValue, SessionMeasureInput, SessionUsage } from 'claude-code'
 
-import type { BreakdownCategory, ContextReport, LiveContext, Measure, Snapshot } from '../types'
+import type { BreakdownCategory, ContextReport, HistoryRange, HistoryReport, LiveContext, Measure, Snapshot } from '../types'
 import { itemKinds } from './context'
 
 export const TIMEOUT_MS = 500
+export const HISTORY_TIMEOUT_MS = 3000
 export const OUTBOX_LIMIT = 256
 export const HOST = 'http://claude-plus'
 export const REBUILDING_STATUS = 503
@@ -28,6 +29,11 @@ export type ContextReply =
   | { kind: 'rebuilding' }
   | { kind: 'failed'; reason: string }
 
+export type HistoryReply =
+  | { kind: 'history'; report: HistoryReport }
+  | { kind: 'rebuilding' }
+  | { kind: 'failed'; reason: string }
+
 export type PlusEvent = { id: string; session: string; kind: string; ts_ms: number; data: { [key: string]: JsonValue } }
 
 export function socketPath(home: string | undefined, plusHome: string | undefined): string | null {
@@ -35,14 +41,14 @@ export function socketPath(home: string | undefined, plusHome: string | undefine
   return base === null ? null : `${base.replace(/\/+$/, '')}/daemon.sock`
 }
 
-export function request(io: Io, socket: string, path: string, init: HttpInit = {}): Promise<Reply> {
-  return send(io, socket, path, init).reply
+export function request(io: Io, socket: string, path: string, init: HttpInit = {}, timeoutMs = TIMEOUT_MS): Promise<Reply> {
+  return send(io, socket, path, init, timeoutMs).reply
 }
 
-export function send(io: Io, socket: string, path: string, init: HttpInit = {}): Sent {
+export function send(io: Io, socket: string, path: string, init: HttpInit = {}, timeoutMs = TIMEOUT_MS): Sent {
   const stop = new AbortController()
-  const late = io.sleep(TIMEOUT_MS, { signal: stop.signal }).then(
-    (): Reply => ({ ok: false, reason: `no answer within ${TIMEOUT_MS} ms`, status: null, late: true }),
+  const late = io.sleep(timeoutMs, { signal: stop.signal }).then(
+    (): Reply => ({ ok: false, reason: `no answer within ${timeoutMs} ms`, status: null, late: true }),
     (): Reply => ({ ok: false, reason: 'cancelled', status: null }),
   )
   const attempt = () => io.fetch(`${HOST}${path}`, { ...init, socketPath: socket })
@@ -112,6 +118,27 @@ export function parseContext(text: string): ContextReport | null {
   if (!lists.every(Array.isArray) || !isObject(value.config) || !Array.isArray(value.config.groups)) return null
   if (value.live !== null && !(isObject(value.live) && Array.isArray(value.live.categories))) return null
   return value as unknown as ContextReport
+}
+
+export function historyPath(range: HistoryRange): string {
+  return `/history?range=${range}`
+}
+
+export async function fetchHistory(io: Io, socket: string, range: HistoryRange): Promise<HistoryReply> {
+  const reply = await request(io, socket, historyPath(range), {}, HISTORY_TIMEOUT_MS)
+  if (!reply.ok) {
+    return reply.status === REBUILDING_STATUS ? { kind: 'rebuilding' } : { kind: 'failed', reason: reply.reason }
+  }
+  const report = parseHistory(reply.text)
+  return report === null ? { kind: 'failed', reason: 'unreadable history' } : { kind: 'history', report }
+}
+
+export function parseHistory(text: string): HistoryReport | null {
+  const value = safeJson(text)
+  if (!isObject(value) || value.v !== 1 || typeof value.range !== 'string' || !isObject(value.totals)) return null
+  const lists = [value.buckets, value.models, value.projects, value.sessions]
+  if (!lists.every(Array.isArray) || !isObject(value.calibration)) return null
+  return value as unknown as HistoryReport
 }
 
 export function breakdownOf(usage: SessionUsage, atMs: number): LiveContext | null {
