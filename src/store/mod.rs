@@ -1,4 +1,5 @@
 mod breakdowns;
+mod context;
 mod events;
 mod limits;
 mod reconcile;
@@ -18,6 +19,7 @@ use rusqlite::{
 
 use crate::transcript::location::Location;
 pub use breakdowns::StoredBreakdown;
+pub use context::{AttachmentPoint, ToolResultPoint};
 pub use events::{EventRow, StoredEvent};
 pub use limits::{LimitSample, RESETS_AT_TOLERANCE_MS, SpendPoint};
 pub use reconcile::Reconciliation;
