@@ -12,6 +12,12 @@ use crate::setup::{Found, install_steps, uninstall_steps};
 
 const BINARY: &str = "claude-plus";
 
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 pub fn install(paths: &Paths, yes: bool) -> Result<()> {
     let claude = ClaudeCode::default();
     let Some(version) = claude.version()? else {
@@ -37,10 +43,10 @@ pub fn install(paths: &Paths, yes: bool) -> Result<()> {
     }
     for step in &steps {
         let outcome = claude.run(step)?;
-        println!("{}", installed(step, &found, &outcome, target));
+        say!("{}", installed(step, &found, &outcome, target));
     }
     if let Some(newer) = &newer {
-        println!(
+        say!(
             "✻ Kept the plus mod v{newer}, newer than this claude-plus v{}",
             bundle::VERSION
         );
@@ -48,15 +54,15 @@ pub fn install(paths: &Paths, yes: bool) -> Result<()> {
         .iter()
         .all(|step| matches!(step, Step::AddMarketplace(_)))
     {
-        println!("✻ The plus mod v{} is installed", bundle::VERSION);
+        say!("✻ The plus mod v{} is installed", bundle::VERSION);
     }
     for line in ensured(&control::ensure(paths)?) {
-        println!("{line}");
+        say!("{line}");
     }
     if let Some(warning) = path_warning(&std::env::current_exe()?, std::env::var_os("PATH")) {
-        println!("{warning}");
+        say!("{warning}");
     }
-    println!(
+    say!(
         "✻ Start a new Claude Code session to see the pane: it docks beside the conversation from 144 columns, and /plus opens it at any width"
     );
     Ok(())
@@ -83,19 +89,19 @@ pub fn uninstall(paths: &Paths, purge: bool, yes: bool) -> Result<()> {
     confirm_settings(paths, "uninstall", &steps, &deleted, yes)?;
     for step in &steps {
         let outcome = claude.run(step)?;
-        println!("{}", uninstalled(step, &outcome));
+        say!("{}", uninstalled(step, &outcome));
     }
     if found.is_none() {
-        println!(
+        say!(
             "Claude Code was not found on PATH, so the plus mod may still be installed: run claude plugin uninstall {PLUGIN_ID} where it is"
         );
     }
-    println!("{}", stopped(control::stop(paths)?));
+    say!("{}", stopped(control::stop(paths)?));
     bundle::remove(&paths.marketplace_dir())?;
     if purge && let Some(left) = purge_data_dir(paths)? {
-        println!("{}", purged(&paths.data_dir, &left));
+        say!("{}", purged(&paths.data_dir, &left));
     }
-    println!(
+    say!(
         "✻ claude-plus is uninstalled · close open Claude Code sessions, or their pane starts the daemon again"
     );
     Ok(())
@@ -143,7 +149,7 @@ fn confirm_settings(
     lines.extend(also.iter().map(|line| format!("  {line}")));
     let stdin = std::io::stdin();
     let typed = stdin.is_terminal();
-    if !confirm(&lines, &mut stdin.lock(), &mut std::io::stdout(), typed)? {
+    if !confirm(&lines, &mut stdin.lock(), &mut std::io::stderr(), typed)? {
         bail!(
             "{command} cancelled, nothing was changed; claude-plus {command} --yes agrees without asking"
         );

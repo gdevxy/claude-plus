@@ -83,12 +83,12 @@ fn install_asks_before_claude_code_records_anything_in_its_settings() {
         .write_stdin("n\n")
         .assert()
         .failure()
-        .stdout(predicate::str::contains(format!(
-            "claude-plus install will:\n  run claude plugin marketplace add {}\n  run claude plugin install plus@claude-plus\n  which Claude Code records in {}\nContinue? [y/N] ",
+        .stdout("")
+        .stderr(format!(
+            "claude-plus install will:\n  run claude plugin marketplace add {}\n  run claude plugin install plus@claude-plus\n  which Claude Code records in {}\nContinue? [y/N] n\nclaude-plus: install cancelled, nothing was changed; claude-plus install --yes agrees without asking\n",
             marketplace(&env).display(),
             settings.display()
-        ) + "n\n"))
-        .stderr("claude-plus: install cancelled, nothing was changed; claude-plus install --yes agrees without asking\n");
+        ));
     assert_eq!(env.claude_calls(), listing_calls());
     assert!(!env.plus.exists());
     cmd(&env, &["install"])
@@ -98,6 +98,26 @@ fn install_asks_before_claude_code_records_anything_in_its_settings() {
         .stdout(predicate::str::contains(format!(
             "✻ Installed the plus mod v{VERSION}"
         )));
+}
+
+#[test]
+fn install_finishes_every_step_when_the_reader_of_its_output_goes_away() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = common::process(&env, &["install", "--yes"])
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+    assert_eq!(
+        env.claude_calls().last().unwrap(),
+        "plugin install plus@claude-plus --json"
+    );
+    assert!(Client::new(&env.plus.join("daemon.sock")).health().is_ok());
 }
 
 #[test]
@@ -111,7 +131,7 @@ fn a_marketplace_of_that_name_elsewhere_is_pointed_here_after_asking() {
         .write_stdin("y\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains(format!(
+        .stderr(predicate::str::contains(format!(
             "  run claude plugin marketplace add {0}\n  which Claude Code records in",
             marketplace(&env).display()
         )))
@@ -221,7 +241,7 @@ fn uninstall_asks_first_and_purge_deletes_the_data_dir() {
         .write_stdin("")
         .assert()
         .failure()
-        .stdout(predicate::str::contains(format!(
+        .stderr(predicate::str::contains(format!(
             "  delete {} with the history claude-plus keeps\nContinue? [y/N] ",
             env.plus.display()
         )));

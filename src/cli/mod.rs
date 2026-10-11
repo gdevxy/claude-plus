@@ -105,11 +105,13 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     if !matches!(
         cli.command,
-        Command::Daemon {
-            action: None,
-            ensure: false,
-            ..
-        }
+        Command::Install { .. }
+            | Command::Uninstall { .. }
+            | Command::Daemon {
+                action: None,
+                ensure: false,
+                ..
+            }
     ) {
         end_quietly_when_the_reader_goes_away();
     }
