@@ -80,7 +80,18 @@ pub fn rows<Tz: TimeZone>(
         row.cost_usd += usd;
         row.reconciled_usd += usd;
     }
-    grouped.into_values().collect()
+    grouped
+        .into_values()
+        .map(|row| ExportRow {
+            cost_usd: to_six_decimals(row.cost_usd),
+            reconciled_usd: to_six_decimals(row.reconciled_usd),
+            ..row
+        })
+        .collect()
+}
+
+fn to_six_decimals(usd: f64) -> f64 {
+    (usd * 1e6).round() / 1e6
 }
 
 type Key = (String, String, String);
@@ -245,6 +256,33 @@ mod tests {
         let zurich = FixedOffset::east_opt(2 * 3600).unwrap();
         let later = rows(&requests, &adjustments, &sessions(), &zurich);
         assert!(later.iter().all(|row| row.day == "2026-10-11"));
+    }
+
+    #[test]
+    fn json_and_csv_carry_the_same_costs_to_six_decimals() {
+        let rows = rows(
+            &[request(
+                "s2",
+                OCT_10_23H,
+                "claude-opus-5-5",
+                Some(628.3534275999997),
+            )],
+            &[SpentAdjustment {
+                session_id: "s2".into(),
+                ts: OCT_10_23H,
+                model: "claude-opus-5-5".into(),
+                tokens: TokenCounts::default(),
+                cost_usd: Some(0.1 + 0.2),
+            }],
+            &sessions(),
+            &Utc,
+        );
+        let json = json(&rows).unwrap();
+        assert!(
+            json.contains(r#""cost_usd":628.653428,"reconciled_usd":0.3}"#),
+            "{json}"
+        );
+        assert!(csv(&rows).contains(",628.653428,0.300000"));
     }
 
     #[test]
