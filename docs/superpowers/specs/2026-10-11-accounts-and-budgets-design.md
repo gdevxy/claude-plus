@@ -178,7 +178,9 @@ Budget alerts reuse the existing limit toast: one toast when the projection firs
 
 ## 9. Pricing for gateways and cloud providers
 
-- A user price file at `$CLAUDE_PLUS_HOME/prices.toml` is merged over the bundled table with the existing `PriceTable::merged_with`, in every command and in the daemon.
+- Anthropic's first-party prices bundled in `assets/prices.toml` stay the default.
+- A user price file at `$CLAUDE_PLUS_HOME/prices.toml` is optional and never created by claude-plus.
+  When present, it is merged over the bundled table with the existing `PriceTable::merged_with`, in every command and in the daemon, so it only needs the models whose prices differ.
   An invalid file is reported by `doctor` and by the command that loaded it, and the bundled table is used alone.
 - `normalize_model` also strips:
   - a Bedrock region prefix and `anthropic.` vendor prefix, and a `-v<n>:<n>` suffix (`us.anthropic.claude-opus-5-5-20260901-v1:0` → `claude-opus-5-5`);
