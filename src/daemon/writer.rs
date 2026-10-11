@@ -664,18 +664,22 @@ mod tests {
     #[tokio::test]
     async fn the_writer_says_it_is_rebuilding_until_the_reindex_is_done() {
         let fx = Fixture::new();
-        let lines: String = (0..crate::ingest::BATCH_LINES + 10)
-            .map(|i| line("a", &format!("r{i}")))
-            .collect();
-        fx.write("a.jsonl", &lines);
+        for name in ["a", "b"] {
+            let lines: String = (0..crate::ingest::BATCH_LINES + 10)
+                .map(|i| line(name, &format!("{name}{i}")))
+                .collect();
+            fx.write(&format!("{name}.jsonl"), &lines);
+        }
         fx.handle.import().await.unwrap();
         assert!(!fx.handle.status().rebuilding);
+        let before_reindex = fx.handle.hold();
         let reindex = tokio::spawn({
             let handle = fx.handle.clone();
             async move { handle.reindex().await }
         });
         tokio::task::yield_now().await;
         let mid_reindex = fx.handle.hold();
+        before_reindex.send(()).unwrap();
         while !fx.reader().reindex_pending().unwrap() {
             tokio::task::yield_now().await;
         }

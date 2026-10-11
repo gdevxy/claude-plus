@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::TokenCounts;
+use super::redact::TOOL_INPUT_LIMIT;
 use super::text::{leading_text, non_prompt_prefix, string_chars, string_chars_except};
 
 #[derive(Debug, thiserror::Error)]
@@ -57,7 +58,17 @@ pub struct ToolUse {
     pub id: String,
     pub name: String,
     pub input_chars: u64,
+    pub target: Option<String>,
 }
+
+pub const TARGET_KEYS: &[&str] = &[
+    "file_path",
+    "notebook_path",
+    "command",
+    "url",
+    "pattern",
+    "path",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserRecord {
@@ -209,6 +220,7 @@ fn assistant(raw: &Value) -> AssistantRecord {
                 id: text(block, "/id")?,
                 name: text(block, "/name")?,
                 input_chars: block.get("input").map(string_chars).unwrap_or(0),
+                target: block.get("input").and_then(target),
             })
         })
         .collect();
@@ -227,6 +239,13 @@ fn assistant(raw: &Value) -> AssistantRecord {
         mcp_server: text(raw, "/attributionMcpServer"),
         effort: text(raw, "/perTurnEffort").or_else(|| text(raw, "/effort")),
     }
+}
+
+fn target(input: &Value) -> Option<String> {
+    TARGET_KEYS.iter().find_map(|key| {
+        let value = input.get(*key)?.as_str()?;
+        (!value.is_empty() && value.len() <= TOOL_INPUT_LIMIT).then(|| value.to_string())
+    })
 }
 
 fn user(raw: &Value) -> UserRecord {

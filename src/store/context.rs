@@ -406,6 +406,7 @@ mod tests {
                 ts,
                 name: name.into(),
                 input_chars: 1,
+                target: None,
             })
             .unwrap();
         }
@@ -441,6 +442,7 @@ mod tests {
             ts: 10,
             name: "Read".into(),
             input_chars: 1,
+            target: None,
         })
         .unwrap();
         for (id, session, ts, chars, is_sidechain) in [

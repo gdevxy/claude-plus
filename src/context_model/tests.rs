@@ -122,6 +122,7 @@ fn store() -> Store {
         ts: FIRST_TS + 100,
         name: "mcp__linear__search".into(),
         input_chars: 10,
+        target: None,
     })
     .unwrap();
     w.tool_result(&ToolResultRow {

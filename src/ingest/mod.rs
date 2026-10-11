@@ -11,8 +11,8 @@ use anyhow::Result;
 
 use crate::pricing::PriceTable;
 use crate::store::{
-    AttachmentRow, Busy, CompactionRow, CostStateRow, FileCheckpoint, FileProgress, RequestRow,
-    RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
+    AttachmentRow, Busy, CompactionRow, CostStateRow, FileCheckpoint, FileProgress, PromptRow,
+    RequestRow, RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
 };
 use crate::transcript::location::Location;
 use crate::transcript::redact::redact;
@@ -420,10 +420,25 @@ pub fn derive(
                     ts: ts.unwrap_or(0),
                     name: tool.name.clone(),
                     input_chars: tool.input_chars,
+                    target: tool.target.clone(),
                 })?;
             }
         }
         Record::User(u) => {
+            let main_thread = !u.common.is_sidechain && location.agent_id.is_none();
+            if u.is_prompt
+                && main_thread
+                && let (Some(uuid), Some(ts)) = (
+                    parsed.raw.get("uuid").and_then(serde_json::Value::as_str),
+                    ts,
+                )
+            {
+                writer.prompt(&PromptRow {
+                    uuid: uuid.to_string(),
+                    session_id: session_id.clone(),
+                    ts,
+                })?;
+            }
             for result in &u.tool_results {
                 writer.tool_result(&ToolResultRow {
                     tool_use_id: result.tool_use_id.clone(),
@@ -1186,7 +1201,64 @@ mod tests {
         "cost_states",
         "sessions",
         "adjustments",
+        "prompts",
     ];
+
+    #[test]
+    fn main_thread_prompts_and_tool_targets_are_derived_once() {
+        let fx = Fixture::new();
+        let prompt = |uuid: &str, ts: &str, text: &str| {
+            serde_json::json!({"type":"user","uuid":uuid,"sessionId":"s1","timestamp":ts,"message":{"role":"user","content":text}}).to_string()
+        };
+        let lines = [
+            prompt("u1", "2026-10-01T10:00:00Z", "Fix the countdown"),
+            serde_json::json!({"type":"user","uuid":"u2","isMeta":true,"sessionId":"s1","timestamp":"2026-10-01T10:00:01Z","message":{"role":"user","content":"meta"}}).to_string(),
+            prompt("u3", "2026-10-01T10:00:02Z", "<command-name>/clear</command-name>"),
+            serde_json::json!({"type":"assistant","sessionId":"s1","timestamp":"2026-10-01T10:00:03Z","requestId":"r1","message":{"model":"claude-opus-5-5","content":[
+                {"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/w/a.rs","limit":20}},
+                {"type":"tool_use","id":"t2","name":"Bash","input":{"command":"x".repeat(300),"description":"long"}},
+                {"type":"tool_use","id":"t3","name":"Grep","input":{"pattern":"fn main","path":"/w"}}
+            ],"usage":{"input_tokens":1,"output_tokens":5}}}).to_string(),
+            prompt("u4", "2026-10-01T10:05:00Z", "Now the tests"),
+        ];
+        let path = fx.write("-w-proj/s1.jsonl", &(lines.join("\n") + "\n"));
+        fx.write(
+            "-w-proj/s1/subagents/agent-a1.jsonl",
+            &format!(
+                "{}\n",
+                prompt("u5", "2026-10-01T10:00:04Z", "Explore the repo")
+            ),
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let prompts = |store: &Store| -> Vec<i64> {
+            store
+                .prompts_between(0, i64::MAX)
+                .unwrap()
+                .iter()
+                .map(|p| p.ts)
+                .collect()
+        };
+        assert_eq!(prompts(&store), vec![1_790_848_800, 1_790_849_100]);
+        assert_eq!(
+            store.dump("tool_uses"),
+            vec![
+                r#"Text("t1")|Text("s1")|Integer(1790848803)|Text("Read")|Integer(7)|Text("/w/a.rs")"#,
+                r#"Text("t2")|Text("s1")|Integer(1790848803)|Text("Bash")|Integer(304)|Null"#,
+                r#"Text("t3")|Text("s1")|Integer(1790848803)|Text("Grep")|Integer(9)|Text("fn main")"#,
+            ]
+        );
+        let shorter = &lines[..4];
+        fx.write("-w-proj/s1.jsonl", &(shorter.join("\n") + "\n"));
+        set_mtime_offset(&path, 10);
+        fx.run(&mut store);
+        fx.write("-w-proj/s1.jsonl", &(lines.join("\n") + "\n"));
+        set_mtime_offset(&path, 20);
+        fx.run(&mut store);
+        assert_eq!(prompts(&store), vec![1_790_848_800, 1_790_849_100]);
+        reindex(&mut store);
+        assert_eq!(prompts(&store), vec![1_790_848_800, 1_790_849_100]);
+    }
 
     #[test]
     fn a_request_counts_as_sent_when_the_entry_it_answers_was_written() {
@@ -1222,7 +1294,7 @@ mod tests {
         let secret = "s3cr3t-".repeat(400);
         let short = "s3cr3t-short";
         let lines = [
-            serde_json::json!({"type":"user","sessionId":"s1","timestamp":"2026-10-01T09:59:00Z","message":{"role":"user","content":format!("{short} {secret}")}}),
+            serde_json::json!({"type":"user","uuid":"u0","sessionId":"s1","timestamp":"2026-10-01T09:59:00Z","message":{"role":"user","content":format!("{short} {secret}")}}),
             serde_json::json!({"type":"attachment","sessionId":"s1","timestamp":"2026-10-01T09:59:01Z","attachment":{"type":"instructions","files":[{"path":"/h/CLAUDE.md","type":"User","content":short}],"names":["a"],"content":secret}}),
             serde_json::json!({"type":"assistant","sessionId":"s1","timestamp":"2026-10-01T10:00:00Z","requestId":"r1","message":{"model":"claude-opus-5-5","content":[
                 {"type":"thinking","thinking":short,"signature":secret},
@@ -1254,6 +1326,7 @@ mod tests {
         assert_eq!(imported[1].len(), 2);
         assert_eq!(imported[2].len(), 2);
         assert_eq!(imported[3].len(), 1);
+        assert_eq!(imported[8].len(), 1);
         assert!(!imported.concat().concat().contains("s3cr3t"));
 
         reindex(&mut store);

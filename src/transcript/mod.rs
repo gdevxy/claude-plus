@@ -34,7 +34,8 @@ mod tests {
             vec![ToolUse {
                 id: "toolu_1".into(),
                 name: "Read".into(),
-                input_chars: 7
+                input_chars: 7,
+                target: Some("/w/a.rs".into())
             }]
         );
         assert!(a.is_billable());

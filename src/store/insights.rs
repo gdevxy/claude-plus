@@ -1,0 +1,279 @@
+use anyhow::Result;
+use rusqlite::params;
+use rusqlite::types::Value;
+
+use super::{PREFIX_KINDS, Store};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptPoint {
+    pub session_id: String,
+    pub ts: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LargeResult {
+    pub session_id: String,
+    pub ts: i64,
+    pub chars: u64,
+    pub tool: Option<String>,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixChange {
+    pub ts: i64,
+    pub kind: String,
+}
+
+const PROMPTS_BETWEEN: &str =
+    "SELECT session_id, ts FROM prompts WHERE ts >= ?1 AND ts < ?2 ORDER BY session_id, ts, uuid";
+
+const LARGE_RESULTS_BETWEEN: &str = "SELECT r.session_id, r.ts, r.chars, u.name, u.target
+     FROM tool_results r LEFT JOIN tool_uses u ON u.id = r.tool_use_id
+     WHERE r.ts >= ?1 AND r.ts < ?2 AND r.chars >= ?3 AND r.is_sidechain = 0
+     ORDER BY r.session_id, r.ts, r.tool_use_id";
+
+fn prefix_kinds_sql() -> String {
+    let kinds = vec!["?"; PREFIX_KINDS.len()].join(", ");
+    format!(
+        "SELECT ts, kind FROM attachments
+         WHERE session_id = ? AND ts >= ? AND ts < ? AND kind IN ({kinds}) ORDER BY ts, kind"
+    )
+}
+
+#[cfg(test)]
+fn insights_statements() -> Vec<String> {
+    vec![
+        PROMPTS_BETWEEN.to_string(),
+        LARGE_RESULTS_BETWEEN.to_string(),
+        prefix_kinds_sql(),
+    ]
+}
+
+impl Store {
+    pub fn prompts_between(&self, since_ts: i64, until_ts: i64) -> Result<Vec<PromptPoint>> {
+        let mut statement = self.conn.prepare_cached(PROMPTS_BETWEEN)?;
+        let rows = statement.query_map([since_ts, until_ts], |r| {
+            Ok(PromptPoint {
+                session_id: r.get(0)?,
+                ts: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn large_tool_results_between(
+        &self,
+        since_ts: i64,
+        until_ts: i64,
+        min_chars: u64,
+    ) -> Result<Vec<LargeResult>> {
+        let mut statement = self.conn.prepare_cached(LARGE_RESULTS_BETWEEN)?;
+        let rows = statement.query_map(params![since_ts, until_ts, min_chars as i64], |r| {
+            Ok(LargeResult {
+                session_id: r.get(0)?,
+                ts: r.get(1)?,
+                chars: r.get::<_, i64>(2)? as u64,
+                tool: r.get(3)?,
+                target: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn prefix_kinds_between(
+        &self,
+        session_id: &str,
+        since_ts: i64,
+        until_ts: i64,
+    ) -> Result<Vec<PrefixChange>> {
+        let mut statement = self.conn.prepare_cached(&prefix_kinds_sql())?;
+        let mut values: Vec<Value> = vec![
+            session_id.to_string().into(),
+            since_ts.into(),
+            until_ts.into(),
+        ];
+        values.extend(
+            PREFIX_KINDS
+                .iter()
+                .map(|kind| Value::from(kind.to_string())),
+        );
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |r| {
+            Ok(PrefixChange {
+                ts: r.get(0)?,
+                kind: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{AttachmentRow, PromptRow, ToolResultRow, ToolUseRow};
+
+    fn plan(store: &Store, sql: &str) -> String {
+        let mut statement = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let nulls = vec![rusqlite::types::Null; statement.parameter_count()];
+        let details: Vec<String> = statement
+            .query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        details.join("; ")
+    }
+
+    #[test]
+    fn the_insights_reads_search_indexes_instead_of_scanning_tables() {
+        let store = Store::open_in_memory().unwrap();
+        for sql in insights_statements() {
+            let plan = plan(&store, &sql);
+            assert!(!plan.contains("SCAN"), "{sql}\n=> {plan}");
+        }
+    }
+
+    #[test]
+    fn prompts_of_a_span_are_read_by_session_then_time() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        for (uuid, session, ts) in [
+            ("p1", "s2", 150),
+            ("p2", "s1", 120),
+            ("p3", "s1", 100),
+            ("p4", "s1", 90),
+            ("p5", "s1", 200),
+        ] {
+            w.prompt(&PromptRow {
+                uuid: uuid.into(),
+                session_id: session.into(),
+                ts,
+            })
+            .unwrap();
+        }
+        w.prompt(&PromptRow {
+            uuid: "p2".into(),
+            session_id: "s1".into(),
+            ts: 999,
+        })
+        .unwrap();
+        w.commit().unwrap();
+        let read: Vec<(String, i64)> = store
+            .prompts_between(100, 200)
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.session_id, p.ts))
+            .collect();
+        assert_eq!(
+            read,
+            [("s1".into(), 100), ("s1".into(), 120), ("s2".into(), 150)]
+        );
+    }
+
+    #[test]
+    fn large_tool_results_of_the_main_thread_carry_their_tool_and_target() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        for (id, name, target) in [
+            ("t1", "Read", Some("/w/big.rs")),
+            ("t2", "Bash", None),
+            ("t3", "Read", Some("/w/small.rs")),
+        ] {
+            w.tool_use(&ToolUseRow {
+                id: id.into(),
+                session_id: "s1".into(),
+                ts: 100,
+                name: name.into(),
+                input_chars: 10,
+                target: target.map(String::from),
+            })
+            .unwrap();
+        }
+        for (id, ts, chars, is_sidechain) in [
+            ("t1", 101, 40_000, false),
+            ("t2", 102, 30_000, false),
+            ("t3", 103, 500, false),
+            ("t4", 104, 50_000, false),
+            ("t5", 105, 60_000, true),
+        ] {
+            w.tool_result(&ToolResultRow {
+                tool_use_id: id.into(),
+                session_id: "s1".into(),
+                ts,
+                chars,
+                images: 0,
+                is_error: false,
+                is_sidechain,
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        assert_eq!(
+            store.large_tool_results_between(100, 200, 20_000).unwrap(),
+            vec![
+                LargeResult {
+                    session_id: "s1".into(),
+                    ts: 101,
+                    chars: 40_000,
+                    tool: Some("Read".into()),
+                    target: Some("/w/big.rs".into()),
+                },
+                LargeResult {
+                    session_id: "s1".into(),
+                    ts: 102,
+                    chars: 30_000,
+                    tool: Some("Bash".into()),
+                    target: None,
+                },
+                LargeResult {
+                    session_id: "s1".into(),
+                    ts: 104,
+                    chars: 50_000,
+                    tool: None,
+                    target: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn prefix_changes_of_a_span_name_their_kind() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        let file = w.file("/p/s1.jsonl", 0, 0).unwrap();
+        for (line_no, ts, kind) in [
+            (1, 100, "mcp_instructions_delta"),
+            (2, 110, "date"),
+            (3, 120, "skill_listing"),
+            (4, 300, "instructions"),
+        ] {
+            w.attachment(&AttachmentRow {
+                file_id: file,
+                line_no,
+                session_id: "s1".into(),
+                ts: Some(ts),
+                kind: kind.into(),
+                chars: 10,
+                names: vec![],
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        assert_eq!(
+            store.prefix_kinds_between("s1", 100, 300).unwrap(),
+            vec![
+                PrefixChange {
+                    ts: 100,
+                    kind: "mcp_instructions_delta".into()
+                },
+                PrefixChange {
+                    ts: 120,
+                    kind: "skill_listing".into()
+                },
+            ]
+        );
+    }
+}

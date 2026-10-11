@@ -2,6 +2,7 @@ mod breakdowns;
 mod context;
 mod events;
 mod history;
+mod insights;
 mod limits;
 mod reconcile;
 mod schema;
@@ -23,6 +24,7 @@ pub use breakdowns::StoredBreakdown;
 pub use context::{AttachmentPoint, ToolResultPoint};
 pub use events::{EventRow, StoredEvent};
 pub use history::{CompactionPoint, SessionInfo, SpentAdjustment, SpentRequest};
+pub use insights::{LargeResult, PrefixChange, PromptPoint};
 pub use limits::{LimitSample, RESETS_AT_TOLERANCE_MS, SpendPoint};
 pub use reconcile::Reconciliation;
 pub use session::{ModelTotal, SessionTotals};
@@ -637,6 +639,7 @@ mod tests {
             ts: 5,
             name: "Read".into(),
             input_chars: 7,
+            target: Some("/w/a.rs".into()),
         };
         w.tool_use(&tool_use).unwrap();
         w.tool_use(&ToolUseRow {
@@ -679,7 +682,7 @@ mod tests {
         w.commit().unwrap();
         assert_eq!(
             store.dump("tool_uses"),
-            vec![r#"Text("t1")|Text("s1")|Integer(5)|Text("Read")|Integer(7)"#]
+            vec![r#"Text("t1")|Text("s1")|Integer(5)|Text("Read")|Integer(7)|Text("/w/a.rs")"#]
         );
         assert_eq!(
             store.dump("tool_results"),
@@ -1133,7 +1136,10 @@ mod tests {
                 })
                 .collect();
             for open in opens {
-                assert_eq!(open.join().unwrap().unwrap(), 14);
+                assert_eq!(
+                    open.join().unwrap().unwrap(),
+                    Store::latest_schema_version()
+                );
             }
         });
     }
@@ -1166,8 +1172,8 @@ mod tests {
     #[test]
     fn a_new_store_is_at_the_latest_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
-        assert_eq!(Store::latest_schema_version(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(Store::latest_schema_version(), 15);
         assert!(!store.reindex_pending().unwrap());
     }
 
@@ -1190,7 +1196,7 @@ mod tests {
             )
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert_eq!(store.totals().unwrap().requests, 1);
         assert!(store.reindex_pending().unwrap());
         assert_eq!(store.dump("events"), Vec::<String>::new());
@@ -1202,7 +1208,7 @@ mod tests {
     fn stored_tool_results_are_rebuilt_to_learn_which_thread_they_belong_to() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("data.db");
-        let before = schema::MIGRATIONS.len() - 1;
+        let before = 7;
         {
             let store = Store::migrated_with(
                 Connection::open(&path).unwrap(),
@@ -1220,7 +1226,7 @@ mod tests {
                 .unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert!(store.reindex_pending().unwrap());
     }
 

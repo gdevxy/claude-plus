@@ -51,6 +51,14 @@ pub struct ToolUseRow {
     pub ts: i64,
     pub name: String,
     pub input_chars: u64,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptRow {
+    pub uuid: String,
+    pub session_id: String,
+    pub ts: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -263,8 +271,16 @@ impl Writer<'_> {
 
     pub fn tool_use(&mut self, row: &ToolUseRow) -> Result<()> {
         self.exec(
-            "INSERT OR IGNORE INTO tool_uses (id, session_id, ts, name, input_chars) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![row.id, row.session_id, row.ts, row.name, row.input_chars as i64],
+            "INSERT OR IGNORE INTO tool_uses (id, session_id, ts, name, input_chars, target) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![row.id, row.session_id, row.ts, row.name, row.input_chars as i64, row.target],
+        )?;
+        Ok(())
+    }
+
+    pub fn prompt(&mut self, row: &PromptRow) -> Result<()> {
+        self.exec(
+            "INSERT OR IGNORE INTO prompts (uuid, session_id, ts) VALUES (?1, ?2, ?3)",
+            params![row.uuid, row.session_id, row.ts],
         )?;
         Ok(())
     }

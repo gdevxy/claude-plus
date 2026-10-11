@@ -163,6 +163,17 @@ CREATE INDEX requests_skill_by_ts ON requests(ts, skill) WHERE skill IS NOT NULL
 ALTER TABLE tool_results ADD COLUMN is_sidechain INTEGER NOT NULL DEFAULT 0;
 INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM tool_results);
 "#,
+    r#"
+ALTER TABLE tool_uses ADD COLUMN target TEXT;
+CREATE TABLE prompts (
+    uuid TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    ts INTEGER NOT NULL
+);
+CREATE INDEX prompts_by_ts ON prompts(ts);
+CREATE INDEX tool_results_by_ts ON tool_results(ts, chars);
+INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM requests);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {
@@ -187,4 +198,5 @@ pub const DERIVED_TABLES: &[&str] = &[
     "cost_states",
     "sessions",
     "adjustments",
+    "prompts",
 ];
