@@ -71,6 +71,8 @@ export function snapshot(overrides: Partial<Snapshot['live']> = {}): Snapshot {
           calibration: { family: 'opus', pairs: 0, needed: 20, pct_per_usd: null },
         },
       ],
+      account: null,
+      budget: null,
       ...overrides,
     },
   }

@@ -75,7 +75,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Processed / generated       2M / 61k',
         '   Turns · subagents             14 · 2',
         '',
-        ' Plan limits                          ?',
+        ' Limits                               ?',
         '   5h    █████████████▌░░░░░░░░░░░  54%',
         '         resets 2h 10m · pace 81%',
         '   7d    ███████▊░░░░░░░░░░░░░░░░░  31%',
@@ -104,7 +104,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Processed / generated                           2M / 61k',
         '   Turns · subagents                                 14 · 2',
         '',
-        ' Plan limits                                              ?',
+        ' Limits                                                   ?',
         '   5h    ████████████████████████▎░░░░░░░░░░░░░░░░░░░░  54%',
         '         resets in 2h 10m · on pace for 81%',
         '   7d    ██████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
@@ -133,7 +133,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Processed / generated                                                                   2M / 61k',
         '   Turns · subagents                                                                         14 · 2',
         '',
-        ' Plan limits                                                                                      ?',
+        ' Limits                                                                                           ?',
         '   5h    █████████████████████████████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  54%',
         '         resets in 2h 10m · on pace for 81%',
         '   7d    ██████████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
@@ -162,7 +162,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Turns                             14',
         '   Last request      25.3k in · 800 out',
         '',
-        ' Plan limits                          ?',
+        ' Limits                               ?',
         '   5h    █████████████▌░░░░░░░░░░░  54%',
         '         resets in 2h 10m',
       ],
@@ -182,7 +182,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Turns                                                 14',
         '   Last request                          25.3k in · 800 out',
         '',
-        ' Plan limits                                              ?',
+        ' Limits                                                   ?',
         '   5h    ████████████████████████▎░░░░░░░░░░░░░░░░░░░░  54%',
         '         resets in 2h 10m',
       ],
@@ -201,7 +201,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Turns                                                                                         14',
         '   Last request                                                                  25.3k in · 800 out',
         '',
-        ' Plan limits                                                                                      ?',
+        ' Limits                                                                                           ?',
         '   5h    █████████████████████████████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  54%',
         '         resets in 2h 10m',
       ],
@@ -283,7 +283,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Processed / generated       2M / 61k',
         '   Turns · subagents             14 · 2',
         '',
-        ' Plan limits                          ?',
+        ' Limits                               ?',
         '   5h    █████████████▌░░░░░░░░░░░  54%',
         '         resets 1h 17m · pace 81%',
         '   7d    ███████▊░░░░░░░░░░░░░░░░░  31%',
@@ -313,7 +313,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Processed / generated                           2M / 61k',
         '   Turns · subagents                                 14 · 2',
         '',
-        ' Plan limits                                              ?',
+        ' Limits                                                   ?',
         '   5h    ████████████████████████▎░░░░░░░░░░░░░░░░░░░░  54%',
         '         resets in 1h 17m · on pace for 81%',
         '   7d    ██████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
@@ -342,7 +342,7 @@ const FRAMES: { name: string; state: Partial<ScreenInput>; rows: Record<number, 
         '   Processed / generated                                                                   2M / 61k',
         '   Turns · subagents                                                                         14 · 2',
         '',
-        ' Plan limits                                                                                      ?',
+        ' Limits                                                                                           ?',
         '   5h    █████████████████████████████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  54%',
         '         resets in 1h 17m · on pace for 81%',
         '   7d    ██████████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
@@ -671,4 +671,117 @@ describe('status and daemon', () => {
     expect(toggled([], 'cache')).toEqual(['cache'])
     expect(toggled(['cache', 'limits'], 'cache')).toEqual(['limits'])
   })
+})
+
+describe('accounts and budgets', () => {
+  const enterprise = { id: 'oauth:work', label: 'Acme · Enterprise', kind: 'oauth' as const }
+  const budget = { amount_usd: 700, local_usd: 23.1, period_start_ms: Date.parse('2026-10-01T00:00:00Z'), resets_at_ms: Date.parse('2026-11-01T00:00:00Z') }
+  const spend = (used: number) => ({
+    window: 'spend_limit',
+    used_pct: used,
+    resets_at_ms: budget.resets_at_ms,
+    sampled_at_ms: NOW_MS - MINUTE_MS,
+    reset_since_sample: false,
+    pace: { pct_per_hour: 0.01, projected_pct: 31, full_at_ms: null },
+    calibration: { family: 'opus', pairs: 0, needed: 20, pct_per_usd: null },
+  })
+  const own = () => ({ ...spend(3.3), window: 'budget' })
+  const [five] = snapshot().live.limits
+  const alone = local({ measure: { ...local().measure!, rateLimits: [] } })
+
+  test('names the account under the headline', () => {
+    const lines = screen(input({ width: 60, snapshot: snapshot({ account: enterprise, limits: [] }) }))
+    expect(text(line(lines, 'account')).trim()).toBe('Acme · Enterprise')
+    expect(line(lines, 'account').segments[0]?.dim).toBe(true)
+    expect(lines.findIndex(candidate => candidate.key === 'account')).toBe(lines.findIndex(candidate => candidate.key === 'headline') + 1)
+  })
+
+  test('cuts a long account name with an ellipsis instead of wrapping it', () => {
+    const long = { ...enterprise, label: 'Acme Corporation International · Enterprise' }
+    const lines = screen(input({ width: 26, snapshot: snapshot({ account: long, limits: [] }) }))
+    expect(text(line(lines, 'account'))).toBe('Acme Corporation Intern…')
+  })
+
+  test('shows the spend limit in dollars when a budget is set', () => {
+    const lines = screen(input({ width: 100, snapshot: snapshot({ account: enterprise, budget, limits: [spend(4)] }) }))
+    expect(text(line(lines, 'limits')).trim().startsWith('Limits')).toBe(true)
+    expect(text(line(lines, 'limit-spend_limit-detail')).trim()).toBe('$28.00 of $700 · resets in 20d 15h · on pace for 31%')
+    expect(text(line(lines, 'limit-spend_limit-here')).trim()).toBe('Claude Code here: $23.10')
+    expect(line(lines, 'limit-spend_limit-here').segments[0]?.dim).toBe(true)
+  })
+
+  test('shortens the dollar detail as the pane narrows without cutting a word', () => {
+    const detail = (width: number) => {
+      const lines = screen(input({ width, snapshot: snapshot({ account: enterprise, budget, limits: [spend(4)] }) }))
+      return [text(line(lines, 'limit-spend_limit-detail')).trim(), text(line(lines, 'limit-spend_limit-here')).trim()]
+    }
+    expect(detail(60)).toEqual(['$28 of $700 · resets 20d 15h · pace 31%', 'Claude Code here: $23.10'])
+    expect(detail(40)).toEqual(['$28 of $700 · 20d 15h · 31%', 'Claude Code here: $23.10'])
+    expect(detail(26)).toEqual(['$28 of $700', 'Here: $23.10'])
+  })
+
+  test('hints at the budget command when no budget is set', () => {
+    const lines = screen(input({ width: 60, snapshot: snapshot({ account: enterprise, limits: [spend(4)] }) }))
+    expect(text(line(lines, 'limit-spend_limit-detail')).trim()).toBe('resets in 20d 15h · on pace for 31%')
+    expect(text(line(lines, 'limit-spend_limit-hint')).trim()).toBe('claude-plus budget set <usd> shows dollars')
+    expect(lines.some(candidate => candidate.key === 'limit-spend_limit-here')).toBe(false)
+  })
+
+  test('an exceeded spend limit draws full with its real percent', () => {
+    const lines = screen(input({ width: 100, snapshot: snapshot({ account: enterprise, budget, limits: [spend(104)] }) }))
+    const meter = line(lines, 'limit-spend_limit')
+    expect(text(meter)).toContain('104%')
+    expect(text(meter)).not.toContain('░')
+    expect(meter.segments[1]?.color).toBe('warning')
+    expect(text(line(lines, 'limit-spend_limit-detail')).trim().startsWith('$728.00 of $700')).toBe(true)
+  })
+
+  test('draws a budget window as this machine only and aligns its label', () => {
+    const lines = screen(input({ width: 100, local: alone, snapshot: snapshot({ account: enterprise, budget, limits: [own()] }) }))
+    expect(text(line(lines, 'limit-budget')).startsWith('  Budget ')).toBe(true)
+    expect(text(line(lines, 'limit-budget-detail')).trim()).toBe('$23.10 of $700 here · resets in 20d 15h · on pace for 31%')
+    expect(lines.some(candidate => candidate.key === 'limit-budget-here' || candidate.key === 'limits-learning')).toBe(false)
+    const narrow = (width: number) => text(line(screen(input({ width, local: alone, snapshot: snapshot({ budget, limits: [own()] }) })), 'limit-budget-detail')).trim()
+    expect([narrow(60), narrow(40), narrow(26)]).toEqual(['$23 of $700 here · resets 20d 15h · pace 31%', '$23 of $700 here', '$23 of $700'])
+  })
+
+  test('pads every meter label to the longest window shown', () => {
+    const lines = screen(input({ width: 60, snapshot: snapshot({ budget, limits: [five!, own()] }) }))
+    const bars = [text(line(lines, 'limit-five_hour')), text(line(lines, 'limit-budget'))]
+    expect(bars.map(bar => bar.search(/[█░▏▎▍▌▋▊▉]/))).toEqual([9, 9])
+    expect(line(lines, 'limit-budget-detail').indent).toBe(9)
+    expect(text(line(screen(input({ width: 60 })), 'limit-five_hour')).search(/[█░▏▎▍▌▋▊▉]/)).toBe(8)
+  })
+
+  test('says the cache lifetime is assumed from the account', () => {
+    const step = { atMs: NOW_MS, model: 'claude-opus-5-5', input: 1, output: 1, cacheRead: 1000, cacheWrite: 0 }
+    const lines = screen(input({ width: 60, expanded: ['cache'], snapshot: null, local: local({ step }) }))
+    expect(text(line(lines, 'explain-cache'))).toContain('assumed from your account')
+  })
+
+  test('explains a monthly pace when there is no 5h window', () => {
+    const lines = screen(input({ local: alone, snapshot: snapshot({ budget, limits: [own()] }), expanded: ['limits'] }))
+    expect(text(line(lines, 'explain-limits'))).toBe(
+      'The budget counts what Claude Code spent on this machine since the period started, at API prices. The pace projects the period so far to the reset.',
+    )
+  })
+
+  const WITH_MONEY: Record<string, Partial<ScreenInput>> = {
+    'a named account': { snapshot: snapshot({ account: { ...enterprise, label: 'Acme Corporation International · Enterprise' } }) },
+    'a spend limit with a budget': { snapshot: snapshot({ account: enterprise, budget, limits: [...snapshot().live.limits, spend(4)] }), expanded: ['limits'] },
+    'a spend limit without a budget': { snapshot: snapshot({ account: enterprise, limits: [...snapshot().live.limits, spend(4)] }) },
+    'an exceeded spend limit': { local: alone, snapshot: snapshot({ account: enterprise, budget: { ...budget, amount_usd: 12_500, local_usd: 1_234.5 }, limits: [spend(104)] }) },
+    'a budget': { local: alone, snapshot: snapshot({ account: enterprise, budget, limits: [own()] }), expanded: ['limits'] },
+  }
+
+  for (const width of [26, 40, 60, 100, 144]) {
+    for (const [name, state] of Object.entries(WITH_MONEY)) {
+      test(`${name} at ${width} columns cuts no row and splits no value`, () => {
+        const lines = screen(input({ width, ...state }))
+        expect(overflows(lines, width)).toEqual([])
+        const limited = lines.filter(candidate => candidate.key.startsWith('limit') && !candidate.key.startsWith('limits-learning'))
+        expect(painted(limited, width).filter(row => row.includes('…'))).toEqual([])
+      })
+    }
+  }
 })

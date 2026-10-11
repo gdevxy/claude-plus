@@ -94,7 +94,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '   Processed / generated       2M / 61k',
     '   Turns · subagents             14 · 2',
     '',
-    ' Plan limits                          ?',
+    ' Limits                               ?',
     '   5h    █████████████▌░░░░░░░░░░░  54%',
     '         resets 2h 9m · pace 81%',
     '   7d    ███████▊░░░░░░░░░░░░░░░░░  31%',
@@ -125,7 +125,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '   Processed / generated                           2M / 61k',
     '   Turns · subagents                                 14 · 2',
     '',
-    ' Plan limits                                              ?',
+    ' Limits                                                   ?',
     '   5h    ████████████████████████▎░░░░░░░░░░░░░░░░░░░░  54%',
     '         resets in 2h 9m · on pace for 81%',
     '   7d    ██████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
@@ -156,7 +156,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '   Processed / generated                                                                   2M / 61k',
     '   Turns · subagents                                                                         14 · 2',
     '',
-    ' Plan limits                                                                                      ?',
+    ' Limits                                                                                           ?',
     '   5h    █████████████████████████████████████████████▉░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  54%',
     '         resets in 2h 9m · on pace for 81%',
     '   7d    ██████████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  31%',
@@ -281,9 +281,9 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
   ],
 }
 
-function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
+function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }, env: Record<string, string> = {}): Wiring {
   const wiring: Wiring = { session: 's1', model: 'claude-opus-5-5', served: snapshot(), report: contextReport(), insights: insightsReport(), insightsLag: null, toasts: [], played: [], histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, historyStatus: null, insightsStatus: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], holdingRuns: false, heldRuns: [], knowsUnlessStopped: true, opened: [], closed: [], statuses: [], blits: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
-  mock.env(on, { HOME: '/Users/me' })
+  mock.env(on, { HOME: '/Users/me', ...env })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
   on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: wiring.theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
@@ -423,7 +423,7 @@ function glyph(cache: FoundElement | undefined): string {
   return JSON.stringify(row?.children[1])
 }
 
-type Posted = { id?: string; kind: string; session?: string }
+type Posted = { id?: string; kind: string; session?: string; data?: Record<string, unknown> }
 
 function posted(calls: { url: string; init?: HttpInit }[]): Posted[] {
   return calls
@@ -448,6 +448,33 @@ describe('plus mod', () => {
     expect(wiring.opened).toEqual(['plus'])
     expect(wiring.fetched[0]?.init?.socketPath).toBe('/Users/me/.claude-plus/daemon.sock')
     expect(kinds(wiring)).toEqual(['session.start'])
+  })
+
+  test('a session start says which provider it talks to and whether a key is set, never the key', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.settle()
+    expect(posted(wiring.delivered).find(event => event.kind === 'session.start')?.data?.auth).toEqual({ provider: 'anthropic', base_url: null, api_key: false })
+  })
+
+  test('a Bedrock session start names its provider', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, {}, { fullscreen: true }, { CLAUDE_CODE_USE_BEDROCK: '1' })
+    await start($)
+    await clock.settle()
+    expect(posted(wiring.delivered).find(event => event.kind === 'session.start')?.data?.auth).toEqual({ provider: 'bedrock', base_url: null, api_key: false })
+  })
+
+  test('a gateway session start sends its base url and only that a key is set', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const env = { ANTHROPIC_BASE_URL: 'https://gateway.example.com', ANTHROPIC_API_KEY: 'sk-ant-secret-1', ANTHROPIC_AUTH_TOKEN: 'secret-token-2', CLAUDE_CODE_USE_VERTEX: '0' }
+    const wiring = wire(on, {}, { fullscreen: true }, env)
+    await start($)
+    await clock.settle()
+    expect(posted(wiring.delivered).find(event => event.kind === 'session.start')?.data?.auth).toEqual({ provider: 'anthropic', base_url: 'https://gateway.example.com', api_key: true })
+    const sent = wiring.fetched.map(call => JSON.stringify(call)).join('\n')
+    expect([sent.includes('sk-ant-secret-1'), sent.includes('secret-token-2')]).toEqual([false, false])
   })
 
   test('/plus opens the pane on demand and remembers a main-screen terminal', async ($, on) => {

@@ -12,10 +12,15 @@ import {
   percent,
   spread,
   tokens,
+  whole,
   windowName,
 } from '../hooks/format'
 
 describe('format', () => {
+  test('a budget amount drops its cents only when it has none', () => {
+    expect([700, 23.1, 12_500, 1234.5, 999.999, 0.5].map(whole)).toEqual(['$700', '$23.10', '$12,500', '$1,234.50', '$1,000', '$0.50'])
+  })
+
   test('money keeps cents, flags tiny amounts and groups thousands', () => {
     expect([0, 0.004, 0.01, 4.181, 999.994, 1234.5].map(money)).toEqual([
       '$0.00',

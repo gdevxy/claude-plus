@@ -105,6 +105,14 @@ describe('daemon client', () => {
     expect(parseSnapshot('not json')).toBeNull()
   })
 
+  test('a snapshot from a daemon before accounts reads with no account and no budget', () => {
+    const { account: _account, budget: _budget, ...older } = snapshot().live
+    const parsed = parseSnapshot(JSON.stringify({ v: 1, ...snapshot(), live: older }))
+    expect([parsed?.live.account, parsed?.live.budget]).toEqual([null, null])
+    const account = { id: 'api:ab12', label: 'API key ab12', kind: 'api' as const }
+    expect(parseSnapshot(JSON.stringify({ v: 1, ...snapshot({ account }) }))?.live.account).toEqual(account)
+  })
+
   test('a forecast from a daemon before the lineup reads with no lineup', () => {
     const served = snapshot()
     const { lineup: _, ...older } = served.live.forecast!

@@ -1,6 +1,6 @@
 import type { ThemeKey, TurnUsage } from 'claude-code'
 
-import type { Daemon, DaemonStatus, LimitWindow, LiveContext, Local, ModelCost, Motion, Snapshot, Step } from '../types'
+import type { BudgetView, Daemon, DaemonStatus, LimitWindow, LiveContext, Local, ModelCost, Motion, Snapshot, Step } from '../types'
 import type { Grid } from './chart'
 import {
   approx,
@@ -8,11 +8,13 @@ import {
   countdown,
   duration,
   finePercent,
+  fit,
   modelName,
   money,
   percent,
   spread,
   tokens,
+  whole,
   windowName,
 } from './format'
 
@@ -33,7 +35,8 @@ export const CONTEXT_WARNING = 80
 export const LIMIT_WARNING = 80
 export const WHY_COLUMNS = 2
 export const DETAIL_INDENT = 8
-export const WINDOW_ORDER = ['five_hour', 'seven_day', 'spend_limit']
+export const WINDOW_ORDER = ['five_hour', 'seven_day', 'spend_limit', 'budget']
+export const LABEL_WIDTH = 5
 export const RESET_TOLERANCE_MS = 60_000
 export const PAIRS_NEEDED = 20
 
@@ -441,6 +444,8 @@ function headline(input: ScreenInput, snapshot: Snapshot | null, width: number):
   } else {
     lines.push(plain('headline', left))
   }
+  const account = snapshot?.live.account ?? null
+  if (account !== null) lines.push(prose('account', fit(account.label, width), { dim: true }))
   const unpriced = snapshot?.totals.unpriced_requests ?? 0
   if (unpriced > 0) {
     const noun = unpriced === 1 ? 'request on an unknown model is' : 'requests on unknown models are'
@@ -511,7 +516,7 @@ function cache(input: ScreenInput, snapshot: Snapshot | null, width: number): Li
     }
   } else if (live !== undefined && live.saved_usd >= 0.01) {
     const saved = `Cache hits saved you ${money(live.saved_usd)}`
-    lines.push(prose('cache-note', fitting(width, `${saved} this session`, saved), { color: 'success' }))
+    lines.push(prose('cache-note', fitting(width, `${saved} this session`, saved, `Cache saved ${money(live.saved_usd)}`), { color: 'success' }))
   }
   if (live !== undefined && live.hit_ratio !== null) {
     const hit = shown(input.motions, 'hit', live.hit_ratio * 100, input.nowMs)
@@ -531,7 +536,7 @@ function cache(input: ScreenInput, snapshot: Snapshot | null, width: number): Li
 function cacheWhy(clock: CacheClock): Line[] {
   const ttl = clock.ttlMs === HOUR_MS ? '1 hour' : '5 minutes'
   const source = clock.assumed
-    ? `No cache write has been read from the transcript yet, so the ${ttl} lifetime is assumed from your plan.`
+    ? `No cache write has been read from the transcript yet, so the ${ttl} lifetime is assumed from your account.`
     : `The last cache write in the transcript asked for a ${ttl} lifetime.`
   return [prose('explain-cache', `${source} Every request that reads or writes the cache starts the countdown again.`, { dim: true })]
 }
@@ -639,21 +644,29 @@ function session(input: ScreenInput, snapshot: Snapshot | null, width: number): 
 function limits(input: ScreenInput, snapshot: Snapshot | null, width: number): Line[] {
   const windows = limitsOf({ ...input, snapshot })
   if (windows.length === 0) return []
-  const lines: Line[] = [heading('limits', 'Plan limits', width, 'limits')]
-  const room = width - DETAIL_INDENT
-  const details = windows.map(limit => limitDetail(limit, input.nowMs))
-  const compact = details.some(detail => detail !== null && detail.long.length > room)
+  const lines: Line[] = [heading('limits', 'Limits', width, 'limits')]
+  const budget = snapshot?.live.budget ?? null
+  const details = windows.map(limit => limitDetail(limit, input.nowMs, budget))
+  const label = Math.max(LABEL_WIDTH, ...windows.map(limit => windowName(limit.window).length))
+  const indent = DETAIL_INDENT + label - LABEL_WIDTH
+  const room = width - indent
   windows.forEach((limit, index) => {
     const used = shown(input.motions, `limit:${limit.window}`, limit.used_pct, input.nowMs)
     const color: ThemeKey = used >= LIMIT_WARNING ? 'warning' : 'text'
-    lines.push(meter(`limit-${limit.window}`, `  ${windowName(limit.window).padEnd(5)}`, used / 100, percent(used).padStart(4), width, color))
+    lines.push(meter(`limit-${limit.window}`, `  ${windowName(limit.window).padEnd(label)}`, used / 100, percent(used).padStart(4), width, color))
     const detail = details[index]
-    if (detail === undefined || detail === null) return
-    lines.push({
-      key: `limit-${limit.window}-detail`,
-      segments: [{ text: (compact ? detail.short : detail.long).padEnd(room), ...(detail.warning ? { color: 'warning' } : { dim: true }) }],
-      indent: DETAIL_INDENT,
-    })
+    if (detail !== undefined && detail !== null) {
+      const level = tierFor(details.filter(other => other?.dollars === detail.dollars), room)
+      const text = detail.tiers[Math.min(level, detail.tiers.length - 1)] ?? ''
+      lines.push(indented(`limit-${limit.window}-detail`, text, indent, width, detail.warning ? { color: 'warning' } : { dim: true }))
+    }
+    if (limit.window !== 'spend_limit') return
+    if (budget === null) {
+      lines.push(prose('limit-spend_limit-hint', 'claude-plus budget set <usd> shows dollars', { dim: true }, indent))
+    } else {
+      const here = money(budget.local_usd)
+      lines.push(indented('limit-spend_limit-here', fitting(room, `Claude Code here: ${here}`, `Here: ${here}`), indent, width, { dim: true }))
+    }
   })
   const five = windows.find(limit => limit.window === 'five_hour')
   if (snapshot !== null && five !== undefined && five.calibration.pct_per_usd === null) {
@@ -665,30 +678,71 @@ function limits(input: ScreenInput, snapshot: Snapshot | null, width: number): L
       lines.push(prose('limits-learning', learning, { dim: true }), prose('limits-learning-count', count, { dim: true }))
     }
   }
-  if (input.expanded.includes('limits')) {
-    const learned = five?.calibration
-    const how =
-      learned?.pct_per_usd != null
-        ? `From ${learned.pairs} readings, 1% of your 5h window is about ${money(1 / learned.pct_per_usd)} of API-priced usage on ${familyName(learned.family)}.`
-        : `Each turn pairs the percent Claude Code reports with what it would cost on the API; ${learned?.pairs ?? 0} of ${learned?.needed ?? 20} readings so far.`
-    lines.push(prose('explain-limits', `${how} The pace projects the last 30 minutes to the reset.`, { dim: true }))
-  }
+  if (input.expanded.includes('limits')) lines.push(prose('explain-limits', limitsWhy(windows, five), { dim: true }))
   return lines
+}
+
+function indented(key: string, text: string, indent: number, width: number, style: Style): Line {
+  return { key, segments: [{ text: text.padEnd(width - indent), ...style }], indent }
+}
+
+function limitsWhy(windows: LimitWindow[], five: LimitWindow | undefined): string {
+  if (five === undefined) {
+    const counted = windows.some(limit => limit.window === 'budget')
+      ? 'The budget counts what Claude Code spent on this machine since the period started, at API prices. '
+      : ''
+    return `${counted}The pace projects the period so far to the reset.`
+  }
+  const learned = five.calibration
+  const how =
+    learned.pct_per_usd != null
+      ? `From ${learned.pairs} readings, 1% of your 5h window is about ${money(1 / learned.pct_per_usd)} of API-priced usage on ${familyName(learned.family)}.`
+      : `Each turn pairs the percent Claude Code reports with what it would cost on the API; ${learned.pairs} of ${learned.needed} readings so far.`
+  const monthly = windows.some(limit => limit.window === 'spend_limit' || limit.window === 'budget') ? ' Spend and budget paces project the month so far.' : ''
+  return `${how} The pace projects the last 30 minutes to the reset.${monthly}`
+}
+
+function tierFor(details: (Detail | null)[], room: number): number {
+  const shown = details.filter((detail): detail is Detail => detail !== null)
+  const deepest = Math.max(0, ...shown.map(detail => detail.tiers.length - 1))
+  for (let level = 0; level < deepest; level += 1) {
+    if (shown.every(detail => (detail.tiers[Math.min(level, detail.tiers.length - 1)] ?? '').length <= room)) return level
+  }
+  return deepest
 }
 
 function familyName(family: string): string {
   return family.charAt(0).toUpperCase() + family.slice(1)
 }
 
-type Detail = { long: string; short: string; warning: boolean }
+type Detail = { tiers: string[]; warning: boolean; dollars: boolean }
 
-function limitDetail(limit: LimitWindow, nowMs: number): Detail | null {
+function limitDetail(limit: LimitWindow, nowMs: number, budget: BudgetView | null): Detail | null {
   const resets = limit.resets_at_ms === null ? null : duration(Math.max(0, limit.resets_at_ms - nowMs))
   const pace = limit.pace
   const full = pace?.full_at_ms == null ? null : duration(Math.max(0, pace.full_at_ms - nowMs))
   const projected = full !== null || pace?.projected_pct == null ? null : percent(pace.projected_pct)
-  const joined = (parts: (string | null)[]) => parts.filter((part): part is string => part !== null).join(' · ')
-  const long = joined([resets && `resets in ${resets}`, full && `full in ${full} at this pace`, projected && `on pace for ${projected}`])
-  if (long === '') return null
-  return { long, short: joined([resets && `resets ${resets}`, full && `full in ${full}`, projected && `pace ${projected}`]), warning: full !== null }
+  const joined = (parts: (string | null)[]) => parts.filter((part): part is string => part !== null && part !== '').join(' · ')
+  const long = [resets && `resets in ${resets}`, full && `full in ${full} at this pace`, projected && `on pace for ${projected}`]
+  const short = [resets && `resets ${resets}`, full && `full in ${full}`, projected && `pace ${projected}`]
+  const warning = full !== null
+  const counted = budget === null ? null : spentOf(limit, budget)
+  if (counted === null) {
+    if (joined(long) === '') return null
+    const least = full === null ? (short[0] ?? short[2] ?? null) : short[1] ?? null
+    return { tiers: [joined(long), joined(short), joined([least])], warning, dollars: false }
+  }
+  const here = limit.window === 'budget' ? ' here' : ''
+  const amount = whole(counted.amount)
+  const spent = `${money(counted.spent)} of ${amount}${here}`
+  const rounded = `${counted.spent < 10 ? money(counted.spent) : whole(Math.round(counted.spent))} of ${amount}${here}`
+  const bare = [resets, full && `full in ${full}`, projected]
+  const scaled = `$${tokens(counted.spent)} of $${tokens(counted.amount)}`
+  return { tiers: [joined([spent, ...long]), joined([rounded, ...short]), joined([rounded, ...bare]), rounded, scaled], warning, dollars: true }
+}
+
+function spentOf(limit: LimitWindow, budget: BudgetView): { spent: number; amount: number } | null {
+  if (limit.window === 'budget') return { spent: budget.local_usd, amount: budget.amount_usd }
+  if (limit.window === 'spend_limit') return { spent: (budget.amount_usd * limit.used_pct) / 100, amount: budget.amount_usd }
+  return null
 }

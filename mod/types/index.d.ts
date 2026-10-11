@@ -66,12 +66,18 @@ export type LimitWindow = {
   calibration: { family: string; pairs: number; needed: number; pct_per_usd: number | null }
 }
 
+export type AccountRef = { id: string; label: string; kind: 'oauth' | 'api' | 'cloud' | 'gateway' }
+
+export type BudgetView = { amount_usd: number; local_usd: number; period_start_ms: number; resets_at_ms: number }
+
 export type Live = {
   model: string | null
   effort: string | null
   cache: Cache
   forecast: Forecast | null
   limits: LimitWindow[]
+  account: AccountRef | null
+  budget: BudgetView | null
 }
 
 export type Snapshot = {

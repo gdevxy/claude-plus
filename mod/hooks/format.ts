@@ -4,7 +4,7 @@ const DAY_MS = 86_400_000
 const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
 const FAMILIES = ['opus', 'sonnet', 'haiku', 'fable', 'mythos']
 const TOKEN_UNITS = ['k', 'M', 'B', 'T']
-const WINDOWS: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'Spend' }
+const WINDOWS: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'Spend', budget: 'Budget' }
 
 export const FULL_BLOCK = '█'
 export const TRACK = '░'
@@ -15,6 +15,13 @@ export function money(usd: number): string {
   if (usd < 0.01) return '<$0.01'
   if (usd < 1000) return `$${usd.toFixed(2)}`
   return `$${grouped(Math.round(usd))}`
+}
+
+export function whole(usd: number): string {
+  const cents = Math.round(usd * 100)
+  const rest = cents % 100
+  const dollars = `$${grouped((cents - rest) / 100)}`
+  return rest === 0 ? dollars : `${dollars}.${String(rest).padStart(2, '0')}`
 }
 
 export function approx(usd: number): string {

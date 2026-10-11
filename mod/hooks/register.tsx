@@ -537,6 +537,20 @@ async function forward($: EngineInterface, kind: string, data: { [key: string]: 
   await flush($)
 }
 
+export async function authOf($: EngineInterface): Promise<{ provider: string; base_url: string | null; api_key: boolean }> {
+  const set = (value: string | undefined) => value !== undefined && value !== '' && value !== '0'
+  const provider = set(await $.env.get('CLAUDE_CODE_USE_BEDROCK'))
+    ? 'bedrock'
+    : set(await $.env.get('CLAUDE_CODE_USE_VERTEX'))
+      ? 'vertex'
+      : set(await $.env.get('CLAUDE_CODE_USE_FOUNDRY'))
+        ? 'foundry'
+        : 'anthropic'
+  const baseUrl = await $.env.get('ANTHROPIC_BASE_URL')
+  const apiKey = set(await $.env.get('ANTHROPIC_API_KEY')) || set(await $.env.get('ANTHROPIC_AUTH_TOKEN'))
+  return { provider, base_url: baseUrl === undefined || baseUrl === '' ? null : baseUrl, api_key: apiKey }
+}
+
 function needsEnsure(status: DaemonStatus): boolean {
   return status === 'unreachable'
 }
@@ -622,7 +636,8 @@ export const register: Register = (on, options) => {
     quietly(readTheme($))
     if ((await read($, pane)).session === id) return next(e)
     await update($, pane, (): PaneState => ({ session: id, asked: false, unasked: e.isInteractive ? 'waiting' : 'settled' }))
-    quietly(forward($, 'session.start', { cwd: e.cwd, surface: e.surface, interactive: e.isInteractive }))
+    const auth = await authOf($)
+    quietly(forward($, 'session.start', { cwd: e.cwd, surface: e.surface, interactive: e.isInteractive, auth }))
     if (e.isInteractive) quietly(greet($, ensured))
     return next(e)
   })
