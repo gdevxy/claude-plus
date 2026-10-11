@@ -1,32 +1,58 @@
 name: release
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, such as 1.2.0. Leave empty for the next patch version, or for the version in Cargo.toml while it is unreleased.
+        required: false
+        default: ""
 permissions:
   contents: read
+concurrency:
+  group: release
 env:
   RUST_TOOLCHAIN: 1.99.0
   CC_x86_64_unknown_linux_musl: musl-gcc
   CC_aarch64_unknown_linux_musl: musl-gcc
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - name: Release only from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "release: run it on main, not $GITHUB_REF" >&2
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: next
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          version=$(sh packaging/next-version.sh "$REQUESTED")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version" >> "$GITHUB_STEP_SUMMARY"
   test:
+    needs: version
     strategy:
       matrix:
         os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check that the tag names the version of the crate and of the mod
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)" = "$version"
-          test "$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' mod/.claude-plugin/plugin.json)" = "$version"
+      - run: sh packaging/set-version.sh "$VERSION"
       - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
       - run: cargo test --locked
   build:
-    needs: test
+    needs: [version, test]
     strategy:
       matrix:
         include:
@@ -39,10 +65,13 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
     runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: sh packaging/set-version.sh "$VERSION"
       - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "${{ matrix.target }}" && rustup default "$RUST_TOOLCHAIN"
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
@@ -57,7 +86,7 @@ jobs:
           else
             version=$("$binary" --version)
           fi
-          test "$version" = "claude-plus ${GITHUB_REF_NAME#v}"
+          test "$version" = "claude-plus $VERSION"
       - run: sh packaging/package.sh "${{ matrix.target }}" "target/${{ matrix.target }}/release/claude-plus" dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -65,21 +94,45 @@ jobs:
           path: dist/claude-plus-${{ matrix.target }}.tar.gz
           if-no-files-found: error
   draft:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: sh packaging/set-version.sh "$VERSION"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: claude-plus-*
           path: dist
           merge-multiple: true
-      - run: sh packaging/release-assets.sh "${GITHUB_REF_NAME#v}" "$GITHUB_REPOSITORY_OWNER" dist
+      - run: sh packaging/release-assets.sh "$VERSION" "$GITHUB_REPOSITORY_OWNER" dist
+      - name: Commit the version to main and tag it, both or neither
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git diff --quiet || git commit --all --message "release: v$VERSION"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          if git fetch --quiet --depth=1 origin "refs/tags/v$VERSION:refs/tags/v$VERSION" 2>/dev/null; then
+            test "$(git rev-parse "v$VERSION^{tree}")" = "$(git rev-parse "HEAD^{tree}")" || {
+              echo "release: v$VERSION is already tagged on other files" >&2
+              exit 1
+            }
+            echo "v$VERSION was pushed by an earlier attempt of this run"
+          else
+            git tag "v$VERSION"
+            git push --atomic origin HEAD:refs/heads/main "refs/tags/v$VERSION"
+          fi
       - name: Create a draft release for a person to publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "claude-plus ${GITHUB_REF_NAME#v}" --generate-notes dist/*
+        run: gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "claude-plus $VERSION" --generate-notes dist/*

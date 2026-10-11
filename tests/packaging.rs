@@ -468,30 +468,216 @@ fn workflows_pin_every_action_to_a_commit_and_every_runner_to_an_image() {
 }
 
 #[test]
-fn the_release_only_drafts_and_the_tag_must_match_the_version() {
+fn the_release_is_started_by_hand_and_tags_main_only_once_every_build_passed() {
     let (_, release) = workflows()
         .into_iter()
         .find(|(name, _)| name == "release.yml")
         .unwrap();
-    assert!(release.contains("on:\n  push:\n    tags: [\"v*\"]\n"));
+    assert!(release.contains("on:\n  workflow_dispatch:\n"), "{release}");
+    assert!(!release.contains("  push:\n"), "{release}");
     assert!(
-        release.contains(
-            "gh release create \"$GITHUB_REF_NAME\" --repo \"$GITHUB_REPOSITORY\" --draft "
-        )
-    );
-    assert_eq!(release.matches("contents: write").count(), 1);
-    assert!(release.contains("  test:\n"), "{release}");
-    assert!(release.contains("cargo test --locked"), "{release}");
-    assert!(release.contains("    needs: test\n"), "{release}");
-    assert!(
-        release.contains("mod/.claude-plugin/plugin.json"),
+        release.contains("REQUESTED: ${{ inputs.version }}"),
         "{release}"
     );
+    assert!(release.contains("sh packaging/next-version.sh \"$REQUESTED\""));
+    assert!(release.contains("if: github.ref != 'refs/heads/main'"));
+    let version =
+        &release[release.find("  version:\n").unwrap()..release.find("  test:\n").unwrap()];
+    assert!(version.contains("fetch-depth: 0"), "{version}");
+    assert!(
+        release.contains("concurrency:\n  group: release\n"),
+        "{release}"
+    );
+    assert_eq!(
+        release.matches("persist-credentials: false").count(),
+        release.matches("uses: actions/checkout@").count()
+    );
+    assert!(!release.contains("git -c"), "{release}");
+    assert_eq!(
+        release
+            .matches("run: sh packaging/set-version.sh \"$VERSION\"")
+            .count(),
+        3
+    );
+    assert!(
+        release.contains("    needs: [version, test]\n"),
+        "{release}"
+    );
+    assert!(
+        release.contains("    needs: [version, build]\n"),
+        "{release}"
+    );
+    assert!(release.contains("cargo test --locked"), "{release}");
     assert!(release.contains("arch -x86_64"), "{release}");
+    assert!(release.contains("test \"$version\" = \"claude-plus $VERSION\""));
+    assert!(release.contains("push --atomic origin HEAD:refs/heads/main \"refs/tags/v$VERSION\""));
+    assert!(release.contains(
+        "gh release create \"v$VERSION\" --repo \"$GITHUB_REPOSITORY\" --draft --verify-tag "
+    ));
+    assert_eq!(release.matches("contents: write").count(), 1);
+    let draft = &release[release.find("  draft:\n").unwrap()..];
+    assert!(draft.contains("contents: write"), "{draft}");
+    assert!(
+        draft.find("release-assets.sh").unwrap() < draft.find("push --atomic").unwrap(),
+        "{draft}"
+    );
+    assert!(
+        draft.contains("was pushed by an earlier attempt"),
+        "{draft}"
+    );
     for target in TARGETS {
         assert!(
             release.contains(&format!("          - target: {target}\n")),
             "{target}"
+        );
+    }
+}
+
+fn crate_copy(dir: &Path) {
+    for file in ["Cargo.toml", "Cargo.lock", "mod/.claude-plugin/plugin.json"] {
+        let to = dir.join(file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(root().join(file), to).unwrap();
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = run(Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+        .args(args));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+}
+
+fn repository(version: &str) -> tempfile::TempDir {
+    let temp = scratch();
+    crate_copy(temp.path());
+    let set = run(Command::new("sh")
+        .current_dir(temp.path())
+        .arg(script("set-version.sh"))
+        .arg(version));
+    assert!(set.status.success(), "{}", text(&set.stderr));
+    git(temp.path(), &["init", "--quiet"]);
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "--quiet", "--message", "start"]);
+    temp
+}
+
+fn next_version(dir: &Path, requested: &[&str]) -> Output {
+    run(Command::new("sh")
+        .current_dir(dir)
+        .arg(script("next-version.sh"))
+        .args(requested))
+}
+
+#[test]
+fn the_next_version_is_the_unreleased_one_then_the_next_patch() {
+    let temp = repository("0.4.2");
+    let next = |requested: &[&str]| {
+        let output = next_version(temp.path(), requested);
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        text(&output.stdout)
+    };
+    assert_eq!(next(&[]), "0.4.2\n");
+    assert_eq!(next(&[""]), "0.4.2\n");
+    git(temp.path(), &["tag", "v0.4.2"]);
+    assert_eq!(next(&[]), "0.4.3\n");
+    assert_eq!(next(&["0.5.0"]), "0.5.0\n");
+    assert_eq!(next(&["v1.0.0"]), "1.0.0\n");
+    assert_eq!(next(&["0.4.10"]), "0.4.10\n");
+}
+
+#[test]
+fn the_next_version_refuses_a_released_an_older_or_a_malformed_one() {
+    let temp = repository("0.4.2");
+    git(temp.path(), &["tag", "v0.4.2"]);
+    for (requested, message) in [
+        ("0.4.2", "next-version.sh: v0.4.2 is already released\n"),
+        (
+            "0.4.1",
+            "next-version.sh: 0.4.1 is older than 0.4.2 in Cargo.toml\n",
+        ),
+        (
+            "0.3.9",
+            "next-version.sh: 0.3.9 is older than 0.4.2 in Cargo.toml\n",
+        ),
+        (
+            "1.2",
+            "next-version.sh: the requested version is not a version like 1.2.3\n",
+        ),
+        (
+            "1.2.3-rc.1",
+            "next-version.sh: the requested version is not a version like 1.2.3\n",
+        ),
+        (
+            "01.2.3",
+            "next-version.sh: the requested version is not a version like 1.2.3\n",
+        ),
+        (
+            "1.2.3\"; rm -rf /",
+            "next-version.sh: the requested version is not a version like 1.2.3\n",
+        ),
+    ] {
+        let output = next_version(temp.path(), &[requested]);
+        assert!(!output.status.success(), "{requested}");
+        assert_eq!(text(&output.stdout), "", "{requested}");
+        assert_eq!(text(&output.stderr), message, "{requested}");
+    }
+}
+
+#[test]
+fn setting_the_version_names_it_in_the_crate_its_lock_and_the_mod() {
+    let temp = scratch();
+    crate_copy(temp.path());
+    let output = run(Command::new("sh")
+        .current_dir(temp.path())
+        .arg(script("set-version.sh"))
+        .arg("12.3.45"));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    for file in ["Cargo.toml", "Cargo.lock", "mod/.claude-plugin/plugin.json"] {
+        let before = std::fs::read_to_string(root().join(file)).unwrap();
+        let after = std::fs::read_to_string(temp.path().join(file)).unwrap();
+        let changed: Vec<(&str, &str)> = before
+            .lines()
+            .zip(after.lines())
+            .filter(|(old, new)| old != new)
+            .collect();
+        assert_eq!(before.lines().count(), after.lines().count(), "{file}");
+        assert_eq!(changed.len(), 1, "{file}: {changed:?}");
+        assert!(changed[0].1.contains("\"12.3.45\""), "{file}: {changed:?}");
+    }
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    let metadata = run(Command::new(env!("CARGO")).current_dir(temp.path()).args([
+        "metadata",
+        "--locked",
+        "--offline",
+        "--format-version",
+        "1",
+    ]));
+    assert!(metadata.status.success(), "{}", text(&metadata.stderr));
+    assert!(text(&metadata.stdout).contains("\"version\":\"12.3.45\""));
+}
+
+#[test]
+fn setting_a_malformed_version_changes_nothing() {
+    let temp = scratch();
+    crate_copy(temp.path());
+    let output = run(Command::new("sh")
+        .current_dir(temp.path())
+        .arg(script("set-version.sh"))
+        .arg("1.2/3"));
+    assert!(!output.status.success());
+    assert_eq!(
+        text(&output.stderr),
+        "set-version.sh: 1.2/3 is not a version like 1.2.3\n"
+    );
+    for file in ["Cargo.toml", "Cargo.lock", "mod/.claude-plugin/plugin.json"] {
+        assert_eq!(
+            std::fs::read(root().join(file)).unwrap(),
+            std::fs::read(temp.path().join(file)).unwrap(),
+            "{file}"
         );
     }
 }

@@ -51,7 +51,13 @@ Nothing in the plan pushed, tagged or published; these steps are yours.
 
 - [x] Replace `@GITHUB_OWNER@` in `README.md` with the GitHub owner (`git grep -n @GITHUB_OWNER@` lists every place; `packaging/install.sh` and `packaging/claude-plus.rb.in` keep it, because the release fills them in).
 - [x] Push `main` to `github.com/<owner>/claude-plus`; the `ci` workflow passes on macOS and Linux, its `install` job included.
-- [ ] Push the tag `v0.1.0`; the `release` workflow builds four archives and creates a draft release with them, `SHA256SUMS`, `install.sh` and `claude-plus.rb`.
+- [ ] In GitHub, open Actions, pick `release` and press Run workflow on `main` with the version left empty.
+  It releases `0.1.0`, the version in `Cargo.toml` while no `v0.1.0` tag exists; afterwards an empty version means the next patch version, and a typed version such as `0.2.0` is released as is.
+  The workflow tests and builds four archives first, then commits the version to `main` (when it changed) and pushes it with the tag `v0.1.0`, both or neither, and creates a draft release with the archives, `SHA256SUMS`, `install.sh` and `claude-plus.rb`.
+  A run that fails before that push leaves `main` and the tags as they were.
+  If it fails after that push, for example while creating the draft, use Re-run failed jobs: the `draft` job finds the tag it pushed and goes on from there.
+  `main` must accept pushes from `github-actions[bot]`, so a branch protection rule or ruleset on `main` needs to let it through; the bot's commit starts no `ci` run.
+  Start one release at a time: a second run started before the first one finishes still sees the old version and stops with `already released`.
 - [ ] The `release` workflow ran `cargo test` before it built, and its Intel macOS job ran the binary under Rosetta.
 - [ ] Download the draft's assets and check `shasum -a 256 -c SHA256SUMS`; publish the draft.
 - [ ] Create `github.com/<owner>/homebrew-tap` and commit the draft's `claude-plus.rb` as `Formula/claude-plus.rb`.
