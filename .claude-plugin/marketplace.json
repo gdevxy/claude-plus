@@ -1,0 +1,12 @@
+{
+  "name": "claude-plus",
+  "owner": { "name": "Gabriel Dinant" },
+  "metadata": { "description": "Token, cache and cost visibility for Claude Code" },
+  "plugins": [
+    {
+      "name": "plus",
+      "source": "./mod",
+      "description": "Token usage, context, cache and cost in a pane beside the conversation"
+    }
+  ]
+}

@@ -75,6 +75,10 @@ impl Paths {
         self.data_dir.join("daemon.log")
     }
 
+    pub fn marketplace_dir(&self) -> PathBuf {
+        self.data_dir.join("marketplace")
+    }
+
     pub fn ensure_data_dir(&self) -> Result<()> {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
@@ -135,6 +139,12 @@ mod tests {
                 PathBuf::from("/home/ada/.claude-plus/daemon.log"),
             ]
         );
+    }
+
+    #[test]
+    fn the_mod_marketplace_lives_in_the_data_dir() {
+        let paths = Paths::resolve(Path::new("/home/ada"), None, Some(PathBuf::from("/plus")));
+        assert_eq!(paths.marketplace_dir(), PathBuf::from("/plus/marketplace"));
     }
 
     #[test]

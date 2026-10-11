@@ -11,6 +11,7 @@ pub mod insights;
 pub mod limits;
 pub mod paths;
 pub mod pricing;
+pub mod setup;
 pub mod store;
 pub mod timeline;
 pub mod transcript;
