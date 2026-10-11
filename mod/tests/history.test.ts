@@ -92,6 +92,39 @@ describe('history screen', () => {
     ])
   })
 
+  test('draws the day at 40 columns with an hour per bar and a drawn hit chart', () => {
+    const lines = historyScreen(input({ range: '24h' }))
+    expect(trimmed(painted(lines, 40)).slice(0, 26)).toEqual([
+      ' Last 24 hours                   $15.97',
+      ' 9 sessions · 160 requests',
+      '',
+      ' Cost by hour                peak $0.90',
+      '                     █      █',
+      '                     █     ██     █',
+      '                   █ █    ███    ██',
+      '                  ██ █    ███   ███',
+      '                 ███ █  █ ███  ████   █',
+      '                ████ █ ██ ███  ████  ██',
+      '               12:00                now',
+      '   █ Opus 5.5                    $13.60',
+      '   █ Sonnet 5.5                   $2.30',
+      '   █ Haiku 4.5                    $0.07',
+      '',
+      ' Cache hit ratio                  91% ?',
+      '                 ▂▄  ▂    ▄      ▂▄  ▂▄',
+      '                ▇██▄ █ ▄▇ █▄▇  ▄▇██  ██',
+      '   Saved by cache hits           $21.40',
+      '   Rebuilds                  2 · ~$0.61',
+      '',
+      ' 5h limit, highest                  85%',
+      '',
+      '',
+      '                ▁▁▁▁ ▂ ▁▁ ▁▂▂  ▁▁▁▂  ▁▁',
+      '',
+    ])
+    expect(new Set(line(lines, 'hist-hit-chart').chart?.cells.flat().map(cell => cell.fg))).toEqual(new Set([null, 'success']))
+  })
+
   test('the stacked bars are colored by model rank and the scale has no color of its own', () => {
     const lines = historyScreen(input())
     const chart = line(lines, 'hist-spend-chart').chart

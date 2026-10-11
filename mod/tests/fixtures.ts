@@ -329,7 +329,7 @@ export function dayReport(): HistoryReport {
     const at = new Date(start + index * HOUR_MS)
     const label = `${String((at.getUTCHours() + 2) % 24).padStart(2, '0')}:00`
     const usd = index % 5 === 0 ? 0 : (index % 7) * 0.15
-    return bucket(start + index * HOUR_MS, label, usd === 0 ? [] : [[OPUS, usd]], 0.9, usd === 0 ? null : usd * 10)
+    return bucket(start + index * HOUR_MS, label, usd === 0 ? [] : [[OPUS, usd]], 0.78 + (index % 4) * 0.05, usd === 0 ? null : usd * 10)
   })
   return historyReport({ range: '24h' as HistoryRange, bucket: 'hour', since_ms: start, until_ms: start + 24 * HOUR_MS, buckets })
 }

@@ -1121,6 +1121,58 @@ describe('plus mod', () => {
     })
   }
 
+  test('the History tab draws the last 24 hours mounted as the screen lays them out', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on)
+    await start($)
+    await $.session.measure(MEASURE)
+    await clock.advance(1000)
+    const ui = await mount($, 60)
+    await ui.press({ key: 'tab-history' })
+    for (const _ of [0, 1, 2]) await ui.press({ key: 'range' })
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'range' }))?.props.label).toBe('24 hours')
+    expect((await ui.find({ key: 'hist-hit-chart' }))?.type).toBe('Raster')
+    const rows = paintTree(await ui.drawn(), 60)
+    const screen = historyScreen({ width: 60, range: '24h', metric: 'cost', reports: { '24h': dayReport() }, failures: {}, context: { ...contextReport(), session: 's1' }, local: local(), daemon: { status: 'ok', detail: null }, expanded: [] })
+    expect(trimmed(rows.slice(4))).toEqual(trimmed(painted(screen, 60)))
+    expect(rows.some(row => row.includes('▇'))).toBe(true)
+    await ui.unmount()
+  })
+
+  test('a range chosen while a report is on its way is fetched as soon as that one lands', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { historyLag: () => clock.sleep(2000) })
+    wiring.histories['30d'] = historyReport({ range: '30d' })
+    const asked = () => wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url.split('=')[1])
+    await start($)
+    const ui = await mount($, 40)
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(500)
+    await ui.press({ key: 'range' })
+    await clock.advance(1000)
+    expect(asked()).toEqual(['7d'])
+    for (let step = 0; step < 40; step += 1) await clock.advance(100)
+    expect(asked()).toEqual(['7d', '30d'])
+    expect((await ui.find({ key: 'hist-head' }))?.text.startsWith('Last 30 days')).toBe(true)
+    expect((await ui.find({ key: 'hist-spend-chart' }))?.type).toBe('Raster')
+  })
+
+  test('a hidden pane asks for no History report until it is shown again', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    const asked = () => wiring.fetched.filter(call => call.url.includes('/history')).length
+    await start($)
+    const ui = await mount($, 40)
+    wiring.placed = false
+    await ui.press({ key: 'tab-history' })
+    await clock.advance(90_000)
+    expect(asked()).toBe(0)
+    wiring.placed = true
+    await clock.advance(1000)
+    expect(asked()).toBe(1)
+  })
+
   test('r cycles the range and fetches it at once, g cycles what the bars count', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)
