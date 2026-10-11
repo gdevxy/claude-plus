@@ -168,6 +168,9 @@ pub(crate) fn read_text(path: &Path) -> Option<Text> {
 }
 
 pub(crate) fn read_text_up_to(path: &Path, limit: u64) -> Option<Text> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let file = open_without_blocking(path).ok()?;
     let metadata = file.metadata().ok()?;
     if !metadata.is_file() {
@@ -413,6 +416,37 @@ mod tests {
             .unwrap();
         assert!(made.success());
         assert!(read_text(&fifo).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_never_opened_by_the_scan() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let home = Home::new();
+        let fifo = home.path("CLAUDE.md");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let writer_opened = std::sync::Arc::new(AtomicBool::new(false));
+        let writer = std::thread::spawn({
+            let (fifo, writer_opened) = (fifo.clone(), writer_opened.clone());
+            move || {
+                let file = std::fs::OpenOptions::new().write(true).open(fifo);
+                writer_opened.store(true, Ordering::SeqCst);
+                drop(file);
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(read_text(&fifo).is_none());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let blocked = !writer_opened.load(Ordering::SeqCst);
+        drop(open_without_blocking(&fifo));
+        writer.join().unwrap();
+        assert!(blocked, "the scan opened the fifo");
     }
 
     #[test]
