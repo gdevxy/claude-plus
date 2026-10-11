@@ -6,6 +6,8 @@ use std::path::Path;
 use bundle::{MARKETPLACE, PLUGIN_ID};
 use claude::{Marketplace, Plugin, Step, same_path};
 
+use crate::daemon::control::is_older;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Found {
     pub marketplaces: Vec<Marketplace>,
@@ -36,7 +38,7 @@ pub fn install_steps(found: &Found, dir: &Path, version: &str) -> Vec<Step> {
     match found.plugin() {
         None => steps.push(Step::Install),
         Some(plugin) => {
-            if plugin.version != version {
+            if is_older(&plugin.version, version) {
                 steps.push(Step::Update {
                     from: plugin.version.clone(),
                 });
@@ -122,6 +124,16 @@ mod tests {
                 Step::Enable
             ]
         );
+    }
+
+    #[test]
+    fn a_newer_installed_mod_is_never_updated_down() {
+        let dir = PathBuf::from("/home/ada/.claude-plus/marketplace");
+        let found = Found {
+            marketplaces: vec![ours(&dir)],
+            plugins: vec![plus("999.0.0", false)],
+        };
+        assert_eq!(install_steps(&found, &dir, "0.1.0"), [Step::Enable]);
     }
 
     #[test]

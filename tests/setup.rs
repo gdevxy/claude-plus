@@ -426,3 +426,34 @@ fn purge_keeps_files_claude_plus_did_not_write() {
     left.sort();
     assert_eq!(left, [".claude-plus-data", "notes.txt"]);
 }
+
+#[test]
+fn an_older_binary_keeps_a_newer_installed_mod() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    let manifest = marketplace(&env).join("mod/.claude-plugin/plugin.json");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        text.replace(
+            &format!("\"version\": \"{VERSION}\""),
+            "\"version\": \"999.0.0\"",
+        ),
+    )
+    .unwrap();
+    std::fs::write(env.claude_state().join("plugin"), "999.0.0").unwrap();
+    let before = env.claude_calls().len();
+    cmd(&env, &["install"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(format!(
+            "✻ Kept the plus mod v999.0.0, newer than this claude-plus v{VERSION}\n"
+        )));
+    assert_eq!(env.claude_calls()[before..], listing_calls());
+    assert!(
+        std::fs::read_to_string(&manifest)
+            .unwrap()
+            .contains("\"version\": \"999.0.0\"")
+    );
+}

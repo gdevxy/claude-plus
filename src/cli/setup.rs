@@ -27,15 +27,24 @@ pub fn install(paths: &Paths, yes: bool) -> Result<()> {
     }
     let dir = paths.marketplace_dir();
     let found = found(&claude)?;
-    let steps = install_steps(&found, &dir, bundle::VERSION);
+    let newer = newer_installed(&dir, &found);
+    let target = newer.as_deref().unwrap_or(bundle::VERSION);
+    let steps = install_steps(&found, &dir, target);
     confirm_settings(paths, "install", &steps, &[], yes)?;
     paths.ensure_data_dir()?;
-    bundle::write(&dir)?;
+    if newer.is_none() {
+        bundle::write(&dir)?;
+    }
     for step in &steps {
         let outcome = claude.run(step)?;
-        println!("{}", installed(step, &found, &outcome));
+        println!("{}", installed(step, &found, &outcome, target));
     }
-    if steps
+    if let Some(newer) = &newer {
+        println!(
+            "✻ Kept the plus mod v{newer}, newer than this claude-plus v{}",
+            bundle::VERSION
+        );
+    } else if steps
         .iter()
         .all(|step| matches!(step, Step::AddMarketplace(_)))
     {
@@ -90,6 +99,17 @@ pub fn uninstall(paths: &Paths, purge: bool, yes: bool) -> Result<()> {
         "✻ claude-plus is uninstalled · close open Claude Code sessions, or their pane starts the daemon again"
     );
     Ok(())
+}
+
+fn newer_installed(dir: &Path, found: &Found) -> Option<String> {
+    [
+        bundle::version_in(dir),
+        found.plugin().map(|plugin| plugin.version.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|installed| is_older(bundle::VERSION, installed))
+    .reduce(|a, b| if is_older(&a, &b) { b } else { a })
 }
 
 fn found(claude: &ClaudeCode) -> Result<Found> {
@@ -150,7 +170,7 @@ pub fn confirm(
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-fn installed(step: &Step, found: &Found, outcome: &Outcome) -> String {
+fn installed(step: &Step, found: &Found, outcome: &Outcome, version: &str) -> String {
     match step {
         Step::AddMarketplace(dir) => match found.marketplace() {
             Some(previous) => format!(
@@ -160,13 +180,8 @@ fn installed(step: &Step, found: &Found, outcome: &Outcome) -> String {
             ),
             None => format!("✻ Added the claude-plus marketplace · {}", dir.display()),
         },
-        Step::Install => format!("✻ Installed the plus mod v{}", bundle::VERSION),
-        Step::Update { from } => {
-            format!(
-                "✻ Updated the plus mod from v{from} to v{}",
-                bundle::VERSION
-            )
-        }
+        Step::Install => format!("✻ Installed the plus mod v{version}"),
+        Step::Update { from } => format!("✻ Updated the plus mod from v{from} to v{version}"),
         Step::Enable => "✻ Enabled the plus mod".into(),
         Step::Uninstall | Step::RemoveMarketplace => said(outcome),
     }
