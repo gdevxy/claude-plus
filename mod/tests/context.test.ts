@@ -216,6 +216,17 @@ describe('context screen', () => {
     ])
   })
 
+  test('names a plugin MCP tool by its server, without the plugin prefix', () => {
+    const report = contextReport()
+    const results = [
+      { tool: 'mcp__plugin_atlassian_atlassian__search', ts_ms: NOW_MS, chars: 3_000, images: 0, tokens: 1_000 },
+      { tool: 'mcp__plugin_paddle_paddle-docs__find', ts_ms: NOW_MS, chars: 1_500, images: 0, tokens: 500 },
+    ]
+    const lines = contextScreen(input({ report: { ...report, tool_results: results } }))
+    expect(text(line(lines, 'ctx-result-0'))).toBe(`  atlassian search${' '.repeat(38 - 21)}~1k`)
+    expect(text(line(lines, 'ctx-result-1'))).toBe(`  paddle-docs find${' '.repeat(38 - 22)}~500`)
+  })
+
   test('colors categories with Claude Code theme keys and falls back to text', () => {
     expect(themeColor('permission')).toBe('permission')
     expect(themeColor('purple_FOR_SUBAGENTS_ONLY')).toBe('text')

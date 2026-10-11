@@ -311,5 +311,7 @@ function itemLabel(item: ContextItem): string {
 function toolName(tool: string | null): string {
   if (tool === null) return 'A tool'
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
-  return mcp === null ? tool : `${mcp[1]} ${mcp[2]}`
+  if (mcp === null) return tool
+  const server = /^plugin_[^_]+_(.+)$/.exec(mcp[1]!)?.[1] ?? mcp[1]
+  return `${server} ${mcp[2]}`
 }
