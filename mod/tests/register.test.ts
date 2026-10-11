@@ -28,6 +28,7 @@ type Wiring = {
   opened: string[]
   closed: string[]
   statuses: (string | undefined)[]
+  placed: boolean
 }
 
 const MEASURE = {
@@ -128,7 +129,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }): Wiring {
-  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), usages: [], serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], ...overrides }
+  const wiring: Wiring = { session: 's1', served: snapshot(), report: contextReport(), usages: [], serving: 'current', lag: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], opened: [], closed: [], statuses: [], placed: true, ...overrides }
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -144,6 +145,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
     wiring.opened.push(e.id)
     return { value: { isPlaced: true } }
   })
+  on('ui.panes', () => ({ value: wiring.placed ? [{ id: 'plus', title: 'claude-plus', isShown: true, isFocused: false, isPlaced: true }] : [] }))
   on('ui.close', ($, e) => {
     wiring.closed.push(e.id)
     return { value: undefined }
@@ -829,6 +831,42 @@ describe('plus mod', () => {
     await $.turn.complete({ turnId: 'a1', agentId: 'agent-1', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
     await clock.advance(2 * MINUTE_MS)
     expect(wiring.usages.length).toBe(3)
+  })
+
+  test('a pane that is not shown asks for no breakdown and polls no context report', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    const ui = await mount($, 60)
+    await ui.press({ key: 'tab-context' })
+    await clock.advance(1000)
+    expect(wiring.usages.length).toBe(1)
+    await ui.unmount()
+    wiring.placed = false
+    const polled = () => wiring.fetched.filter(call => call.url.includes('/context')).length
+    const before = polled()
+    for (const turnId of ['t1', 't2', 't3']) {
+      await $.turn.complete({ turnId, reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+      await clock.advance(5 * MINUTE_MS)
+    }
+    expect(wiring.usages.length).toBe(1)
+    expect(polled()).toBe(before)
+    wiring.placed = true
+    await clock.advance(1000)
+    expect(wiring.usages.length).toBe(2)
+    expect(polled()).toBeGreaterThan(before)
+  })
+
+  test('the Live view stops its background breakdowns while the pane is not shown', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { placed: false })
+    await start($)
+    await $.turn.complete({ turnId: 't1', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+    await clock.advance(11 * MINUTE_MS)
+    expect(wiring.usages.length).toBe(0)
+    wiring.placed = true
+    await clock.advance(1000)
+    expect(wiring.usages.length).toBe(1)
   })
 
   test('the Context view keeps the breakdown from Claude Code while the daemon is down', async ($, on) => {

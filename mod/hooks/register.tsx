@@ -144,15 +144,24 @@ async function tick($: EngineInterface): Promise<void> {
     if (runtime.outbox.size > 0) await flush($)
     if (at - runtime.polledAtMs >= POLL_MS) await poll($)
     const shownView = await read($, view)
-    const usageGap = shownView === 'context' ? USAGE_GAP_MS : USAGE_IDLE_GAP_MS
-    if (runtime.usageDue && !runtime.usageRunning && at - runtime.usageAtMs >= usageGap) quietly(collectUsage($))
-    if (shownView === 'context' && at - runtime.contextPolledAtMs >= CONTEXT_POLL_MS) await pollContext($)
+    const usageWanted = runtime.usageDue && !runtime.usageRunning
+    const contextWanted = shownView === 'context' && at - runtime.contextPolledAtMs >= CONTEXT_POLL_MS
+    if ((usageWanted || contextWanted) && (await paneShown($))) {
+      const usageGap = shownView === 'context' ? USAGE_GAP_MS : USAGE_IDLE_GAP_MS
+      if (usageWanted && at - runtime.usageAtMs >= usageGap) quietly(collectUsage($))
+      if (contextWanted) await pollContext($)
+    }
     if (needsEnsure((await read($, daemon)).status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($))
   } catch {
     return
   } finally {
     arm($, await delayToNextTick($))
   }
+}
+
+async function paneShown($: EngineInterface): Promise<boolean> {
+  const panes = await $.ui.panes().catch(() => [])
+  return panes.some(pane => pane.id === PANE_ID && pane.isPlaced && pane.isShown)
 }
 
 async function settle($: EngineInterface): Promise<void> {
