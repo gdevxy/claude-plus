@@ -281,8 +281,9 @@ export function limitsOf(sources: Sources): LimitWindow[] {
     }
   })
   const newer = (fresh: LimitWindow, window: LimitWindow) => fresh.window === window.window && fresh.sampled_at_ms > window.sampled_at_ms
+  const spendLimited = [...kept, ...measured].some(window => window.window === 'spend_limit')
   const windows = [
-    ...kept.filter(window => !measured.some(fresh => newer(fresh, window))),
+    ...kept.filter(window => !(spendLimited && window.window === 'budget') && !measured.some(fresh => newer(fresh, window))),
     ...measured.filter(fresh => kept.every(window => window.window !== fresh.window || newer(fresh, window))),
   ]
   return windows.sort((a, b) => windowRank(a.window) - windowRank(b.window) || a.window.localeCompare(b.window))
@@ -743,13 +744,14 @@ type Detail = { tiers: string[]; warning: boolean; dollars: boolean }
 
 function limitDetail(limit: LimitWindow, nowMs: number, budget: BudgetView | null): Detail | null {
   const resets = limit.resets_at_ms === null ? null : duration(Math.max(0, limit.resets_at_ms - nowMs))
-  const pace = limit.pace
+  const usedUp = limit.used_pct >= 100
+  const pace = usedUp ? null : limit.pace
   const full = pace?.full_at_ms == null ? null : duration(Math.max(0, pace.full_at_ms - nowMs))
   const projected = full !== null || pace?.projected_pct == null ? null : percent(pace.projected_pct)
   const joined = (parts: (string | null)[]) => parts.filter((part): part is string => part !== null && part !== '').join(' · ')
   const long = [resets && `resets in ${resets}`, full && `full in ${full} at this pace`, projected && `on pace for ${projected}`]
   const short = [resets && `resets ${resets}`, full && `full in ${full}`, projected && `pace ${projected}`]
-  const warning = full !== null
+  const warning = full !== null || usedUp
   const counted = budget === null ? null : spentOf(limit, budget)
   if (counted === null) {
     if (joined(long) === '') return null
@@ -757,12 +759,23 @@ function limitDetail(limit: LimitWindow, nowMs: number, budget: BudgetView | nul
     return { tiers: [joined(long), joined(short), joined([least])], warning, dollars: false }
   }
   const here = limit.window === 'budget' ? ' here' : ''
+  const dollars = (usd: number) => (usd < 10 ? money(usd) : whole(Math.round(usd)))
+  const over = counted.spent - counted.amount
+  if (over >= 0.01) {
+    const amount = `${dollars(over)} over${here}`
+    const tail = here === '' ? [] : [`$${tokens(over)} over${here}`]
+    return {
+      tiers: [joined([amount, long[0] ?? null]), joined([amount, short[0] ?? null]), joined([amount, resets]), amount, ...tail, `$${tokens(over)} over`],
+      warning,
+      dollars: true,
+    }
+  }
   const amount = whole(counted.amount)
   const spent = `${money(counted.spent)} of ${amount}${here}`
-  const rounded = `${counted.spent < 10 ? money(counted.spent) : whole(Math.round(counted.spent))} of ${amount}${here}`
+  const rounded = `${dollars(counted.spent)} of ${amount}${here}`
   const bare = [resets, full && `full in ${full}`, projected]
-  const scaled = `$${tokens(counted.spent)} of $${tokens(counted.amount)}`
-  return { tiers: [joined([spent, ...long]), joined([rounded, ...short]), joined([rounded, ...bare]), rounded, scaled], warning, dollars: true }
+  const scaled = here === '' ? [`$${tokens(counted.spent)} of $${tokens(counted.amount)}`] : [`${dollars(counted.spent)}/${amount} here`, `$${tokens(counted.spent)}/$${tokens(counted.amount)} here`, `$${tokens(counted.spent)}/$${tokens(counted.amount)}`]
+  return { tiers: [joined([spent, ...long]), joined([rounded, ...short]), joined([rounded, ...bare]), rounded, ...scaled], warning, dollars: true }
 }
 
 function spentOf(limit: LimitWindow, budget: BudgetView): { spent: number; amount: number } | null {

@@ -16,6 +16,7 @@ import {
   insightsPath,
   fetchSnapshot,
   measureOf,
+  originOf,
   parseContext,
   parseHistory,
   parseInsights,
@@ -214,9 +215,10 @@ describe('daemon client', () => {
   })
 
   test('a history report from a daemon before accounts reads as all accounts with none listed', () => {
-    const { account: _account, accounts: _accounts, ...older } = historyReport()
+    const { account: _account, accounts: _accounts, unknown: _unknown, ...older } = historyReport()
     const parsed = parseHistory(JSON.stringify({ v: 1, ...older }))
-    expect([parsed?.account, parsed?.accounts]).toEqual([null, []])
+    expect([parsed?.account, parsed?.accounts, parsed?.unknown]).toEqual([null, [], false])
+    expect(parseHistory(JSON.stringify({ v: 1, ...historyReport(), unknown: true }))?.unknown).toBe(true)
     const listed = parseHistory(JSON.stringify({ v: 1, ...historyReport(), account: 'oauth:me', accounts: [{ id: 'oauth:me', label: 'Me · Max', kind: 'oauth' }] }))
     expect([listed?.account, listed?.accounts.length]).toEqual(['oauth:me', 1])
   })
@@ -331,5 +333,26 @@ describe('daemon client', () => {
     })
     expect(data!.slashCommands).toBeNull()
     expect(JSON.parse(JSON.stringify(data))).toEqual(data)
+  })
+})
+
+describe('gateway origin', () => {
+  test('keeps only the scheme, host and port of a base url', () => {
+    expect(originOf('https://gateway.example.com')).toBe('https://gateway.example.com')
+    expect(originOf(' HTTPS://bob:t0ken@LLM.Corp.example:8443/v1?key=k#f ')).toBe('https://llm.corp.example:8443')
+    expect(originOf('http://localhost:4000/anthropic')).toBe('http://localhost:4000')
+    expect(originOf('llm.corp:8080/v1')).toBe('llm.corp:8080')
+    expect(originOf('https://token@gw.example?x=1')).toBe('https://gw.example')
+  })
+
+  test('treats an empty value and the Anthropic API itself as no gateway', () => {
+    expect(originOf(undefined)).toBe(null)
+    expect(originOf('')).toBe(null)
+    expect(originOf('   ')).toBe(null)
+    expect(originOf('https://')).toBe(null)
+    expect(originOf('https://api.anthropic.com')).toBe(null)
+    expect(originOf('https://API.anthropic.com:443/v1/')).toBe(null)
+    expect(originOf('api.anthropic.com')).toBe(null)
+    expect(originOf('https://api.anthropic.com.corp.example')).toBe('https://api.anthropic.com.corp.example')
   })
 })

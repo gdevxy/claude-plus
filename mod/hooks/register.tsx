@@ -4,7 +4,7 @@ import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 
 import type { AccountRef, Alerted, Chart, ContextReport, Daemon, DaemonStatus, Failures, HistoryFailure, HistoryRange, InsightsFailure, InsightsReport, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
 import { ALERT_TOAST_MS, CHIME, EMPTY_ALERTED, alertsOf, merged, ownAlerts, wantsThreshold } from './alerts'
-import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchInsights, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
+import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchInsights, fetchSnapshot, measureOf, originOf, send, socketPath, usageData } from './client'
 import { contextScreen } from './context'
 import { money } from './format'
 import { accountChoices, accountLabel, historyScreen, metricChoices, metricLabel, nextAccount, nextMetric, nextRange, rangeChoices, rangeLabel, resolvedAccount, shownMetric } from './history'
@@ -59,13 +59,13 @@ export const RECAP_TOAST_MS = 8000
 const view = atom({ plugin: 'plus', key: 'view' } as const, 'live' as PlusView)
 const snapshot = atom({ plugin: 'plus', key: 'snapshot' } as const, null as Snapshot | null, { shape: 'snapshot-1' })
 const context = atom({ plugin: 'plus', key: 'context' } as const, null as ContextReport | null, { shape: 'context-1' })
-const history = atom({ plugin: 'plus', key: 'history' } as const, {} as Reports, { shape: 'history-2' })
+const history = atom({ plugin: 'plus', key: 'history' } as const, {} as Reports, { shape: 'history-3' })
 const failures = atom({ plugin: 'plus', key: 'failures' } as const, {} as Failures)
 const chart = atom({ plugin: 'plus', key: 'chart' } as const, { range: '7d', metric: 'cost' } as Chart)
 const accounts = atom({ plugin: 'plus', key: 'accounts' } as const, [] as AccountRef[])
 const insights = atom({ plugin: 'plus', key: 'insights' } as const, null as InsightsReport | null, { shape: 'insights-1' })
 const insightsFailure = atom({ plugin: 'plus', key: 'insightsFailure' } as const, null as InsightsFailure | null)
-const alerted = atom({ plugin: 'plus', key: 'alerted' } as const, EMPTY_ALERTED as Alerted, { shape: 'alerted-3' })
+const alerted = atom({ plugin: 'plus', key: 'alerted' } as const, EMPTY_ALERTED as Alerted, { shape: 'alerted-4' })
 const theme = atom({ plugin: 'plus', key: 'theme' } as const, 'auto')
 const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-2' })
 const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false, unasked: 'settled' } as PaneState)
@@ -582,9 +582,9 @@ export async function authOf($: EngineInterface): Promise<{ provider: string; ba
       : set(await $.env.get('CLAUDE_CODE_USE_FOUNDRY'))
         ? 'foundry'
         : 'anthropic'
-  const baseUrl = await $.env.get('ANTHROPIC_BASE_URL')
+  const baseUrl = originOf(await $.env.get('ANTHROPIC_BASE_URL'))
   const apiKey = set(await $.env.get('ANTHROPIC_API_KEY')) || set(await $.env.get('ANTHROPIC_AUTH_TOKEN'))
-  return { provider, base_url: baseUrl === undefined || baseUrl === '' ? null : baseUrl, api_key: apiKey }
+  return { provider, base_url: baseUrl, api_key: apiKey }
 }
 
 function needsEnsure(status: DaemonStatus): boolean {

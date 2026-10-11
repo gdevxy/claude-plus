@@ -328,6 +328,7 @@ export function historyReport(overrides: Partial<HistoryReport> = {}): HistoryRe
     ],
     account: null,
     accounts: [],
+    unknown: false,
     ...overrides,
   }
 }

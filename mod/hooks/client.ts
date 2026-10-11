@@ -153,7 +153,22 @@ export function parseHistory(text: string): HistoryReport | null {
   if (!lists.every(Array.isArray) || !isObject(value.calibration)) return null
   if (typeof value.account !== 'string') value.account = null
   if (!Array.isArray(value.accounts)) value.accounts = []
+  if (typeof value.unknown !== 'boolean') value.unknown = false
   return value as unknown as HistoryReport
+}
+
+const ANTHROPIC_API_HOST = 'api.anthropic.com'
+
+export function originOf(baseUrl: string | undefined): string | null {
+  const trimmed = (baseUrl ?? '').trim()
+  const split = trimmed.indexOf('://')
+  const scheme = split < 0 ? null : trimmed.slice(0, split).toLowerCase()
+  const rest = split < 0 ? trimmed : trimmed.slice(split + 3)
+  const authority = (rest.split(/[/?#]/)[0] ?? '').toLowerCase()
+  const hostPort = authority.slice(authority.lastIndexOf('@') + 1).replace(/:$/, '')
+  const host = hostPort.replace(/:\d*$/, '')
+  if (host === '' || host === ANTHROPIC_API_HOST) return null
+  return scheme === null ? hostPort : `${scheme}://${hostPort}`
 }
 
 export function insightsPath(session: string): string {

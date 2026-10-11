@@ -8,7 +8,7 @@ export const CONTEXT_ASK_PCT = 60
 export const ALERT_TOAST_MS = 8000
 export const CHIME = 'sounds/chime.wav'
 
-export const EMPTY_ALERTED: Alerted = { session: null, model: null, cacheFor: null, paceFor: null, spendFor: null, spendHighFor: null, contextFired: false, threshold: null, thresholdAsked: false }
+export const EMPTY_ALERTED: Alerted = { session: null, model: null, cacheFor: null, paceFor: null, spendFor: {}, spendHighFor: {}, contextFired: false, threshold: null, thresholdAsked: false }
 
 export type Alert = { kind: 'cache' | 'pace' | 'spend' | 'context'; text: string }
 
@@ -54,7 +54,7 @@ export function alertsOf(input: AlertInput): { alerts: Alert[]; next: Alerted } 
   const five = limitsOf({ ...input, snapshot }).find(limit => limit.window === 'five_hour')
   const full = five?.pace?.full_at_ms ?? null
   const resets = five?.resets_at_ms ?? null
-  if (full !== null && resets !== null && full < resets && (known.paceFor === null || Math.abs(known.paceFor - resets) > RESET_TOLERANCE_MS)) {
+  if (five !== undefined && five.used_pct < 100 && full !== null && resets !== null && full < resets && (known.paceFor === null || Math.abs(known.paceFor - resets) > RESET_TOLERANCE_MS)) {
     const left = duration(Math.max(0, full - input.nowMs))
     alerts.push({ kind: 'pace', text: `At this pace the 5h limit runs out in ${left}, before its reset in ${duration(resets - input.nowMs)}` })
     next.paceFor = resets
@@ -62,15 +62,19 @@ export function alertsOf(input: AlertInput): { alerts: Alert[]; next: Alerted } 
   const spend = limitsOf({ ...input, snapshot }).find(limit => limit.window === 'spend_limit' || limit.window === 'budget')
   const spendResets = spend?.resets_at_ms ?? null
   const spendFull = spend?.pace?.full_at_ms ?? null
-  const unseen = (seen: number | null) => spendResets !== null && (seen === null || Math.abs(seen - spendResets) > RESET_TOLERANCE_MS)
+  const account = snapshot?.live.account?.id ?? ''
+  const unseen = (seen: Readonly<Record<string, number>>) => {
+    const last = seen[account]
+    return spendResets !== null && (last === undefined || Math.abs(last - spendResets) > RESET_TOLERANCE_MS)
+  }
   const name = spend?.window === 'budget' ? 'budget' : 'spend limit'
-  if (spendFull !== null && spendResets !== null && spendFull < spendResets && unseen(known.spendFor)) {
+  if (spend !== undefined && spend.used_pct < 100 && spendFull !== null && spendResets !== null && spendFull < spendResets && unseen(known.spendFor)) {
     alerts.push({ kind: 'spend', text: `At this pace the ${name} runs out in ${duration(Math.max(0, spendFull - input.nowMs))}, before its reset in ${duration(spendResets - input.nowMs)}` })
-    next.spendFor = spendResets
+    next.spendFor = { ...known.spendFor, [account]: spendResets }
   }
   if (spend !== undefined && spendResets !== null && spend.used_pct >= SPEND_HIGH_PCT && unseen(known.spendHighFor)) {
     alerts.push({ kind: 'spend', text: `${percent(spend.used_pct)} of the ${name} is used, it resets in ${duration(spendResets - input.nowMs)}` })
-    next.spendHighFor = spendResets
+    next.spendHighFor = { ...known.spendHighFor, [account]: spendResets }
   }
   const used = input.local.measure?.contextTokens ?? null
   const threshold = thresholdOf(input.local, known)

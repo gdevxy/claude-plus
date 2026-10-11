@@ -14,6 +14,7 @@ import {
   ensureError,
   ensureOutcome,
   heartbeat,
+  limitsOf,
   nextTickDelay,
   retarget,
   screen,
@@ -771,7 +772,7 @@ describe('accounts and budgets', () => {
     expect(text(meter)).toContain('104%')
     expect(text(meter)).not.toContain('░')
     expect(meter.segments[1]?.color).toBe('warning')
-    expect(text(line(lines, 'limit-spend_limit-detail')).trim().startsWith('$728.00 of $700')).toBe(true)
+    expect(text(line(lines, 'limit-spend_limit-detail')).trim()).toBe('$28 over · resets in 20d 15h')
   })
 
   test('draws a budget window as this machine only and aligns its label', () => {
@@ -780,7 +781,44 @@ describe('accounts and budgets', () => {
     expect(text(line(lines, 'limit-budget-detail')).trim()).toBe('$23.10 of $700 here · resets in 20d 15h · on pace for 31%')
     expect(lines.some(candidate => candidate.key === 'limit-budget-here' || candidate.key === 'limits-learning')).toBe(false)
     const narrow = (width: number) => text(line(screen(input({ width, local: alone, snapshot: snapshot({ budget, limits: [own()] }) })), 'limit-budget-detail')).trim()
-    expect([narrow(60), narrow(40), narrow(26)]).toEqual(['$23 of $700 here · resets 20d 15h · pace 31%', '$23 of $700 here', '$23 of $700'])
+    expect([narrow(60), narrow(40), narrow(26)]).toEqual(['$23 of $700 here · resets 20d 15h · pace 31%', '$23 of $700 here', '$23/$700 here'])
+  })
+
+  test('a budget keeps saying here at the narrowest pane', () => {
+    const narrow = (local_usd: number, amount_usd: number) =>
+      text(line(screen(input({ width: 26, local: alone, snapshot: snapshot({ budget: { ...budget, local_usd, amount_usd }, limits: [own()] }) })), 'limit-budget-detail')).trim()
+    expect(narrow(23.1, 700)).toBe('$23/$700 here')
+    expect(narrow(1_234.5, 12_500)).toBe('$1.2k/$12.5k')
+  })
+
+  const usedUp = (used: number) => ({ ...spend(used), pace: { pct_per_hour: 0.4, projected_pct: 150, full_at_ms: null } })
+
+  test('a spend limit past its amount says how much over instead of a pace', () => {
+    const detail = (width: number) => line(screen(input({ width, snapshot: snapshot({ account: enterprise, budget, limits: [usedUp(104)] }) })), 'limit-spend_limit-detail')
+    expect([100, 60, 40, 26].map(width => text(detail(width)).trim())).toEqual(['$28 over · resets in 20d 15h', '$28 over · resets in 20d 15h', '$28 over · resets in 20d 15h', '$28 over'])
+    expect(detail(60).segments[0]?.color).toBe('warning')
+    const atAmount = text(line(screen(input({ width: 60, snapshot: snapshot({ account: enterprise, budget, limits: [usedUp(100)] }) })), 'limit-spend_limit-detail')).trim()
+    expect(atAmount).toBe('$700.00 of $700 · resets in 20d 15h')
+  })
+
+  test('a used up window without dollars shows only its reset', () => {
+    const lines = screen(input({ width: 60, snapshot: snapshot({ account: enterprise, limits: [usedUp(104)] }) }))
+    expect(text(line(lines, 'limit-spend_limit-detail')).trim()).toBe('resets in 20d 15h')
+  })
+
+  test('a budget past its amount says how much over here', () => {
+    const over = { ...own(), used_pct: 104, pace: { pct_per_hour: 0.4, projected_pct: 150, full_at_ms: null } }
+    const detail = (width: number) => text(line(screen(input({ width, local: alone, snapshot: snapshot({ budget: { ...budget, local_usd: 728 }, limits: [over] }) })), 'limit-budget-detail')).trim()
+    expect([detail(60), detail(26)]).toEqual(['$28 over here · resets in 20d 15h', '$28 over here'])
+  })
+
+  test('a measured spend limit replaces the daemon budget window', () => {
+    const measured = local({ measure: { ...local().measure!, rateLimits: [{ kind: 'spend_limit', percentUsed: 5, resetsAtMs: budget.resets_at_ms }] } })
+    const windows = limitsOf({ nowMs: NOW_MS, daemon: OK, snapshot: snapshot({ budget, limits: [own()] }), local: measured })
+    expect(windows.map(window => window.window)).toEqual(['spend_limit'])
+    const kept = limitsOf({ nowMs: NOW_MS, daemon: OK, snapshot: snapshot({ budget, limits: [own(), spend(4)] }), local: alone })
+    expect(kept.map(window => window.window)).toEqual(['spend_limit'])
+    expect(limitsOf({ nowMs: NOW_MS, daemon: OK, snapshot: snapshot({ budget, limits: [own()] }), local: alone }).map(window => window.window)).toEqual(['budget'])
   })
 
   test('pads every meter label to the longest window shown', () => {
@@ -810,6 +848,8 @@ describe('accounts and budgets', () => {
     'a spend limit without a budget': { snapshot: snapshot({ account: enterprise, limits: [...snapshot().live.limits, spend(4)] }) },
     'an exceeded spend limit': { local: alone, snapshot: snapshot({ account: enterprise, budget: { ...budget, amount_usd: 12_500, local_usd: 1_234.5 }, limits: [spend(104)] }) },
     'a budget': { local: alone, snapshot: snapshot({ account: enterprise, budget, limits: [own()] }), expanded: ['limits'] },
+    'a used up spend limit': { local: alone, snapshot: snapshot({ account: enterprise, budget, limits: [usedUp(104)] }) },
+    'a used up budget': { local: alone, snapshot: snapshot({ account: enterprise, budget: { ...budget, amount_usd: 12_500, local_usd: 13_734.5 }, limits: [{ ...own(), used_pct: 110 }] }) },
   }
 
   for (const width of [26, 40, 60, 100, 144]) {

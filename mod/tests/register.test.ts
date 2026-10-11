@@ -481,6 +481,25 @@ describe('plus mod', () => {
     expect([sent.includes('sk-ant-secret-1'), sent.includes('secret-token-2')]).toEqual([false, false])
   })
 
+  test('a gateway base url is sent as its origin only, without credentials, path or query', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const env = { ANTHROPIC_BASE_URL: 'HTTPS://alice:pa55word@Gateway.Example.com:8443/v1/proxy?key=query-secret#frag' }
+    const wiring = wire(on, {}, { fullscreen: true }, env)
+    await start($)
+    await clock.settle()
+    expect(posted(wiring.delivered).find(event => event.kind === 'session.start')?.data?.auth).toEqual({ provider: 'anthropic', base_url: 'https://gateway.example.com:8443', api_key: false })
+    const sent = wiring.fetched.map(call => JSON.stringify(call)).join('\n')
+    expect(['pa55word', 'alice', 'query-secret', '/v1/proxy'].filter(secret => sent.includes(secret))).toEqual([])
+  })
+
+  test('the Anthropic API as a base url is no gateway', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, {}, { fullscreen: true }, { ANTHROPIC_BASE_URL: 'https://api.anthropic.com/v1', ANTHROPIC_API_KEY: 'sk-ant-secret-1' })
+    await start($)
+    await clock.settle()
+    expect(posted(wiring.delivered).find(event => event.kind === 'session.start')?.data?.auth).toEqual({ provider: 'anthropic', base_url: null, api_key: true })
+  })
+
   test('/plus opens the pane on demand and remembers a main-screen terminal', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)

@@ -101,11 +101,12 @@ export function nextAccount(chart: Chart, listing: Listing | null, snapshot: Sna
 }
 
 export function accountChoices(chart: Chart, listing: Listing | null, snapshot: Snapshot | null): Choice[] {
-  if ((listing?.accounts.length ?? 0) < 2) return []
+  const order = cycle(listing, snapshot)
+  if (order.length < 2) return []
   const label = (id: string) =>
     id === ALL ? 'All' : id === CURRENT ? (snapshot?.live.account?.label ?? 'Current') : (listing?.accounts.find(account => account.id === id)?.label ?? id)
   const active = chart.account ?? CURRENT
-  return cycle(listing, snapshot).map(id => ({ text: label(id), isActive: id === active }))
+  return order.map(id => ({ text: label(id), isActive: id === active }))
 }
 
 export function accountLabel(chart: Chart, listing: Listing | null, snapshot: Snapshot | null): string {
@@ -148,6 +149,10 @@ function titleOf(input: HistoryInput, room: number): string {
   return fitting(room, `${title}${SEPARATOR}${accountLabel(chart, listing, input.snapshot)}`, title)
 }
 
+function unknownHint(report: HistoryReport): Line[] {
+  return report.account !== null && report.unknown ? [prose('hist-unknown', 'Spend with no account shows under All', { dim: true })] : []
+}
+
 function headline(input: HistoryInput, report: HistoryReport | null, metric: Metric, width: number): Line[] {
   const title = titleOf(input, width)
   const failure = input.failures[input.range]
@@ -158,7 +163,7 @@ function headline(input: HistoryInput, report: HistoryReport | null, metric: Met
   }
   const { totals } = report
   if (totals.requests === 0 && totals.reconciled_usd === 0) {
-    return [plain('hist-head', title, { bold: true }), prose('hist-empty', `No requests in the last ${rangeLabel(input.range)} yet ✻`, { dim: true })]
+    return [plain('hist-head', title, { bold: true }), prose('hist-empty', `No requests in the last ${rangeLabel(input.range)} yet ✻`, { dim: true }), ...unknownHint(report)]
   }
   const value = amount(valueOf(totals, metric), metric)
   const why = metric === 'pct' ? 'hist-pct' : undefined
@@ -169,6 +174,7 @@ function headline(input: HistoryInput, report: HistoryReport | null, metric: Met
   const requests = `${count(totals.requests)} ${totals.requests === 1 ? 'request' : 'requests'}`
   lines.push(plain('hist-sub', fitting(width, `${sessions} · ${requests}`, sessions), { dim: true }))
   if (failure !== undefined) lines.push(prose('hist-stale', `Could not refresh: ${failure.reason}`, { dim: true }))
+  lines.push(...unknownHint(report))
   if (totals.unpriced > 0) {
     const noun = totals.unpriced === 1 ? 'request on an unknown model is' : 'requests on unknown models are'
     lines.push(prose('hist-unpriced', fitting(width, `${count(totals.unpriced)} ${noun} not priced`, `${count(totals.unpriced)} unpriced`), { dim: true }))

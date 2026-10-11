@@ -332,13 +332,37 @@ describe('accounts', () => {
     expect(nextAccount(chart('all'), shown, snapshot({ account: null }))).toBe('oauth:me')
   })
 
-  test('offers the control only with two accounts or more', () => {
-    expect(accountChoices({ range: '7d', metric: 'cost' }, { ...shown, accounts: [accounts[1]!] }, current)).toEqual([])
-    expect(accountChoices({ range: '7d', metric: 'cost' }, null, current)).toEqual([])
+  test('offers the control whenever there is more than one thing to show', () => {
+    expect(accountChoices({ range: '7d', metric: 'cost' }, { accounts: [] }, snapshot({ account: null }))).toEqual([])
+    expect(accountChoices({ range: '7d', metric: 'cost' }, null, snapshot({ account: null }))).toEqual([])
+    expect(accountChoices({ range: '7d', metric: 'cost' }, null, current).map(c => c.text)).toEqual(['Acme · Enterprise', 'All'])
     expect(accountChoices({ range: '7d', metric: 'cost' }, shown, current).map(c => c.text)).toEqual(['Acme · Enterprise', 'Me · Max', 'All'])
     expect(accountChoices({ range: '7d', metric: 'cost', account: 'oauth:me' }, shown, current).filter(c => c.isActive).map(c => c.text)).toEqual(['Me · Max'])
     expect(accountLabel({ range: '7d', metric: 'cost', account: 'all' }, shown, current)).toBe('All')
     expect(accountLabel({ range: '7d', metric: 'cost' }, shown, current)).toBe('Acme · Enterprise')
+  })
+
+  test('one account with spend from before accounts offers itself and All', () => {
+    const report = { ...shown, accounts: [accounts[1]!], unknown: true }
+    expect(accountChoices({ range: '7d', metric: 'cost' }, report, current).map(c => c.text)).toEqual(['Acme · Enterprise', 'All'])
+    expect(nextAccount({ range: '7d', metric: 'cost' }, report, current)).toBe('all')
+    expect(nextAccount({ range: '7d', metric: 'cost', account: 'all' }, report, current)).toBe('current')
+  })
+
+  test('a day where the other account spent nothing still offers All', () => {
+    const day = { ...dayReport(), account: 'oauth:work', accounts: [accounts[1]!] }
+    expect(accountChoices({ range: '24h', metric: 'cost' }, day, current).map(c => c.text)).toEqual(['Acme · Enterprise', 'All'])
+  })
+
+  test('says that spend without an account shows under All, only when one account is shown', () => {
+    const hinted = (report: HistoryReport, width = 60) => historyScreen(input({ width, snapshot: current, accounts: [accounts[1]!], reports: { '7d': report } }))
+    const hint = (lines: Line[]) => lines.filter(found => found.key === 'hist-unknown').map(text)
+    expect(hint(hinted({ ...shown, unknown: true }))).toEqual(['Spend with no account shows under All'])
+    expect(hint(hinted({ ...shown, unknown: false }))).toEqual([])
+    expect(hint(hinted({ ...shown, account: null, unknown: true }))).toEqual([])
+    const empty = { ...shown, unknown: true, totals: { ...shown.totals, requests: 0, reconciled_usd: 0 } }
+    expect(hint(hinted(empty)).length).toBe(1)
+    for (const width of [26, 144]) expect(overflows(hinted({ ...shown, unknown: true }, width), width)).toEqual([])
   })
 
   test('the title names the account shown when there is a choice, and drops it before cutting a word', () => {
@@ -346,7 +370,7 @@ describe('accounts', () => {
     expect(titled(60)).toBe(`Last 7 days · Acme · Enterprise${' '.repeat(21)}$15.97`)
     expect(titled(60, 'all')).toBe(`Last 7 days · All${' '.repeat(35)}$15.97`)
     expect(titled(26)).toBe('Last 7 days       $15.97')
-    expect(text(line(historyScreen(input({ width: 60, snapshot: current })), 'hist-head'))).toBe(`Last 7 days${' '.repeat(41)}$15.97`)
+    expect(text(line(historyScreen(input({ width: 60, snapshot: snapshot({ account: null }) })), 'hist-head'))).toBe(`Last 7 days${' '.repeat(41)}$15.97`)
     const loading = (width: number) => text(line(historyScreen(input({ width, snapshot: current, accounts, reports: {} })), 'hist-head'))
     expect(loading(60)).toBe('Last 7 days · Acme · Enterprise')
     expect(loading(26)).toBe('Last 7 days')

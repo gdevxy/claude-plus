@@ -142,15 +142,42 @@ describe('alerts', () => {
     expect(alertsOf({ ...base, snapshot: snapshot({ limits: [spendWindow(89)] }) }).alerts).toEqual([])
   })
 
+  test('a used up spend limit gets the high toast and no pace toast', () => {
+    const base = { nowMs: NOW_MS, local: local(), daemon: OK, known: EMPTY_ALERTED }
+    const usedUp = snapshot({ limits: [{ ...spendWindow(104), pace: { pct_per_hour: 0.4, projected_pct: 150, full_at_ms: null } }] })
+    expect(alertsOf({ ...base, snapshot: usedUp }).alerts.map(a => a.text)).toEqual(['104% of the spend limit is used, it resets in 20d 15h'])
+    const olderDaemon = snapshot({ limits: [{ ...spendWindow(104), pace: { pct_per_hour: 0.4, projected_pct: 150, full_at_ms: NOW_MS } }] })
+    expect(alertsOf({ ...base, snapshot: olderDaemon }).alerts.map(a => a.kind)).toEqual(['spend'])
+    expect(alertsOf({ ...base, snapshot: olderDaemon }).alerts[0]?.text.startsWith('104%')).toBe(true)
+  })
+
+  test('a full 5h window gets no pace toast', () => {
+    const full = pacing(0, 2 * 60 * MINUTE_MS)
+    const five = { ...(full.live.limits[0] as LimitWindow), used_pct: 100 }
+    const alone = local({ measure: { ...local().measure!, rateLimits: [] } })
+    expect(alertsOf(input({ local: alone, snapshot: snapshot({ limits: [five] }) })).alerts).toEqual([])
+  })
+
+  test('one account spending its limit does not mute the toast of another', () => {
+    const base = { nowMs: NOW_MS, local: local(), daemon: OK, known: EMPTY_ALERTED }
+    const of = (id: string) => snapshot({ account: { id, label: id, kind: 'oauth' }, limits: [spendWindow(91)] })
+    const work = alertsOf({ ...base, snapshot: of('oauth:work') })
+    expect(work.alerts.map(a => a.kind)).toEqual(['spend'])
+    const me = alertsOf({ ...base, snapshot: of('oauth:me'), known: work.next })
+    expect(me.alerts.map(a => a.kind)).toEqual(['spend'])
+    expect(alertsOf({ ...base, snapshot: of('oauth:work'), known: me.next }).alerts).toEqual([])
+    expect(alertsOf({ ...base, snapshot: of('oauth:me'), known: me.next }).alerts).toEqual([])
+  })
+
   test('a new session keeps the spend alerts of the period and forgets the rest', () => {
-    const before: Alerted = { ...EMPTY_ALERTED, session: 's0', cacheFor: 1, paceFor: 2, spendFor: PERIOD_END_MS, spendHighFor: PERIOD_END_MS }
-    expect(ownAlerts(before, 's1')).toEqual({ ...EMPTY_ALERTED, session: 's1', spendFor: PERIOD_END_MS, spendHighFor: PERIOD_END_MS })
+    const before: Alerted = { ...EMPTY_ALERTED, session: 's0', cacheFor: 1, paceFor: 2, spendFor: { '': PERIOD_END_MS }, spendHighFor: { '': PERIOD_END_MS } }
+    expect(ownAlerts(before, 's1')).toEqual({ ...EMPTY_ALERTED, session: 's1', spendFor: { '': PERIOD_END_MS }, spendHighFor: { '': PERIOD_END_MS } })
     const known = { ...before, session: 's0' }
     expect(alertsOf(input({ snapshot: snapshot({ limits: [spendWindow(91)] }), known })).alerts).toEqual([])
   })
 
   test('a new session starts with nothing alerted', () => {
-    const before: Alerted = { session: 's0', model: null, cacheFor: 1, paceFor: 2, spendFor: null, spendHighFor: null, contextFired: true, threshold: 3, thresholdAsked: true }
+    const before: Alerted = { session: 's0', model: null, cacheFor: 1, paceFor: 2, spendFor: {}, spendHighFor: {}, contextFired: true, threshold: 3, thresholdAsked: true }
     expect(ownAlerts(before, 's1')).toEqual({ ...EMPTY_ALERTED, session: 's1' })
     expect(ownAlerts(before, 's0')).toBe(before)
     expect(alertsOf(input({ snapshot: expiring(59_000), known: { ...before, cacheFor: NOW_MS + 59_000 } })).alerts.map(alert => alert.kind)).toEqual(['cache'])

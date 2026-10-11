@@ -242,6 +242,7 @@ export type HistoryReport = {
   sessions: SessionSpend[]
   account: string | null
   accounts: AccountRef[]
+  unknown: boolean
 }
 
 export type Reports = Partial<Record<HistoryRange, HistoryReport>>
@@ -298,8 +299,8 @@ export type Alerted = {
   model: string | null
   cacheFor: number | null
   paceFor: number | null
-  spendFor: number | null
-  spendHighFor: number | null
+  spendFor: Record<string, number>
+  spendHighFor: Record<string, number>
   contextFired: boolean
   threshold: number | null
   thresholdAsked: boolean
