@@ -137,6 +137,96 @@ fn the_installer_refuses_a_download_that_does_not_match_its_checksum() {
 }
 
 #[test]
+fn a_truncated_installer_fails_and_changes_nothing() {
+    let temp = scratch();
+    let dist = release(temp.path(), "ada");
+    let full = std::fs::read_to_string(dist.join("install.sh")).unwrap();
+    let guard = full.find("trap ").expect("the installer sets a guard first");
+    let body_starts = guard + full[guard..].find('\n').unwrap() + 1;
+    let mut cuts: Vec<usize> = full[body_starts..]
+        .match_indices('\n')
+        .map(|(at, _)| body_starts + at + 1)
+        .filter(|&at| at < full.len())
+        .collect();
+    cuts.extend(cuts.clone().iter().map(|at| at - 3));
+    cuts.push(full.len() - 3);
+    let url = format!("file://{}", dist.display());
+    for cut in cuts {
+        let run_dir = temp.path().join(format!("cut-{cut}"));
+        let (home, tmp) = (run_dir.join("home"), run_dir.join("tmp"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let truncated = run_dir.join("install.sh");
+        std::fs::write(&truncated, &full[..cut]).unwrap();
+        let output = install(
+            &truncated,
+            &home,
+            &[("CLAUDE_PLUS_DOWNLOAD_URL", &url), ("TMPDIR", tmp.to_str().unwrap())],
+        );
+        assert!(
+            !output.status.success(),
+            "cut at {cut} exited 0 after {:?}",
+            &full[cut.saturating_sub(40)..cut]
+        );
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0, "cut at {cut}");
+        assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0, "cut at {cut}");
+    }
+    assert_eq!(full.lines().last(), Some("main \"$@\""));
+}
+
+#[test]
+fn the_installer_names_a_directory_it_cannot_write_to() {
+    let temp = scratch();
+    let dist = release(temp.path(), "ada");
+    std::fs::write(temp.path().join("file"), "").unwrap();
+    let dir = temp.path().join("file/bin");
+    let url = format!("file://{}", dist.display());
+    let output = install(
+        &dist.join("install.sh"),
+        temp.path(),
+        &[
+            ("CLAUDE_PLUS_DOWNLOAD_URL", &url),
+            ("CLAUDE_PLUS_INSTALL_DIR", dir.to_str().unwrap()),
+        ],
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "claude-plus install.sh: cannot write to {}; set CLAUDE_PLUS_INSTALL_DIR to a directory you can write to\n",
+            dir.display()
+        )
+    );
+}
+
+#[test]
+fn the_installer_takes_a_version_with_or_without_its_v() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = scratch();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("curl"), "#!/bin/sh\nexit 22\n").unwrap();
+    std::fs::set_permissions(bin.join("curl"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    for version in ["v0.1.0", "0.1.0"] {
+        let output = run(Command::new("sh")
+            .arg(script("install.sh"))
+            .env_clear()
+            .env("HOME", temp.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("CLAUDE_PLUS_GITHUB_OWNER", "ada")
+            .env("CLAUDE_PLUS_VERSION", version));
+        assert!(!output.status.success());
+        assert!(
+            text(&output.stderr).contains(
+                "could not download https://github.com/ada/claude-plus/releases/download/v0.1.0/claude-plus-"
+            ),
+            "{}",
+            text(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn the_installer_in_the_repository_asks_for_a_github_owner() {
     let temp = scratch();
     let output = install(&script("install.sh"), temp.path(), &[]);

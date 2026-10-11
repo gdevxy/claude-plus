@@ -1,8 +1,10 @@
 #!/bin/sh
 set -eu
+trap 'printf "claude-plus install.sh: the script ended before its last line, so nothing was installed; download it again\n" >&2; exit 1' EXIT
 
 github_owner="${CLAUDE_PLUS_GITHUB_OWNER:-@GITHUB_OWNER@}"
 version="${CLAUDE_PLUS_VERSION:-latest}"
+version="${version#v}"
 install_dir="${CLAUDE_PLUS_INSTALL_DIR:-$HOME/.local/bin}"
 
 say() {
@@ -64,33 +66,43 @@ sha256() {
   fi
 }
 
-command -v curl >/dev/null 2>&1 || fail "curl is needed to download claude-plus"
-target=$(detect_target)
-base=$(download_base)
-archive="claude-plus-$target.tar.gz"
-scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT INT TERM
+main() {
+  trap - EXIT
+  command -v curl >/dev/null 2>&1 || fail "curl is needed to download claude-plus"
+  target=$(detect_target)
+  base=$(download_base)
+  archive="claude-plus-$target.tar.gz"
+  scratch=$(mktemp -d)
+  trap 'rm -rf "$scratch"' EXIT
+  trap 'rm -rf "$scratch"; exit 130' INT
+  trap 'rm -rf "$scratch"; exit 143' TERM
 
-curl --fail --silent --show-error --location --retry 3 -o "$scratch/$archive" "$base/$archive" ||
-  fail "could not download $base/$archive"
-curl --fail --silent --show-error --location --retry 3 -o "$scratch/SHA256SUMS" "$base/SHA256SUMS" ||
-  fail "could not download $base/SHA256SUMS"
-expected=$(awk -v name="$archive" '$2 == name || $2 == "*" name { print $1 }' "$scratch/SHA256SUMS")
-[ -n "$expected" ] || fail "SHA256SUMS has no line for $archive"
-[ "$(sha256 "$scratch/$archive")" = "$expected" ] ||
-  fail "$archive does not match its SHA256SUMS line, so nothing was installed"
+  curl --fail --silent --show-error --location --retry 3 -o "$scratch/$archive" "$base/$archive" ||
+    fail "could not download $base/$archive"
+  curl --fail --silent --show-error --location --retry 3 -o "$scratch/SHA256SUMS" "$base/SHA256SUMS" ||
+    fail "could not download $base/SHA256SUMS"
+  expected=$(awk -v name="$archive" '$2 == name || $2 == "*" name { print $1 }' "$scratch/SHA256SUMS")
+  [ -n "$expected" ] || fail "SHA256SUMS has no line for $archive"
+  [ "$(sha256 "$scratch/$archive")" = "$expected" ] ||
+    fail "$archive does not match its SHA256SUMS line, so nothing was installed"
 
-mkdir -p "$scratch/unpacked"
-tar -xzf "$scratch/$archive" -C "$scratch/unpacked"
-[ -f "$scratch/unpacked/claude-plus" ] || fail "$archive holds no claude-plus binary"
-mkdir -p "$install_dir"
-cp "$scratch/unpacked/claude-plus" "$install_dir/.claude-plus.new"
-chmod 755 "$install_dir/.claude-plus.new"
-mv -f "$install_dir/.claude-plus.new" "$install_dir/claude-plus"
+  mkdir -p "$scratch/unpacked"
+  tar -xzf "$scratch/$archive" -C "$scratch/unpacked"
+  [ -f "$scratch/unpacked/claude-plus" ] || fail "$archive holds no claude-plus binary"
+  installed=$("$scratch/unpacked/claude-plus" --version) ||
+    fail "the claude-plus in $archive does not run on this machine, so nothing was installed"
+  { mkdir -p "$install_dir" && [ -w "$install_dir" ]; } 2>/dev/null ||
+    fail "cannot write to $install_dir; set CLAUDE_PLUS_INSTALL_DIR to a directory you can write to"
+  cp "$scratch/unpacked/claude-plus" "$install_dir/.claude-plus.new"
+  chmod 755 "$install_dir/.claude-plus.new"
+  mv -f "$install_dir/.claude-plus.new" "$install_dir/claude-plus"
 
-say "✻ Installed $("$install_dir/claude-plus" --version) to $install_dir/claude-plus"
-case ":$PATH:" in
-  *":$install_dir:"*) ;;
-  *) say "  $install_dir is not on PATH; add it, for example with: export PATH=\"$install_dir:\$PATH\"" ;;
-esac
-say "✻ Next, run claude-plus install to add the pane to Claude Code"
+  say "✻ Installed $installed to $install_dir/claude-plus"
+  case ":$PATH:" in
+    *":$install_dir:"*) ;;
+    *) say "  $install_dir is not on PATH; add it, for example with: export PATH=\"$install_dir:\$PATH\"" ;;
+  esac
+  say "✻ Next, run claude-plus install to add the pane to Claude Code"
+}
+
+main "$@"
