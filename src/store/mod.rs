@@ -47,6 +47,20 @@ pub struct Busy;
 pub struct PreRelease;
 
 #[derive(Debug, thiserror::Error)]
+#[error("not a claude-plus database")]
+pub struct NotOurs;
+
+pub const APPLICATION_ID: i32 = 0x436c_2b70;
+const HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+
+pub fn is_claude_plus_database(file: &mut impl std::io::Read) -> bool {
+    let mut header = [0u8; 72];
+    file.read_exact(&mut header).is_ok()
+        && &header[..16] == HEADER_MAGIC
+        && i32::from_be_bytes([header[68], header[69], header[70], header[71]]) == APPLICATION_ID
+}
+
+#[derive(Debug, thiserror::Error)]
 #[error("schema migration step {step} (v{version}) failed: {message}")]
 pub struct MigrationFailed {
     step: usize,
@@ -134,6 +148,7 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
+        check_owner(&conn, Stamp::Yes)?;
         use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::migrated(conn)
@@ -146,6 +161,7 @@ impl Store {
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
             conn.busy_timeout(READ_BUSY_TIMEOUT)?;
+            check_owner(&conn, Stamp::No)?;
             let store = Self { conn };
             store.refuse_unsupported_schema()?;
             Ok(store)
@@ -398,7 +414,59 @@ fn migration_failed(version: usize, error: rusqlite::Error) -> anyhow::Error {
     .into()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stamp {
+    Yes,
+    No,
+}
+
+fn check_owner(conn: &Connection, stamp: Stamp) -> Result<()> {
+    let id: i32 = conn
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(friendly)?;
+    if id == APPLICATION_ID {
+        return Ok(());
+    }
+    let objects = schema_objects(conn).map_err(friendly)?;
+    if id != 0 || !objects.is_subset(schema::known_objects()) {
+        return Err(NotOurs.into());
+    }
+    let version = user_version(conn)?;
+    if schema::PRE_RELEASE_VERSIONS.contains(&version) || version > Store::latest_schema_version() {
+        return Ok(());
+    }
+    if objects.is_empty() != (version == 0) {
+        return Err(NotOurs.into());
+    }
+    let legacy = version > 0;
+    if stamp == Stamp::Yes {
+        conn.pragma_update(None, "application_id", APPLICATION_ID)
+            .map_err(friendly)?;
+        if legacy {
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .map_err(friendly)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn schema_objects(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view', 'trigger') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
+    )?
+    .query_map([], |row| row.get(0))?
+    .collect()
+}
+
 fn opening_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
+    if error.is::<NotOurs>() {
+        return anyhow::anyhow!(
+            "{} is not a claude-plus database, so claude-plus leaves it alone; move it away, or set CLAUDE_PLUS_HOME to a directory of its own",
+            path.display()
+        );
+    }
     if error.is::<PreRelease>() {
         return anyhow::anyhow!(
             "database at {} was created by a pre-release claude-plus; delete it and run claude-plus import",
@@ -1286,6 +1354,64 @@ mod tests {
     }
 
     #[test]
+    fn a_new_store_carries_the_claude_plus_application_id_in_its_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        drop(Store::open(&path).unwrap());
+        assert!(is_claude_plus_database(
+            &mut std::fs::File::open(&path).unwrap()
+        ));
+        assert!(!is_claude_plus_database(&mut &b"SQLite format 3\0"[..]));
+        let other = temp.path().join("other.db");
+        Connection::open(&other)
+            .unwrap()
+            .execute_batch("CREATE TABLE notes (x)")
+            .unwrap();
+        assert!(!is_claude_plus_database(
+            &mut std::fs::File::open(&other).unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_store_from_before_the_application_id_is_adopted() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        drop(Store::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "application_id", 0).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        drop(conn);
+        assert!(!is_claude_plus_database(
+            &mut std::fs::File::open(&path).unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        assert!(is_claude_plus_database(
+            &mut std::fs::File::open(&path).unwrap()
+        ));
+        drop(store);
+    }
+
+    #[test]
+    fn a_foreign_database_with_claude_plus_tables_and_its_own_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        drop(Store::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "application_id", 0).unwrap();
+        conn.execute_batch("CREATE TABLE notes (x)").unwrap();
+        drop(conn);
+        let error = Store::open(&path).err().expect("must refuse").to_string();
+        assert!(error.contains("is not a claude-plus database"), "{error}");
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "application_id", 7)
+            .unwrap();
+        let error = Store::open(&path).err().expect("must refuse").to_string();
+        assert!(error.contains("is not a claude-plus database"), "{error}");
+    }
+
+    #[test]
     fn newer_schema_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("data.db");
@@ -1316,8 +1442,17 @@ mod tests {
             .unwrap()
             .execute_batch("CREATE TABLE unrelated (x)")
             .unwrap();
-        let store = Store::open_read_only(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 0);
+        let error = Store::open_read_only(&path).err().expect("must refuse");
+        assert!(
+            error.to_string().ends_with("is not a claude-plus database, so claude-plus leaves it alone; move it away, or set CLAUDE_PLUS_HOME to a directory of its own"),
+            "{error}"
+        );
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 0);
+        assert_eq!(
+            schema_objects(&conn).unwrap(),
+            std::collections::BTreeSet::from(["unrelated".to_string()])
+        );
     }
 
     #[test]
