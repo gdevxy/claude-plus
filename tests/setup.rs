@@ -648,17 +648,17 @@ fn a_data_dir_from_before_the_marker_is_adopted_when_the_daemon_starts() {
 fn a_data_dir_swapped_for_a_symlink_while_purge_asks_is_refused() {
     use std::io::{Read, Write};
     let env = env();
-    let _daemon = Daemon(&env);
-    cmd(&env, &["install", "--yes"]).assert().success();
+    for plus in [&env.plus, &env.claude.parent().unwrap().join("victim")] {
+        cmd(&env, &["daemon", "--ensure"])
+            .env("CLAUDE_PLUS_HOME", plus)
+            .assert()
+            .success();
+        cmd(&env, &["daemon", "stop"])
+            .env("CLAUDE_PLUS_HOME", plus)
+            .assert()
+            .success();
+    }
     let victim = env.claude.parent().unwrap().join("victim");
-    cmd(&env, &["daemon", "--ensure"])
-        .env("CLAUDE_PLUS_HOME", &victim)
-        .assert()
-        .success();
-    cmd(&env, &["daemon", "stop"])
-        .env("CLAUDE_PLUS_HOME", &victim)
-        .assert()
-        .success();
     let before = names_in(&victim);
     let mut child = common::process(&env, &["uninstall", "--purge"])
         .stdin(std::process::Stdio::piped())
