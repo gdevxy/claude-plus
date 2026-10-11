@@ -92,6 +92,7 @@ pub struct AttachmentRecord {
     pub kind: String,
     pub chars: u64,
     pub names: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +133,7 @@ pub(crate) const ATTACHMENT_METADATA_KEYS: &[&str] = &[
     "names",
     "addedNames",
     "removedNames",
+    "readdedNames",
     "name",
     "path",
     "filePath",
@@ -298,6 +300,7 @@ fn attachment(raw: &Value) -> AttachmentRecord {
     let body = raw.get("attachment").cloned().unwrap_or(Value::Null);
     let mut names = strings(&body, "/names");
     names.extend(strings(&body, "/addedNames"));
+    names.extend(strings(&body, "/readdedNames"));
     names.extend(field_of_each(&body, "/files", "/path"));
     names.extend(field_of_each(&body, "/entries", "/name"));
     if let Some(path) = text(&body, "/path") {
@@ -308,6 +311,7 @@ fn attachment(raw: &Value) -> AttachmentRecord {
         kind: text(&body, "/type").unwrap_or_else(|| "unknown".to_string()),
         chars: string_chars_except(&body, ATTACHMENT_METADATA_KEYS),
         names,
+        removed: strings(&body, "/removedNames"),
     }
 }
 

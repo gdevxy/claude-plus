@@ -183,6 +183,14 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(a.chars, "does a".len() as u64 + "body".len() as u64);
+        assert!(a.removed.is_empty());
+
+        let reconnect = r#"{"type":"attachment","attachment":{"type":"deferred_tools_delta","addedNames":["mcp__a__x"],"readdedNames":["mcp__b__y"],"removedNames":["mcp__c__z"]}}"#;
+        let Record::Attachment(a) = parse_line(reconnect).unwrap().record else {
+            panic!()
+        };
+        assert_eq!(a.names, ["mcp__a__x", "mcp__b__y"]);
+        assert_eq!(a.removed, ["mcp__c__z"]);
     }
 
     #[test]

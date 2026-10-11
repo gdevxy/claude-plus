@@ -86,6 +86,7 @@ fn store() -> Store {
             kind: kind.into(),
             chars,
             names: vec![],
+            removed: vec![],
         })
         .unwrap();
     }

@@ -184,6 +184,7 @@ mod tests {
             user_with_tool_results(),
             prompt(),
             attachment(),
+            serde_json::json!({"type":"attachment","sessionId":"s1","attachment":{"type":"deferred_tools_delta","addedNames":["mcp__a__x"],"readdedNames":["mcp__b__y"],"removedNames":["mcp__c__z"],"addedLines":[SECRET]}}),
             system(),
             last_prompt(),
         ];
@@ -283,7 +284,7 @@ mod tests {
             crate::transcript::TokenCounts,
         ),
         User(Vec<crate::transcript::ToolResult>, u64, bool),
-        Attachment(String, u64, Vec<String>),
+        Attachment(String, u64, Vec<String>, Vec<String>),
         Other(String),
     }
 
@@ -291,7 +292,7 @@ mod tests {
         match parse_value(value).unwrap().record {
             Record::Assistant(a) => Derived::Assistant(a.tool_uses, a.usage),
             Record::User(u) => Derived::User(u.tool_results, u.text_chars, u.is_prompt),
-            Record::Attachment(a) => Derived::Attachment(a.kind, a.chars, a.names),
+            Record::Attachment(a) => Derived::Attachment(a.kind, a.chars, a.names, a.removed),
             other => Derived::Other(other.kind().to_string()),
         }
     }

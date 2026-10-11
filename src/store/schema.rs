@@ -174,6 +174,10 @@ CREATE INDEX prompts_by_ts ON prompts(ts);
 CREATE INDEX tool_results_by_ts ON tool_results(ts, chars);
 INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM requests);
 "#,
+    r#"
+ALTER TABLE attachments ADD COLUMN removed_names TEXT NOT NULL DEFAULT '[]';
+INSERT OR REPLACE INTO meta (key, value) SELECT 'reindex_pending', '1' WHERE EXISTS (SELECT 1 FROM attachments);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {

@@ -460,6 +460,7 @@ pub fn derive(
                 kind: a.kind.clone(),
                 chars: a.chars,
                 names: a.names.clone(),
+                removed: a.removed.clone(),
             })?;
         }
         Record::CompactBoundary(c) => {

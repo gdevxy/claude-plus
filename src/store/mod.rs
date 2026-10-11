@@ -667,6 +667,7 @@ mod tests {
             kind: "instructions".into(),
             chars: 9,
             names: vec!["/h/CLAUDE.md".into(), "a".into()],
+            removed: vec![],
         })
         .unwrap();
         w.compaction(&CompactionRow {
@@ -693,7 +694,7 @@ mod tests {
         assert_eq!(
             store.dump("attachments"),
             vec![format!(
-                r#"Integer({file})|Integer(3)|Text("s1")|Integer(7)|Text("instructions")|Integer(9)|Text("[\"/h/CLAUDE.md\",\"a\"]")"#
+                r#"Integer({file})|Integer(3)|Text("s1")|Integer(7)|Text("instructions")|Integer(9)|Text("[\"/h/CLAUDE.md\",\"a\"]")|Text("[]")"#
             )]
         );
         assert_eq!(
@@ -1172,8 +1173,8 @@ mod tests {
     #[test]
     fn a_new_store_is_at_the_latest_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
-        assert_eq!(Store::latest_schema_version(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
+        assert_eq!(Store::latest_schema_version(), 16);
         assert!(!store.reindex_pending().unwrap());
     }
 
@@ -1196,7 +1197,7 @@ mod tests {
             )
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert_eq!(store.totals().unwrap().requests, 1);
         assert!(store.reindex_pending().unwrap());
         assert_eq!(store.dump("events"), Vec::<String>::new());
@@ -1226,7 +1227,31 @@ mod tests {
                 .unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
+        assert!(store.reindex_pending().unwrap());
+    }
+
+    #[test]
+    fn stored_attachments_are_rebuilt_to_learn_what_they_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("data.db");
+        {
+            let store =
+                Store::migrated_with(Connection::open(&path).unwrap(), &schema::MIGRATIONS[..9])
+                    .unwrap();
+            assert_eq!(store.schema_version().unwrap(), 15);
+            assert!(!store.reindex_pending().unwrap());
+            store
+                .conn
+                .execute(
+                    "INSERT INTO attachments (file_id, line_no, session_id, ts, kind, chars, names)
+                     VALUES (1, 1, 's1', 1, 'deferred_tools_delta', 0, '[]')",
+                    [],
+                )
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert!(store.reindex_pending().unwrap());
     }
 

@@ -196,6 +196,7 @@ mod tests {
             kind: kind.into(),
             chars: 100 + line_no,
             names: vec![],
+            removed: vec![],
         }
     }
 

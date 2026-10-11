@@ -195,6 +195,7 @@ mod tests {
                 kind: kind.into(),
                 chars: 10,
                 names: vec![],
+                removed: vec![],
             })
             .unwrap();
         }

@@ -2,6 +2,7 @@ use anyhow::Result;
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params};
 
+use super::context::MAIN_THREAD;
 use super::{PREFIX_KINDS, Store};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +24,8 @@ pub struct LargeResult {
 pub struct PrefixChange {
     pub ts: i64,
     pub kind: String,
+    pub names: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 const PROMPTS_BETWEEN: &str =
@@ -38,8 +41,9 @@ const SESSION_PROJECT: &str = "SELECT project FROM sessions WHERE id = ?1";
 fn prefix_kinds_sql() -> String {
     let kinds = vec!["?"; PREFIX_KINDS.len()].join(", ");
     format!(
-        "SELECT ts, kind FROM attachments
-         WHERE session_id = ? AND ts >= ? AND ts < ? AND kind IN ({kinds}) ORDER BY ts, kind"
+        "SELECT a.ts, a.kind, a.names, a.removed_names FROM attachments a JOIN files f ON f.id = a.file_id
+         WHERE a.session_id = ? AND a.ts >= ? AND a.ts < ? AND a.kind IN ({kinds}) AND {MAIN_THREAD}
+         ORDER BY a.ts, a.kind, a.file_id, a.line_no"
     )
 }
 
@@ -110,9 +114,14 @@ impl Store {
                 .map(|kind| Value::from(kind.to_string())),
         );
         let rows = statement.query_map(rusqlite::params_from_iter(values), |r| {
+            let list = |index| -> rusqlite::Result<Vec<String>> {
+                Ok(serde_json::from_str(&r.get::<_, String>(index)?).unwrap_or_default())
+            };
             Ok(PrefixChange {
                 ts: r.get(0)?,
                 kind: r.get(1)?,
+                names: list(2)?,
+                removed: list(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -251,24 +260,41 @@ mod tests {
     }
 
     #[test]
-    fn prefix_changes_of_a_span_name_their_kind() {
+    fn prefix_changes_of_a_span_name_their_kind_and_what_they_announced_on_the_main_thread() {
         let mut store = Store::open_in_memory().unwrap();
         let mut w = store.writer().unwrap();
-        let file = w.file("/p/s1.jsonl", 0, 0).unwrap();
-        for (line_no, ts, kind) in [
-            (1, 100, "mcp_instructions_delta"),
-            (2, 110, "date"),
-            (3, 120, "skill_listing"),
-            (4, 300, "instructions"),
+        let main = w.file("/p/s1.jsonl", 0, 0).unwrap();
+        let agent = w.file("/p/s1/subagents/agent-a.jsonl", 0, 0).unwrap();
+        for (file_id, line_no, ts, kind, names, removed) in [
+            (
+                main,
+                1,
+                100,
+                "mcp_instructions_delta",
+                vec!["linear"],
+                vec![],
+            ),
+            (main, 2, 110, "date", vec![], vec![]),
+            (agent, 1, 115, "deferred_tools_record", vec![], vec![]),
+            (
+                main,
+                3,
+                120,
+                "deferred_tools_delta",
+                vec!["mcp__a__x"],
+                vec!["mcp__b__y"],
+            ),
+            (main, 4, 300, "instructions", vec![], vec![]),
         ] {
             w.attachment(&AttachmentRow {
-                file_id: file,
+                file_id,
                 line_no,
                 session_id: "s1".into(),
                 ts: Some(ts),
                 kind: kind.into(),
                 chars: 10,
-                names: vec![],
+                names: names.into_iter().map(String::from).collect(),
+                removed: removed.into_iter().map(String::from).collect(),
             })
             .unwrap();
         }
@@ -278,11 +304,15 @@ mod tests {
             vec![
                 PrefixChange {
                     ts: 100,
-                    kind: "mcp_instructions_delta".into()
+                    kind: "mcp_instructions_delta".into(),
+                    names: vec!["linear".into()],
+                    removed: vec![],
                 },
                 PrefixChange {
                     ts: 120,
-                    kind: "skill_listing".into()
+                    kind: "deferred_tools_delta".into(),
+                    names: vec!["mcp__a__x".into()],
+                    removed: vec!["mcp__b__y".into()],
                 },
             ]
         );

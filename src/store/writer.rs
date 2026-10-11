@@ -88,6 +88,7 @@ pub struct AttachmentRow {
     pub kind: String,
     pub chars: u64,
     pub names: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,9 +297,9 @@ impl Writer<'_> {
 
     pub fn attachment(&mut self, row: &AttachmentRow) -> Result<()> {
         self.exec(
-            "INSERT OR REPLACE INTO attachments (file_id, line_no, session_id, ts, kind, chars, names)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![row.file_id, row.line_no as i64, row.session_id, row.ts, row.kind, row.chars as i64, serde_json::to_string(&row.names)?],
+            "INSERT OR REPLACE INTO attachments (file_id, line_no, session_id, ts, kind, chars, names, removed_names)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![row.file_id, row.line_no as i64, row.session_id, row.ts, row.kind, row.chars as i64, serde_json::to_string(&row.names)?, serde_json::to_string(&row.removed)?],
         )?;
         Ok(())
     }
