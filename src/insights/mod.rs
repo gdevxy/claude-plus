@@ -1,4 +1,5 @@
 mod cache;
+mod report;
 mod setup;
 mod usage;
 pub mod words;
@@ -15,6 +16,7 @@ use crate::store::{CompactionPoint, LargeResult, PromptPoint, SessionInfo, Spent
 use crate::transcript::TokenCounts;
 
 pub use cache::{CacheBusts, IdleRebuilds};
+pub use report::{Day, InsightsReport, Recap, Request, Wins, days, read, recap, wins};
 pub use setup::{OversizedMemory, Retention, UnusedMcpServers, UnusedSkills};
 pub use usage::{CostlyTasks, LargeToolResults, LateCompaction, ModelFit, Task, tasks};
 

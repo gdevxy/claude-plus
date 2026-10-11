@@ -1,6 +1,6 @@
 use anyhow::Result;
-use rusqlite::params;
 use rusqlite::types::Value;
+use rusqlite::{OptionalExtension, params};
 
 use super::{PREFIX_KINDS, Store};
 
@@ -33,6 +33,8 @@ const LARGE_RESULTS_BETWEEN: &str = "SELECT r.session_id, r.ts, r.chars, u.name,
      WHERE r.ts >= ?1 AND r.ts < ?2 AND r.chars >= ?3 AND r.is_sidechain = 0
      ORDER BY r.session_id, r.ts, r.tool_use_id";
 
+const SESSION_PROJECT: &str = "SELECT project FROM sessions WHERE id = ?1";
+
 fn prefix_kinds_sql() -> String {
     let kinds = vec!["?"; PREFIX_KINDS.len()].join(", ");
     format!(
@@ -47,6 +49,7 @@ fn insights_statements() -> Vec<String> {
         PROMPTS_BETWEEN.to_string(),
         LARGE_RESULTS_BETWEEN.to_string(),
         prefix_kinds_sql(),
+        SESSION_PROJECT.to_string(),
     ]
 }
 
@@ -79,6 +82,14 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn session_project(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached(SESSION_PROJECT)?
+            .query_row([session_id], |r| r.get(0))
+            .optional()?)
     }
 
     pub fn prefix_kinds_between(
