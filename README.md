@@ -61,7 +61,9 @@ Both options are set in Claude Code's plugin settings for `plus`.
 
 Upgrade the binary with `brew upgrade claude-plus` or by running the install script again.
 The next Claude Code session restarts the daemon on the new version and updates the mod in place; that session still shows the pane it loaded, and the sessions started after it show the new one.
-An older `claude-plus` found first on `PATH` never replaces a newer mod: `claude-plus install` keeps it and says so.
+An older `claude-plus` found first on `PATH` never replaces a newer mod: `claude-plus install` keeps a newer mod in `~/.claude-plus/marketplace` and says so.
+When the `plus` mod comes from another marketplace, such as the GitHub one above, `claude-plus install` asks before it points the `claude-plus` marketplace at its own folder.
+If that mod is newer than the binary, it stops instead and changes nothing: upgrade `claude-plus`, or run `claude plugin uninstall plus@claude-plus` first to switch to the binary's version.
 
 ## Uninstall
 
@@ -70,8 +72,11 @@ claude-plus uninstall
 ```
 
 This removes the mod and its marketplace from Claude Code and stops the daemon; `--purge` also deletes `~/.claude-plus` with the history claude-plus keeps.
-`--purge` deletes only the files claude-plus wrote in a directory it created, and keeps anything else it finds there.
-It refuses a symlink, your home directory, a directory that holds or sits inside the Claude Code directory, and one that claude-plus did not create.
+claude-plus marks its data directory with a `.claude-plus-data` file only when it created the directory or found it empty, or when the directory holds nothing but a claude-plus store and the files claude-plus writes beside it.
+It never stores its data in a `data.db` that another program made.
+`--purge` deletes only a marked directory, and in it only `data.db` when the file is a claude-plus store, and the daemon's files when they were created after the mark, or when the mark lists them because an earlier claude-plus left them there.
+It keeps anything else it finds there, and names it.
+It refuses a symlink (with or without a trailing `/`), your home directory, a directory that holds or sits inside the Claude Code directory, and one without the mark.
 Run `claude-plus uninstall` before you remove the binary with `brew uninstall claude-plus`, or delete `~/.local/bin/claude-plus`.
 
 ## Commands
@@ -92,7 +97,8 @@ Run `claude-plus uninstall` before you remove the binary with `brew uninstall cl
 
 claude-plus makes no network requests.
 The daemon listens only on a Unix socket in `~/.claude-plus`, readable by you alone, and never edits Claude Code's files.
-`CLAUDE_PLUS_HOME` moves the data directory and `CLAUDE_CONFIG_DIR` the Claude Code directory; both must be absolute paths.
+`CLAUDE_PLUS_HOME` moves the data directory and `CLAUDE_CONFIG_DIR` the Claude Code directory.
+`CLAUDE_PLUS_HOME` must be an absolute path; a relative `CLAUDE_CONFIG_DIR` is read from the working directory, as Claude Code reads it.
 
 ## License
 

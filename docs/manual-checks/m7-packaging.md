@@ -31,6 +31,7 @@ claude-plus --version
 - [ ] Repeat the edit and start a new Claude Code session instead: the session's own `--ensure` puts the file back to `0.1.0`, and the pane works from the session after it.
 - [ ] Run `echo other > ~/.claude-plus/marketplace/.bundle-hash`, then `claude-plus daemon --ensure`: it prints `✻ Updated the plus mod v0.1.0 to this build · new Claude Code sessions load it`, as a rebuild from `main` without a version bump would.
 - [ ] Edit `plugin.json` to `"version": "999.0.0"`, then run `claude-plus install`: it prints `✻ Kept the plus mod v999.0.0, newer than this claude-plus v0.1.0`, runs no `claude plugin update`, and the file still says `999.0.0`; then edit it back to `0.1.0`.
+- [ ] In a new shell with a scratch home (`export HOME=$(mktemp -d); unset CLAUDE_CONFIG_DIR CLAUDE_PLUS_HOME`), run `claude plugin marketplace add <owner>/claude-plus` and `claude plugin install plus@claude-plus` once a release newer than the binary exists, then `claude-plus install`: it prints `claude-plus: the plus mod v<newer> comes from the claude-plus marketplace at <owner>/claude-plus, and this claude-plus carries the older v0.1.0; ...` and runs no `claude plugin` command that changes anything.
 
 ## Uninstall
 
@@ -39,6 +40,8 @@ claude-plus --version
 - [ ] A new `claude` session has no pane and no `/plus`.
 - [ ] `CLAUDE_PLUS_HOME=. claude-plus uninstall --purge --yes` prints `claude-plus: CLAUDE_PLUS_HOME must be an absolute path, not .`, and `CLAUDE_PLUS_HOME=$HOME claude-plus uninstall --purge --yes` prints `claude-plus: refusing to purge ...: it holds your home directory ...`; neither runs a `claude plugin` command or deletes anything.
 - [ ] `~/.claude-plus/.claude-plus-data` exists: `--purge` deletes only a directory that carries it, and only the files claude-plus writes there.
+  A `~/.claude-plus` from before that file gets it when the daemon next starts, once `claude-plus daemon stop` then `claude-plus daemon --ensure` have run, and the file then lists the daemon files that were already there.
+- [ ] In a new shell with a scratch home (`export HOME=$(mktemp -d) CLAUDE_PLUS_HOME=$HOME/foreign; unset CLAUDE_CONFIG_DIR`), run `mkdir $CLAUDE_PLUS_HOME && echo mine > $CLAUDE_PLUS_HOME/data.db && echo mine > $CLAUDE_PLUS_HOME/daemon.log`: `claude-plus reindex` then fails with `cannot open .../data.db: file is not a database` and writes no `.claude-plus-data`, and `claude-plus uninstall --purge --yes` refuses and deletes nothing.
 - [ ] Reinstall with `claude-plus install --yes` to keep using the pane; do not run `--purge` unless you mean to delete the history.
 
 ## Releasing (after the GitHub owner is filled in)
