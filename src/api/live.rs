@@ -52,6 +52,7 @@ impl Live {
             model.as_deref(),
             now_ms,
             &reported,
+            store.session_account(session)?.as_deref(),
         );
         let causes = Causes::read(store, session, i64::MIN, i64::MAX)?;
         let cache = cache_model::model(

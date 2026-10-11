@@ -88,6 +88,7 @@ impl Fixture {
 
     pub fn calibrated(&mut self, pct_per_usd: f64) {
         self.rates = Rates::of(&[Fit {
+            account: None,
             window: "five_hour".into(),
             family: "opus".into(),
             pairs: 30,

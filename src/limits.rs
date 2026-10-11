@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
-use chrono::DateTime;
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -16,12 +16,16 @@ pub const DOMINANT_SHARE: f64 = 0.8;
 pub const PACE_SPAN_MS: i64 = 30 * 60_000;
 pub const MIN_PACE_SPAN_MS: i64 = 5 * 60_000;
 pub const RESET_DROP_PCT: f64 = 0.5;
+pub const SPEND_LIMIT: &str = "spend_limit";
+pub const BUDGET: &str = "budget";
 const DAY_MS: i64 = 86_400_000;
 const HOUR_MS: f64 = 3_600_000.0;
-const WINDOW_ORDER: &[&str] = &["five_hour", "seven_day", "spend_limit"];
+const WINDOW_ORDER: &[&str] = &["five_hour", "seven_day", SPEND_LIMIT, BUDGET];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fit {
+    #[serde(default)]
+    pub account: Option<String>,
     pub window: String,
     pub family: String,
     pub pairs: u32,
@@ -91,7 +95,12 @@ pub fn instances(samples: &[LimitSample]) -> Vec<&[LimitSample]> {
         let passed_reset = previous
             .resets_at_ms
             .is_some_and(|resets| sample.ts_ms > resets);
-        if sample.window != previous.window || moved_reset || dropped || passed_reset {
+        if sample.account_id != previous.account_id
+            || sample.window != previous.window
+            || moved_reset
+            || dropped
+            || passed_reset
+        {
             instances.push(&samples[start..index]);
             start = index;
         }
@@ -102,27 +111,42 @@ pub fn instances(samples: &[LimitSample]) -> Vec<&[LimitSample]> {
     instances
 }
 
-pub fn fit(samples: &[LimitSample], spend: &[SpendPoint], settled_before_ms: i64) -> Vec<Fit> {
-    let mut ratios: BTreeMap<(String, String), Vec<f64>> = BTreeMap::new();
+pub fn fit(
+    samples: &[LimitSample],
+    spend: &[SpendPoint],
+    accounts: &HashMap<String, String>,
+    settled_before_ms: i64,
+) -> Vec<Fit> {
+    let mut ratios: BTreeMap<(Option<String>, String, String), Vec<f64>> = BTreeMap::new();
     for instance in instances(samples) {
+        let account = instance[0].account_id.as_deref();
+        let own: Vec<&SpendPoint> = spend
+            .iter()
+            .filter(|point| accounts.get(&point.session_id).map(String::as_str) == account)
+            .collect();
         for pair in instance.windows(2) {
             let (from, to) = (&pair[0], &pair[1]);
             let gained = to.used_pct - from.used_pct;
             if to.ts_ms > settled_before_ms || gained <= 0.0 {
                 continue;
             }
-            let Some((family, usd)) = dominant_spend(spend, from.ts_ms, to.ts_ms) else {
+            let Some((family, usd)) = dominant_spend(&own, from.ts_ms, to.ts_ms) else {
                 continue;
             };
             ratios
-                .entry((to.window.clone(), family.to_string()))
+                .entry((
+                    account.map(String::from),
+                    to.window.clone(),
+                    family.to_string(),
+                ))
                 .or_default()
                 .push(gained / usd);
         }
     }
     ratios
         .into_iter()
-        .map(|((window, family), ratios)| Fit {
+        .map(|((account, window, family), ratios)| Fit {
+            account,
             window,
             family,
             pairs: ratios.len() as u32,
@@ -131,15 +155,22 @@ pub fn fit(samples: &[LimitSample], spend: &[SpendPoint], settled_before_ms: i64
         .collect()
 }
 
+pub fn fits_of(fits: &[Fit], account: Option<&str>) -> Vec<Fit> {
+    fits.iter()
+        .filter(|fit| fit.account.as_deref() == account)
+        .cloned()
+        .collect()
+}
+
 fn dominant_spend(
-    spend: &[SpendPoint],
+    spend: &[&SpendPoint],
     after_ms: i64,
     until_ms: i64,
 ) -> Option<(&'static str, f64)> {
     let start = spend.partition_point(|point| point.ts_ms <= after_ms);
     let end = spend.partition_point(|point| point.ts_ms <= until_ms);
     let mut by_family: BTreeMap<&'static str, f64> = BTreeMap::new();
-    for point in &spend[start..end] {
+    for point in spend[start..end].iter().copied() {
         *by_family.entry(family(&point.model)).or_default() += point.cost_usd;
     }
     let total: f64 = by_family.values().sum();
@@ -188,17 +219,82 @@ pub fn pace(instance: &[LimitSample], now_ms: i64) -> Option<Pace> {
     })
 }
 
+pub fn month_start_utc(ms: i64) -> i64 {
+    let at = utc(ms);
+    first_of_month(at.year(), at.month())
+}
+
+pub fn next_month_start_utc(ms: i64) -> i64 {
+    let at = utc(ms);
+    let (year, month) = if at.month() == 12 {
+        (at.year() + 1, 1)
+    } else {
+        (at.year(), at.month() + 1)
+    };
+    first_of_month(year, month)
+}
+
+fn utc(ms: i64) -> DateTime<Utc> {
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .expect("a representable time")
+}
+
+fn first_of_month(year: i32, month: u32) -> i64 {
+    Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
+        .single()
+        .expect("the first of a month exists")
+        .timestamp_millis()
+}
+
+pub fn monthly_pace(
+    used_pct: f64,
+    period_start_ms: i64,
+    resets_at_ms: i64,
+    now_ms: i64,
+) -> Option<Pace> {
+    let elapsed = now_ms - period_start_ms;
+    if elapsed < DAY_MS {
+        return None;
+    }
+    let per_ms = used_pct / elapsed as f64;
+    let projected = used_pct + per_ms * (resets_at_ms - now_ms).max(0) as f64;
+    let full_at_ms = (projected >= 100.0 && per_ms > 0.0)
+        .then(|| now_ms + ((100.0 - used_pct).max(0.0) / per_ms).round() as i64);
+    Some(Pace {
+        pct_per_hour: per_ms * HOUR_MS,
+        projected_pct: Some(projected),
+        full_at_ms,
+    })
+}
+
+fn window_pace(instance: &[LimitSample], now_ms: i64) -> Option<Pace> {
+    let sample = instance.last()?;
+    match sample.resets_at_ms {
+        Some(resets) if sample.window == SPEND_LIMIT => {
+            monthly_pace(sample.used_pct, month_start_utc(resets - 1), resets, now_ms)
+        }
+        _ => pace(instance, now_ms),
+    }
+}
+
 pub fn windows(
     samples: &[LimitSample],
     fits: &[Fit],
     model: Option<&str>,
     now_ms: i64,
     reported: &[&str],
+    account: Option<&str>,
 ) -> Vec<LimitWindow> {
+    if account.is_none() {
+        return Vec::new();
+    }
     let family = model.map_or("other", family);
     let mut latest: BTreeMap<&str, &[LimitSample]> = BTreeMap::new();
     for instance in instances(samples) {
-        latest.insert(&instance[0].window, instance);
+        if instance[0].account_id.as_deref() == account {
+            latest.insert(&instance[0].window, instance);
+        }
     }
     let mut windows: Vec<LimitWindow> = latest
         .into_values()
@@ -209,9 +305,11 @@ pub fn windows(
         .map(|instance| {
             let sample = instance.last().expect("instances are never empty");
             let reset = sample.resets_at_ms.is_some_and(|resets| resets <= now_ms);
-            let fit = fits
-                .iter()
-                .find(|fit| fit.window == sample.window && fit.family == family);
+            let fit = fits.iter().find(|fit| {
+                fit.account.as_deref() == account
+                    && fit.window == sample.window
+                    && fit.family == family
+            });
             let pairs = fit.map_or(0, |fit| fit.pairs);
             LimitWindow {
                 window: sample.window.clone(),
@@ -219,7 +317,11 @@ pub fn windows(
                 resets_at_ms: sample.resets_at_ms.filter(|_| !reset),
                 sampled_at_ms: sample.ts_ms,
                 reset_since_sample: reset,
-                pace: if reset { None } else { pace(instance, now_ms) },
+                pace: if reset {
+                    None
+                } else {
+                    window_pace(instance, now_ms)
+                },
                 calibration: Calibration {
                     family: family.to_string(),
                     pairs,
@@ -247,7 +349,12 @@ pub fn refresh_fit(store: &mut Store, now_ms: i64) -> Result<Vec<Fit>> {
     let since = now_ms - FIT_DAYS * DAY_MS;
     let samples = store.limit_samples_since(since)?;
     let spend = store.spend_since(since)?;
-    let fits = fit(&samples, &spend, now_ms - SETTLE_MS);
+    let fits = fit(
+        &samples,
+        &spend,
+        &store.session_accounts()?,
+        now_ms - SETTLE_MS,
+    );
     let mut writer = store.writer()?;
     writer.set_meta(FIT_KEY, &serde_json::to_string(&fits)?)?;
     writer.commit()?;
@@ -269,6 +376,7 @@ pub fn recent_samples(store: &Store, now_ms: i64) -> Result<Vec<LimitSample>> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
 
     const T0: i64 = 1_791_000_000_000;
     const MINUTE: i64 = 60_000;
@@ -291,6 +399,19 @@ mod tests {
             session_id: "s1".into(),
             model: model.into(),
             cost_usd,
+        }
+    }
+
+    fn of(
+        account: &str,
+        minute: i64,
+        window: &str,
+        used_pct: f64,
+        resets_minute: i64,
+    ) -> LimitSample {
+        LimitSample {
+            account_id: Some(account.into()),
+            ..sample(minute, window, used_pct, resets_minute)
         }
     }
 
@@ -362,11 +483,11 @@ mod tests {
 
     #[test]
     fn a_window_without_a_reset_time_is_shown_only_while_this_session_reports_it() {
-        let mut spend = sample(0, "spend_limit", 3.0, 0);
+        let mut spend = of("oauth:me", 0, "spend_limit", 3.0, 0);
         spend.resets_at_ms = None;
-        let samples = vec![sample(0, "five_hour", 50.0, 400), spend];
+        let samples = vec![of("oauth:me", 0, "five_hour", 50.0, 400), spend];
         let shown = |reported: &[&str]| -> Vec<String> {
-            windows(&samples, &[], None, T0 + MINUTE, reported)
+            windows(&samples, &[], None, T0 + MINUTE, reported, Some("oauth:me"))
                 .into_iter()
                 .map(|w| w.window)
                 .collect()
@@ -385,7 +506,7 @@ mod tests {
         }
         spent[3] = spend(35, "claude-opus-5-5", 200.0);
         spent.push(spend(36, "claude-haiku-5-5", 0.01));
-        let fits = fit(&samples, &spent, T0 + 1000 * MINUTE);
+        let fits = fit(&samples, &spent, &HashMap::new(), T0 + 1000 * MINUTE);
         assert_eq!(fits.len(), 1);
         assert_eq!(
             (
@@ -414,8 +535,9 @@ mod tests {
             spend(25, "claude-opus-5-5", 1.0),
             spend(35, "claude-opus-5-5", 1.0),
         ];
-        assert_eq!(fit(&samples, &spent, T0 + 15 * MINUTE), vec![]);
-        let settled = fit(&samples, &spent, T0 + 100 * MINUTE);
+        let none = HashMap::new();
+        assert_eq!(fit(&samples, &spent, &none, T0 + 15 * MINUTE), vec![]);
+        let settled = fit(&samples, &spent, &none, T0 + 100 * MINUTE);
         assert_eq!(settled[0].pairs, 2);
     }
 
@@ -459,18 +581,27 @@ mod tests {
     #[test]
     fn windows_report_the_latest_reading_with_its_calibration() {
         let samples = vec![
-            sample(0, "five_hour", 50.0, 100),
-            sample(1, "seven_day", 12.0, 5000),
-            sample(2, "spend_limit", 3.0, 90_000),
+            of("oauth:me", 0, "five_hour", 50.0, 100),
+            of("oauth:me", 1, "seven_day", 12.0, 5000),
+            of("oauth:me", 2, "spend_limit", 3.0, 90_000),
         ];
         let fits = vec![
             Fit {
+                account: Some("oauth:work".into()),
+                window: "five_hour".into(),
+                family: "opus".into(),
+                pairs: 40,
+                pct_per_usd: 9.0,
+            },
+            Fit {
+                account: Some("oauth:me".into()),
                 window: "five_hour".into(),
                 family: "opus".into(),
                 pairs: 20,
                 pct_per_usd: 0.5,
             },
             Fit {
+                account: Some("oauth:me".into()),
                 window: "seven_day".into(),
                 family: "opus".into(),
                 pairs: 19,
@@ -483,6 +614,7 @@ mod tests {
             Some("claude-opus-5-5"),
             T0 + 200 * MINUTE,
             &[],
+            Some("oauth:me"),
         );
         assert_eq!(
             windows
@@ -509,6 +641,161 @@ mod tests {
             (12.0, 19, None)
         );
         assert_eq!(windows[2].calibration.family, "opus");
+    }
+
+    #[test]
+    fn switching_accounts_and_back_resumes_the_same_instance() {
+        let mut samples = vec![
+            of("oauth:me", 0, "five_hour", 60.0, 300),
+            of("oauth:me", 40, "five_hour", 62.0, 300),
+            of("oauth:work", 10, "five_hour", 5.0, 200),
+            of("oauth:work", 20, "five_hour", 6.0, 200),
+        ];
+        samples.sort_by(|a, b| {
+            (&a.account_id, &a.window, a.ts_ms).cmp(&(&b.account_id, &b.window, b.ts_ms))
+        });
+        let split: Vec<Vec<f64>> = instances(&samples)
+            .iter()
+            .map(|instance| instance.iter().map(|s| s.used_pct).collect())
+            .collect();
+        assert_eq!(split, vec![vec![60.0, 62.0], vec![5.0, 6.0]]);
+    }
+
+    #[test]
+    fn a_change_of_account_alone_starts_a_new_instance() {
+        let samples = vec![
+            of("oauth:me", 0, "five_hour", 10.0, 300),
+            of("oauth:work", 10, "five_hour", 12.0, 300),
+        ];
+        let lengths: Vec<usize> = instances(&samples).iter().map(|i| i.len()).collect();
+        assert_eq!(lengths, vec![1, 1]);
+    }
+
+    #[test]
+    fn a_fit_only_counts_spend_of_its_own_account() {
+        let samples = vec![
+            of("oauth:me", 0, "five_hour", 10.0, 300),
+            of("oauth:me", 10, "five_hour", 12.0, 300),
+        ];
+        let spend = vec![
+            SpendPoint {
+                ts_ms: T0 + 5 * MINUTE,
+                session_id: "mine".into(),
+                model: "claude-opus-5-5".into(),
+                cost_usd: 1.0,
+            },
+            SpendPoint {
+                ts_ms: T0 + 6 * MINUTE,
+                session_id: "work".into(),
+                model: "claude-opus-5-5".into(),
+                cost_usd: 9.0,
+            },
+        ];
+        let accounts = HashMap::from([
+            ("mine".to_string(), "oauth:me".to_string()),
+            ("work".to_string(), "oauth:work".to_string()),
+        ]);
+        let fits = fit(&samples, &spend, &accounts, i64::MAX);
+        assert_eq!(fits.len(), 1);
+        assert_eq!(fits[0].account.as_deref(), Some("oauth:me"));
+        assert!(close(fits[0].pct_per_usd, 2.0), "{}", fits[0].pct_per_usd);
+    }
+
+    #[test]
+    fn fits_of_keeps_only_the_asked_account() {
+        let fit_for = |account: Option<&str>| Fit {
+            account: account.map(String::from),
+            window: "five_hour".into(),
+            family: "opus".into(),
+            pairs: 1,
+            pct_per_usd: 1.0,
+        };
+        let fits = vec![
+            fit_for(Some("oauth:me")),
+            fit_for(Some("oauth:work")),
+            fit_for(None),
+        ];
+        assert_eq!(
+            fits_of(&fits, Some("oauth:work")),
+            vec![fit_for(Some("oauth:work"))]
+        );
+        assert_eq!(fits_of(&fits, None), vec![fit_for(None)]);
+    }
+
+    #[test]
+    fn a_stored_fit_without_an_account_still_reads() {
+        let fits: Vec<Fit> = serde_json::from_str(
+            r#"[{"window":"five_hour","family":"opus","pairs":3,"pct_per_usd":0.5}]"#,
+        )
+        .unwrap();
+        assert_eq!(fits[0].account, None);
+    }
+
+    #[test]
+    fn windows_show_only_the_asked_account() {
+        let samples = vec![
+            of("oauth:me", 0, "seven_day", 40.0, 9000),
+            of("oauth:work", 1, "spend_limit", 4.0, 50_000),
+        ];
+        let shown = |account| -> Vec<String> {
+            windows(&samples, &[], None, T0 + 2 * MINUTE, &[], account)
+                .into_iter()
+                .map(|w| w.window)
+                .collect()
+        };
+        assert_eq!(shown(Some("oauth:work")), vec!["spend_limit"]);
+        assert_eq!(shown(Some("oauth:me")), vec!["seven_day"]);
+        assert_eq!(shown(None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn monthly_pace_waits_a_full_day_and_uses_utc_months() {
+        let at = |text: &str| {
+            DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let oct_1 = at("2026-10-01T00:00:00Z");
+        let nov_1 = at("2026-11-01T00:00:00Z");
+        let oct_11 = at("2026-10-11T12:00:00Z");
+        assert_eq!(month_start_utc(oct_11), oct_1);
+        assert_eq!(next_month_start_utc(oct_11), nov_1);
+        assert_eq!(month_start_utc(nov_1 - 1), oct_1);
+        assert_eq!(month_start_utc(nov_1), nov_1);
+        assert_eq!(
+            next_month_start_utc(at("2026-12-31T23:59:59Z")),
+            at("2027-01-01T00:00:00Z")
+        );
+        assert_eq!(monthly_pace(4.0, oct_1, nov_1, oct_1 + DAY_MS - 1), None);
+        let pace = monthly_pace(4.0, oct_1, nov_1, oct_11).unwrap();
+        let elapsed_days = 10.5;
+        let projected = 4.0 / elapsed_days * 31.0;
+        assert!((pace.projected_pct.unwrap() - projected).abs() < 1e-6);
+        assert_eq!(pace.full_at_ms, None);
+        let hot = monthly_pace(50.0, oct_1, nov_1, oct_11).unwrap();
+        assert!(hot.full_at_ms.unwrap() < nov_1);
+    }
+
+    #[test]
+    fn a_spend_limit_window_paces_over_its_month() {
+        let resets = DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let now = DateTime::parse_from_rfc3339("2026-10-11T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let samples = vec![LimitSample {
+            ts_ms: now - 60_000,
+            session_id: "s1".into(),
+            account_id: Some("oauth:work".into()),
+            model: None,
+            window: SPEND_LIMIT.into(),
+            used_pct: 4.0,
+            resets_at_ms: Some(resets),
+        }];
+        let shown = windows(&samples, &[], None, now, &[], Some("oauth:work"));
+        let projected = shown[0].pace.as_ref().unwrap().projected_pct.unwrap();
+        assert!((projected - 4.0 / 10.5 * 31.0).abs() < 1e-6, "{projected}");
     }
 
     #[test]

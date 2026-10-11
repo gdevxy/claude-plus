@@ -233,11 +233,19 @@ fn the_snapshot_carries_session_totals_from_the_store() {
 #[test]
 fn the_snapshot_reports_the_cache_forecast_and_limits() {
     let server = Server::start();
+    std::fs::write(
+        server.temp.path().join("claude.json"),
+        r#"{"oauthAccount":{"accountUuid":"u-1","organizationType":"claude_max"}}"#,
+    )
+    .unwrap();
     server.client().import().unwrap();
     let step_ms = epoch_ms(SystemTime::now()) - 1000;
     server
         .client()
         .send_events(&json!({"events": [
+            {"session": SESSION, "kind": "session.start", "ts_ms": step_ms - 1000, "data": {
+                "cwd": "/work/demo", "auth": {"provider": "anthropic", "base_url": null, "api_key": false}
+            }},
             {"session": SESSION, "kind": "session.measure", "ts_ms": step_ms, "data": {
                 "model": "claude-opus-5-5",
                 "rateLimits": [{"kind": "five_hour", "percentUsed": 54, "resetsAt": "2099-01-01T00:00:00Z"}]
