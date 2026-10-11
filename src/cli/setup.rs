@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 
 use super::daemon::{ensured, stopped};
 use crate::daemon::control::{self, is_older};
-use crate::paths::Paths;
+use crate::paths::{MARKER, Paths};
 use crate::setup::bundle::{self, PLUGIN_ID};
 use crate::setup::claude::{self, ClaudeCode, Outcome, Step};
 use crate::setup::{Found, install_steps, uninstall_steps};
@@ -83,9 +83,8 @@ pub fn uninstall(paths: &Paths, purge: bool, yes: bool) -> Result<()> {
     }
     println!("{}", stopped(control::stop(paths)?));
     bundle::remove(&paths.marketplace_dir())?;
-    if purge {
-        remove_dir(&paths.data_dir)?;
-        println!("✻ Deleted {}", paths.data_dir.display());
+    if purge && let Some(left) = purge_data_dir(paths)? {
+        println!("{}", purged(&paths.data_dir, &left));
     }
     println!(
         "✻ claude-plus is uninstalled · close open Claude Code sessions, or their pane starts the daemon again"
@@ -189,36 +188,103 @@ fn said(outcome: &Outcome) -> String {
     }
 }
 
-fn remove_dir(dir: &Path) -> Result<()> {
-    match std::fs::remove_dir_all(dir) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("cannot delete {}", dir.display()))
+const DATA_FILES: &[&str] = &[
+    "data.db",
+    "data.db-wal",
+    "data.db-shm",
+    "data.db-journal",
+    "daemon.sock",
+    "daemon.lock",
+    "daemon.log",
+    "daemon.log.1",
+];
+
+fn purge_data_dir(paths: &Paths) -> Result<Option<Vec<String>>> {
+    if !paths.marker().exists() {
+        return Ok(None);
+    }
+    for name in DATA_FILES {
+        let path = paths.data_dir.join(name);
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).with_context(|| format!("cannot delete {}", path.display()));
+            }
+            _ => {}
         }
-        _ => Ok(()),
+    }
+    let mut left: Vec<String> = std::fs::read_dir(&paths.data_dir)
+        .with_context(|| format!("cannot read {}", paths.data_dir.display()))?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<_>>()?;
+    left.retain(|name| name != MARKER);
+    left.sort();
+    if left.is_empty() {
+        std::fs::remove_file(paths.marker())
+            .and_then(|()| std::fs::remove_dir(&paths.data_dir))
+            .with_context(|| format!("cannot delete {}", paths.data_dir.display()))?;
+    }
+    Ok(Some(left))
+}
+
+fn purged(data_dir: &Path, left: &[String]) -> String {
+    if left.is_empty() {
+        format!("✻ Deleted {}", data_dir.display())
+    } else {
+        format!(
+            "✻ Deleted what claude-plus keeps in {} and left {}, which it did not write",
+            data_dir.display(),
+            left.join(", ")
+        )
     }
 }
 
 fn purge_refusal(paths: &Paths) -> Option<String> {
-    let data = paths
-        .data_dir
-        .canonicalize()
-        .unwrap_or(paths.data_dir.clone());
-    let guarded = [
-        paths.home.as_path(),
-        paths.claude_dir.as_path(),
-        Path::new("/"),
-    ];
-    guarded
-        .iter()
-        .map(|dir| dir.canonicalize().unwrap_or(dir.to_path_buf()))
-        .any(|dir| dir.starts_with(&data))
-        .then(|| {
-            format!(
-                "refusing to purge {}: it holds {} or your home directory",
-                paths.data_dir.display(),
-                paths.claude_dir.display()
-            )
-        })
+    let data = &paths.data_dir;
+    let refuse = |why: String| Some(format!("refusing to purge {}: {why}", data.display()));
+    let meta = match std::fs::symlink_metadata(data) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => return refuse(format!("cannot read it: {error}")),
+    };
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(data).unwrap_or_default();
+        return refuse(format!(
+            "it is a symlink to {}; set CLAUDE_PLUS_HOME to that directory to purge it",
+            target.display()
+        ));
+    }
+    if !meta.is_dir() {
+        return refuse("it is not a directory".into());
+    }
+    let canonical = |dir: &Path| dir.canonicalize().unwrap_or(dir.to_path_buf());
+    let real = canonical(data);
+    if canonical(&paths.home).starts_with(&real) {
+        return refuse(format!(
+            "it holds your home directory {}",
+            paths.home.display()
+        ));
+    }
+    for claude_dir in [paths.claude_dir.clone(), paths.home.join(".claude")] {
+        let guarded = canonical(&claude_dir);
+        if guarded.starts_with(&real) {
+            return refuse(format!(
+                "it holds {}, which Claude Code keeps",
+                claude_dir.display()
+            ));
+        }
+        if real.starts_with(&guarded) {
+            return refuse(format!(
+                "it is inside {}, which Claude Code keeps",
+                claude_dir.display()
+            ));
+        }
+    }
+    if !paths.marker().is_file() {
+        return refuse(format!(
+            "claude-plus did not create it, as it has no {MARKER} file"
+        ));
+    }
+    None
 }
 
 pub fn path_warning(exe: &Path, path_var: Option<std::ffi::OsString>) -> Option<String> {
@@ -287,18 +353,68 @@ mod tests {
     fn purging_never_reaches_home_or_the_claude_dir() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
+        for dir in [
+            ".claude/projects",
+            ".claude-plus",
+            "a/claude",
+            "c/projects",
+            "x",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
         let refused = |plus: PathBuf| purge_refusal(&Paths::resolve(home, None, Some(plus)));
-        assert_eq!(refused(home.join(".claude-plus")), None);
-        assert!(refused(home.to_path_buf()).is_some());
-        assert!(refused(PathBuf::from("/")).is_some());
-        assert!(refused(home.join(".claude")).is_some());
+        let ours = Paths::resolve(home, None, None);
+        ours.ensure_data_dir().unwrap();
+        assert_eq!(purge_refusal(&ours), None);
+        assert_eq!(refused(home.join("missing")), None);
+        assert!(
+            refused(home.to_path_buf())
+                .unwrap()
+                .contains("home directory")
+        );
+        assert!(
+            refused(home.join("x/.."))
+                .unwrap()
+                .contains("home directory")
+        );
+        assert!(
+            refused(home.join(".claude/.."))
+                .unwrap()
+                .contains("home directory")
+        );
+        assert!(
+            refused(PathBuf::from("/"))
+                .unwrap()
+                .contains("home directory")
+        );
+        assert!(
+            refused(home.parent().unwrap().to_path_buf())
+                .unwrap()
+                .contains("home directory")
+        );
+        assert!(refused(home.join(".claude")).unwrap().contains("holds"));
+        assert!(
+            refused(home.join(".claude/projects"))
+                .unwrap()
+                .contains("inside")
+        );
+        let custom = |plus: &str| {
+            purge_refusal(&Paths::resolve(
+                home,
+                Some(home.join("c")),
+                Some(home.join(plus)),
+            ))
+        };
+        assert!(custom("c/projects").unwrap().contains("inside"));
+        assert!(custom(".claude/projects").unwrap().contains("inside"));
         assert!(
             purge_refusal(&Paths::resolve(
                 home,
                 Some(home.join("a/claude")),
                 Some(home.join("a"))
             ))
-            .is_some()
+            .unwrap()
+            .contains("holds")
         );
     }
 

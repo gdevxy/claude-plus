@@ -246,7 +246,7 @@ fn purge_refuses_a_data_dir_that_holds_the_claude_dir_before_changing_anything()
         .assert()
         .failure()
         .stderr(format!(
-            "claude-plus: refusing to purge {}: it holds {} or your home directory\n",
+            "claude-plus: refusing to purge {}: it holds {}, which Claude Code keeps\n",
             parent.display(),
             env.claude.display()
         ));
@@ -334,4 +334,95 @@ fn doctor_names_the_installed_mod_and_the_folder_it_loads_from() {
             "  Claude Code: 2.1.296\n  Mod:         plus v{VERSION} · {}/mod\n",
             marketplace(&env).display()
         )));
+}
+
+#[test]
+fn purge_refuses_a_relative_data_dir_and_deletes_nothing() {
+    let env = env();
+    let project = env.claude.parent().unwrap().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("precious"), "keep").unwrap();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .current_dir(&project)
+        .env("HOME", env.claude.parent().unwrap())
+        .env("CLAUDE_PLUS_HOME", ".")
+        .assert()
+        .failure()
+        .stderr("claude-plus: CLAUDE_PLUS_HOME must be an absolute path, not .\n");
+    assert!(project.join("precious").is_file());
+    assert_eq!(env.claude_calls(), Vec::<String>::new());
+}
+
+#[test]
+fn purge_refuses_a_directory_claude_plus_did_not_make() {
+    let env = env();
+    let root = env.claude.parent().unwrap();
+    let foreign = root.join("documents");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("data.db"), "not ours").unwrap();
+    let decoy = env.claude.join("decoy");
+    std::fs::create_dir_all(&decoy).unwrap();
+    std::fs::write(decoy.join("precious"), "keep").unwrap();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("CLAUDE_PLUS_HOME", &foreign)
+        .assert()
+        .failure()
+        .stderr(format!(
+            "claude-plus: refusing to purge {}: claude-plus did not create it, as it has no .claude-plus-data file\n",
+            foreign.display()
+        ));
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("CLAUDE_PLUS_HOME", &decoy)
+        .assert()
+        .failure()
+        .stderr(format!(
+            "claude-plus: refusing to purge {}: it is inside {}, which Claude Code keeps\n",
+            decoy.display(),
+            env.claude.display()
+        ));
+    assert!(foreign.join("data.db").is_file());
+    assert!(decoy.join("precious").is_file());
+    assert_eq!(env.claude_calls(), Vec::<String>::new());
+}
+
+#[test]
+fn purge_refuses_a_symlinked_data_dir() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    let link = env.claude.parent().unwrap().join("link");
+    std::os::unix::fs::symlink(&env.plus, &link).unwrap();
+    let before = env.claude_calls().len();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("CLAUDE_PLUS_HOME", &link)
+        .assert()
+        .failure()
+        .stderr(format!(
+            "claude-plus: refusing to purge {}: it is a symlink to {}; set CLAUDE_PLUS_HOME to that directory to purge it\n",
+            link.display(),
+            env.plus.display()
+        ));
+    assert_eq!(env.claude_calls().len(), before);
+    assert!(env.plus.join("data.db").exists());
+}
+
+#[test]
+fn purge_keeps_files_claude_plus_did_not_write() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    std::fs::write(env.plus.join("notes.txt"), "mine").unwrap();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "✻ Deleted what claude-plus keeps in {} and left notes.txt, which it did not write\n",
+            env.plus.display()
+        )));
+    let mut left: Vec<_> = std::fs::read_dir(&env.plus)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, [".claude-plus-data", "notes.txt"]);
 }

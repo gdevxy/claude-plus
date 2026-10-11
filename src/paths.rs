@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
@@ -17,16 +17,23 @@ impl Paths {
     }
 
     pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
-        let path = |name| {
-            var(name)
+        let path = |name| -> Result<Option<PathBuf>> {
+            let Some(path) = var(name)
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
+            else {
+                return Ok(None);
+            };
+            if !path.is_absolute() {
+                bail!("{name} must be an absolute path, not {}", path.display());
+            }
+            Ok(Some(path))
         };
-        let home = path("HOME").context("HOME is not set")?;
+        let home = path("HOME")?.context("HOME is not set")?;
         Ok(Self::resolve(
             &home,
-            path("CLAUDE_CONFIG_DIR"),
-            path("CLAUDE_PLUS_HOME"),
+            path("CLAUDE_CONFIG_DIR")?,
+            path("CLAUDE_PLUS_HOME")?,
         ))
     }
 
@@ -79,6 +86,10 @@ impl Paths {
         self.data_dir.join("marketplace")
     }
 
+    pub fn marker(&self) -> PathBuf {
+        self.data_dir.join(MARKER)
+    }
+
     pub fn ensure_data_dir(&self) -> Result<()> {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
@@ -98,9 +109,32 @@ impl Paths {
         builder
             .create(&self.data_dir)
             .with_context(|| format!("cannot create {}", self.data_dir.display()))?;
-        Ok(())
+        self.mark_data_dir()
+    }
+
+    fn mark_data_dir(&self) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.marker());
+        match opened {
+            Ok(mut file) => file
+                .write_all(MARKER_TEXT.as_bytes())
+                .with_context(|| format!("cannot write {}", self.marker().display())),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("cannot write {}", self.marker().display()))
+            }
+        }
     }
 }
+
+pub const MARKER: &str = ".claude-plus-data";
+const MARKER_TEXT: &str =
+    "claude-plus keeps its data here; claude-plus uninstall --purge deletes what it wrote\n";
 
 pub fn retention_days_in(claude_dir: &Path) -> Option<u64> {
     std::fs::read_to_string(claude_dir.join("settings.json"))
@@ -191,6 +225,36 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(paths, Paths::resolve(Path::new("/home/ada"), None, None));
+    }
+
+    #[test]
+    fn a_relative_override_or_home_is_an_error() {
+        for name in ["HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_PLUS_HOME"] {
+            let mut pairs = vec![("HOME", "/home/ada")];
+            pairs.retain(|(key, _)| *key != name);
+            pairs.push((name, "."));
+            let error = Paths::from_vars(vars(&pairs)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("{name} must be an absolute path, not .")
+            );
+        }
+    }
+
+    #[test]
+    fn the_data_dir_carries_a_marker_that_is_never_rewritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(temp.path(), None, None);
+        paths.ensure_data_dir().unwrap();
+        assert_eq!(paths.marker(), paths.data_dir.join(MARKER));
+        let text = std::fs::read_to_string(paths.marker()).unwrap();
+        assert!(
+            text.starts_with("claude-plus keeps its data here"),
+            "{text}"
+        );
+        std::fs::write(paths.marker(), "kept").unwrap();
+        paths.ensure_data_dir().unwrap();
+        assert_eq!(std::fs::read_to_string(paths.marker()).unwrap(), "kept");
     }
 
     #[test]
