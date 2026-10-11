@@ -4,6 +4,7 @@ mod instructions;
 mod mcp;
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -163,22 +164,50 @@ pub(crate) struct Text {
 }
 
 pub(crate) fn read_text(path: &Path) -> Option<Text> {
-    let metadata = std::fs::metadata(path).ok()?;
+    read_text_up_to(path, MAX_FILE_BYTES)
+}
+
+pub(crate) fn read_text_up_to(path: &Path, limit: u64) -> Option<Text> {
+    let file = open_without_blocking(path).ok()?;
+    let metadata = file.metadata().ok()?;
     if !metadata.is_file() {
         return None;
     }
-    if metadata.len() > MAX_FILE_BYTES {
-        return Some(Text {
-            content: None,
-            chars: metadata.len(),
-        });
+    let oversized = Text {
+        content: None,
+        chars: metadata.len().max(limit + 1),
+    };
+    if metadata.len() > limit {
+        return Some(oversized);
     }
-    let bytes = std::fs::read(path).ok()?;
+    let Some(bytes) = bounded(file, limit).ok()? else {
+        return Some(oversized);
+    };
     let content = String::from_utf8_lossy(&bytes).into_owned();
     Some(Text {
         chars: content.chars().count() as u64,
         content: Some(content),
     })
+}
+
+#[cfg(unix)]
+fn open_without_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_without_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+fn bounded(reader: impl Read, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    reader.take(limit + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= limit).then_some(bytes))
 }
 
 pub(crate) fn read_json(path: &Path) -> Option<Value> {
@@ -359,6 +388,31 @@ mod tests {
         );
         assert!(read_text(&home.path("missing.md")).is_none());
         assert!(read_text(home.temp.path()).is_none());
+    }
+
+    #[test]
+    fn a_file_that_grows_past_the_cap_while_being_read_is_not_read_whole() {
+        let limit = 8;
+        let grown = std::io::Cursor::new(vec![b'x'; limit as usize + 1]);
+        assert_eq!(bounded(grown, limit).unwrap(), None);
+        let fits = std::io::Cursor::new(vec![b'x'; limit as usize]);
+        assert_eq!(
+            bounded(fits, limit).unwrap(),
+            Some(vec![b'x'; limit as usize])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_like_a_config_file_is_skipped_without_blocking() {
+        let home = Home::new();
+        let fifo = home.path("CLAUDE.md");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(read_text(&fifo).is_none());
     }
 
     #[test]
