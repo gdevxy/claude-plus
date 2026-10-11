@@ -103,6 +103,9 @@ enum DaemonAction {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    if !matches!(cli.command, Command::Daemon { .. }) {
+        end_quietly_when_the_reader_goes_away();
+    }
     let paths = Paths::from_env()?;
     let prices = PriceTable::bundled();
     match cli.command {
@@ -123,6 +126,13 @@ pub fn run() -> Result<()> {
             rescan_secs,
             ..
         } => daemon::run(&paths, prices, detached, rescan_secs),
+    }
+}
+
+fn end_quietly_when_the_reader_goes_away() {
+    // SAFETY: restoring the default action of SIGPIPE has no preconditions.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 

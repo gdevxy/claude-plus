@@ -808,3 +808,18 @@ fn export_rejects_an_unknown_format() {
         .failure()
         .stderr(predicate::str::contains("--format <FORMAT>"));
 }
+
+#[test]
+fn a_reader_that_goes_away_ends_the_output_without_a_panic() {
+    use std::os::unix::process::ExitStatusExt;
+    let env = env();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = common::process(&env, &["doctor"])
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.signal(), Some(libc::SIGPIPE));
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+}

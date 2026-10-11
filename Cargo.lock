@@ -212,6 +212,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "indicatif",
+ "libc",
  "notify",
  "predicates",
  "rusqlite",

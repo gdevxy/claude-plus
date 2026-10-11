@@ -15,6 +15,7 @@ http-body-util = "0.1.5"
 hyper = { version = "1.11.1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["http1", "server-graceful", "tokio"] }
 indicatif = "0.18.6"
+libc = "0.2.190"
 notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
