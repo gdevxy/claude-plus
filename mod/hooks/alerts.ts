@@ -8,14 +8,23 @@ export const CONTEXT_ASK_PCT = 60
 export const ALERT_TOAST_MS = 8000
 export const CHIME = 'sounds/chime.wav'
 
-export const EMPTY_ALERTED: Alerted = { session: null, cacheFor: null, paceFor: null, contextFired: false, threshold: null, thresholdAsked: false }
+export const EMPTY_ALERTED: Alerted = { session: null, model: null, cacheFor: null, paceFor: null, contextFired: false, threshold: null, thresholdAsked: false }
 
 export type Alert = { kind: 'cache' | 'pace' | 'context'; text: string }
 
 export type AlertInput = { nowMs: number; snapshot: Snapshot | null; local: Local; daemon: Daemon; known: Alerted }
 
-export function ownAlerts(known: Alerted, session: string | null): Alerted {
-  return known.session === session ? known : { ...EMPTY_ALERTED, session }
+export function ownAlerts(known: Alerted, session: string | null, model: string | null = known.model): Alerted {
+  if (known.session !== session) return { ...EMPTY_ALERTED, session, model }
+  if (model === null || known.model === model) return known
+  if (known.model === null) return { ...known, model }
+  return { ...known, model, threshold: null, thresholdAsked: false }
+}
+
+export function merged(current: Alerted, before: Alerted, after: Alerted): Alerted {
+  if (after.session !== before.session) return after
+  const changed = (Object.keys(after) as (keyof Alerted)[]).filter(key => after[key] !== before[key])
+  return changed.reduce((result, key) => ({ ...result, [key]: after[key] }), current)
 }
 
 export function thresholdOf(local: Local, known: Alerted): number | null {
@@ -24,11 +33,12 @@ export function thresholdOf(local: Local, known: Alerted): number | null {
 
 export function wantsThreshold(local: Local, known: Alerted): boolean {
   const percent = local.measure?.contextPercent ?? null
-  return percent !== null && percent >= CONTEXT_ASK_PCT && thresholdOf(local, ownAlerts(known, local.session)) === null && !ownAlerts(known, local.session).thresholdAsked
+  const own = ownAlerts(known, local.session, local.model)
+  return percent !== null && percent >= CONTEXT_ASK_PCT && thresholdOf(local, own) === null && !own.thresholdAsked
 }
 
 export function alertsOf(input: AlertInput): { alerts: Alert[]; next: Alerted } {
-  const known = ownAlerts(input.known, input.local.session)
+  const known = ownAlerts(input.known, input.local.session, input.local.model)
   const alerts: Alert[] = []
   const next: Alerted = { ...known }
   const snapshot = current(input)

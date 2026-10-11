@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { AlertInput } from '../hooks/alerts'
-import { EMPTY_ALERTED, alertsOf, ownAlerts, thresholdOf, wantsThreshold } from '../hooks/alerts'
+import { EMPTY_ALERTED, alertsOf, merged, ownAlerts, thresholdOf, wantsThreshold } from '../hooks/alerts'
 import type { Alerted, LimitWindow, Local } from '../types'
 import { MINUTE_MS, NOW_MS, local, snapshot } from './fixtures'
 
@@ -89,9 +89,28 @@ describe('alerts', () => {
   })
 
   test('a new session starts with nothing alerted', () => {
-    const before: Alerted = { session: 's0', cacheFor: 1, paceFor: 2, contextFired: true, threshold: 3, thresholdAsked: true }
+    const before: Alerted = { session: 's0', model: null, cacheFor: 1, paceFor: 2, contextFired: true, threshold: 3, thresholdAsked: true }
     expect(ownAlerts(before, 's1')).toEqual({ ...EMPTY_ALERTED, session: 's1' })
     expect(ownAlerts(before, 's0')).toBe(before)
     expect(alertsOf(input({ snapshot: expiring(59_000), known: { ...before, cacheFor: NOW_MS + 59_000 } })).alerts.map(alert => alert.kind)).toEqual(['cache'])
+  })
+
+  test('another model forgets the threshold learned for the previous one', () => {
+    const learned: Alerted = { ...KNOWN, model: 'claude-opus-5-5', threshold: 167_000, thresholdAsked: true }
+    const switched = local({ ...near(170_000, null), model: 'claude-sonnet-5-5[1m]' })
+    expect(ownAlerts(learned, 's1', 'claude-sonnet-5-5[1m]')).toEqual({ ...learned, model: 'claude-sonnet-5-5[1m]', threshold: null, thresholdAsked: false })
+    expect(ownAlerts(learned, 's1', 'claude-opus-5-5')).toBe(learned)
+    expect(ownAlerts({ ...KNOWN, threshold: 167_000 }, 's1', 'claude-opus-5-5')).toEqual({ ...KNOWN, threshold: 167_000, model: 'claude-opus-5-5' })
+    expect(alertsOf(input({ local: switched, known: learned })).alerts).toEqual([])
+    expect(wantsThreshold(switched, learned)).toBe(true)
+  })
+
+  test('decided alerts are merged onto what changed meanwhile instead of replacing it', () => {
+    const before: Alerted = { ...KNOWN, model: 'claude-opus-5-5' }
+    const decided: Alerted = { ...before, cacheFor: NOW_MS + 59_000 }
+    const meanwhile: Alerted = { ...before, thresholdAsked: true, threshold: 167_000 }
+    expect(merged(meanwhile, before, decided)).toEqual({ ...meanwhile, cacheFor: NOW_MS + 59_000 })
+    const newSession: Alerted = { ...EMPTY_ALERTED, session: 's2' }
+    expect(merged(meanwhile, before, newSession)).toEqual(newSession)
   })
 })

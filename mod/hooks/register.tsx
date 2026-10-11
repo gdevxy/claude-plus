@@ -3,7 +3,7 @@ import type { EngineInterface, JsonValue, PluginOptions, Register, Timer } from 
 
 import type { Alerted, Chart, ContextReport, Daemon, DaemonStatus, Failures, HistoryFailure, HistoryRange, InsightsFailure, InsightsReport, Local, Motion, PaneState, PlusView, Reports, Snapshot } from '../types'
 import type { Io, PlusEvent, Reply } from './client'
-import { ALERT_TOAST_MS, CHIME, EMPTY_ALERTED, alertsOf, ownAlerts, wantsThreshold } from './alerts'
+import { ALERT_TOAST_MS, CHIME, EMPTY_ALERTED, alertsOf, merged, ownAlerts, wantsThreshold } from './alerts'
 import { Outbox, breakdownOf, eventId, eventsBody, fetchContext, fetchHistory, fetchInsights, fetchSnapshot, measureOf, send, socketPath, usageData } from './client'
 import { contextScreen } from './context'
 import { money } from './format'
@@ -55,7 +55,7 @@ const failures = atom({ plugin: 'plus', key: 'failures' } as const, {} as Failur
 const chart = atom({ plugin: 'plus', key: 'chart' } as const, { range: '7d', metric: 'cost' } as Chart)
 const insights = atom({ plugin: 'plus', key: 'insights' } as const, null as InsightsReport | null, { shape: 'insights-1' })
 const insightsFailure = atom({ plugin: 'plus', key: 'insightsFailure' } as const, null as InsightsFailure | null)
-const alerted = atom({ plugin: 'plus', key: 'alerted' } as const, EMPTY_ALERTED as Alerted, { shape: 'alerted-1' })
+const alerted = atom({ plugin: 'plus', key: 'alerted' } as const, EMPTY_ALERTED as Alerted, { shape: 'alerted-2' })
 const theme = atom({ plugin: 'plus', key: 'theme' } as const, 'auto')
 const local = atom({ plugin: 'plus', key: 'local' } as const, EMPTY_LOCAL as Local, { shape: 'local-2' })
 const pane = atom({ plugin: 'plus', key: 'pane' } as const, { session: null, asked: false, unasked: 'settled' } as PaneState)
@@ -89,6 +89,9 @@ type Runtime = {
   usageRunning: boolean
   usageAtMs: number
   shownStatus: string | undefined
+  greeting: boolean
+  greetPending: boolean
+  toastUntilMs: number
 }
 
 function fresh(options: PluginOptions): Runtime {
@@ -117,6 +120,9 @@ function fresh(options: PluginOptions): Runtime {
     usageRunning: false,
     usageAtMs: -Infinity,
     shownStatus: undefined,
+    greeting: false,
+    greetPending: false,
+    toastUntilMs: -Infinity,
   }
 }
 
@@ -187,7 +193,9 @@ async function tick($: EngineInterface): Promise<void> {
       if (historyWanted) quietly(pollHistory($))
       if (insightsWanted) quietly(pollInsights($))
     }
-    if (needsEnsure((await read($, daemon)).status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($))
+    const status = (await read($, daemon)).status
+    if (needsEnsure(status) && at - runtime.ensuredAtMs >= ENSURE_RETRY_MS) quietly(ensureDaemon($))
+    if (greetAgainWanted(status, at)) quietly(greet($, Promise.resolve()))
   } catch {
     return
   } finally {
@@ -343,33 +351,57 @@ async function pollInsights($: EngineInterface): Promise<InsightsReport | null> 
 }
 
 async function greet($: EngineInterface, ensured: Promise<void>): Promise<void> {
-  await ensured
-  if ((await read($, daemon)).status !== 'ok') return
-  const recap = (await pollInsights($))?.recap ?? null
-  if (recap === null || (await $.store.get(RECAP_KEY)) === recap.start_ms) return
-  await $.store.set(RECAP_KEY, recap.start_ms)
-  $.ui.toast(recapText(recap), { timeoutMs: RECAP_TOAST_MS })
+  runtime.greeting = true
+  runtime.greetPending = false
+  try {
+    await ensured
+    if ((await read($, daemon)).status !== 'ok') {
+      runtime.greetPending = true
+      return
+    }
+    const report = await pollInsights($)
+    if (report === null) {
+      runtime.greetPending = (await read($, insightsFailure))?.kind !== 'missing'
+      return
+    }
+    const recap = report.recap
+    if (recap === null || (await $.store.get(RECAP_KEY)) === recap.start_ms) return
+    await $.store.set(RECAP_KEY, recap.start_ms)
+    await toast($, recapText(recap), RECAP_TOAST_MS)
+  } finally {
+    runtime.greeting = false
+  }
+}
+
+function greetAgainWanted(status: Daemon['status'], at: number): boolean {
+  return runtime.greetPending && !runtime.greeting && !runtime.insightsRunning && status === 'ok' && at - runtime.insightsPolledAtMs >= INSIGHTS_POLL_MS
+}
+
+async function toast($: EngineInterface, text: string, timeoutMs: number): Promise<void> {
+  runtime.toastUntilMs = (await $.clock.now()) + timeoutMs
+  $.ui.toast(text, { timeoutMs })
 }
 
 async function raiseAlerts($: EngineInterface): Promise<void> {
-  if (!runtime.alerts || !runtime.interactive) return
+  if (!runtime.alerts || !runtime.interactive || runtime.greeting) return
+  if ((await $.clock.now()) < runtime.toastUntilMs) return
   const known = await read($, alerted)
   const input = { ...(await sources($)), known }
   const { alerts, next } = alertsOf(input)
-  if (JSON.stringify(next) !== JSON.stringify(known)) await update($, alerted, () => next)
-  for (const alert of alerts) {
-    $.ui.toast(alert.text, { timeoutMs: ALERT_TOAST_MS })
-    if (alert.kind === 'cache' && runtime.chime) quietly($.audio.play({ asset: CHIME }))
+  if (JSON.stringify(next) !== JSON.stringify(known)) await update($, alerted, current => merged(current, known, next))
+  if (alerts.length > 0) {
+    await toast($, alerts.map(alert => alert.text).join(' · '), ALERT_TOAST_MS)
+    if (runtime.chime && alerts.some(alert => alert.kind === 'cache')) quietly($.audio.play({ asset: CHIME }))
   }
-  if (wantsThreshold(input.local, next)) quietly(askThreshold($, input.local.session))
+  if (wantsThreshold(input.local, next)) quietly(askThreshold($, input.local.session, input.local.model))
 }
 
-async function askThreshold($: EngineInterface, session: string | null): Promise<void> {
-  await update($, alerted, known => ({ ...ownAlerts(known, session), thresholdAsked: true }))
+async function askThreshold($: EngineInterface, session: string | null, model: string | null): Promise<void> {
+  await update($, alerted, known => ({ ...ownAlerts(known, session, model), thresholdAsked: true }))
   const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
   const threshold = usage?.context.breakdown?.autoCompactThreshold ?? null
   if (threshold === null) return
-  await update($, alerted, known => (known.session === session ? { ...known, threshold } : known))
+  await update($, alerted, known => (known.session === session && known.model === model ? { ...known, threshold } : known))
 }
 
 function sessionRecap(kept: Snapshot | null, session: string): string | null {
@@ -633,7 +665,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     quietly(forward($, 'session.end', { reason: e.reason }, e.sessionId))
     const recap = runtime.interactive && (e.reason === 'clear' || e.reason === 'resume') ? sessionRecap(await read($, snapshot), e.sessionId) : null
-    if (recap !== null) $.ui.toast(recap, { timeoutMs: RECAP_TOAST_MS })
+    if (recap !== null) await toast($, recap, RECAP_TOAST_MS)
     return next(e)
   })
 

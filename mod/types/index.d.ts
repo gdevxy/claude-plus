@@ -285,6 +285,7 @@ export type InsightsFailure = HistoryFailure
 
 export type Alerted = {
   session: string | null
+  model: string | null
   cacheFor: number | null
   paceFor: number | null
   contextFired: boolean

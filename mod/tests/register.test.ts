@@ -1498,6 +1498,49 @@ describe('plus mod', () => {
     expect(wiring.toasts.length).toBe(1)
   })
 
+  test('two sessions that start together greet with the recap once', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { insightsLag: () => clock.sleep(1000) })
+    await start($)
+    wiring.session = 's2'
+    await start($)
+    await clock.advance(5000)
+    expect(wiring.toasts.map(toast => toast.text)).toEqual(['Yesterday: $12.40 · 94% cache hits · biggest win: 5 days in a row above 90% cache hits'])
+  })
+
+  test('a session that starts while the store is rebuilt is greeted once the daemon is ready', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { rebuilding: true, insightsStatus: 503 })
+    await start($)
+    await clock.advance(5000)
+    expect(wiring.toasts).toEqual([])
+    wiring.rebuilding = false
+    wiring.insightsStatus = null
+    await clock.advance(10_000)
+    expect(wiring.toasts.map(toast => toast.text)).toEqual(['Yesterday: $12.40 · 94% cache hits · biggest win: 5 days in a row above 90% cache hits'])
+    await clock.advance(60_000)
+    expect(wiring.toasts.length).toBe(1)
+  })
+
+  test('alerts wait for the recap toast to end and share one toast when they come together', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const base = snapshot()
+    const five: LimitWindow = { ...(base.live.limits[0] as LimitWindow), pace: { pct_per_hour: 40, projected_pct: 130, full_at_ms: NOW_MS + 42 * MINUTE_MS } }
+    const served = snapshot({ limits: [five], cache: { ...base.live.cache, expires_at_ms: NOW_MS + 50_000 } })
+    const wiring = wire(on, { served })
+    await start($)
+    await $.session.measure(MEASURE)
+    await clock.advance(5000)
+    expect(wiring.toasts.map(toast => toast.text)).toEqual(['Yesterday: $12.40 · 94% cache hits · biggest win: 5 days in a row above 90% cache hits'])
+    await clock.advance(5000)
+    expect(wiring.toasts.slice(1)).toEqual([
+      {
+        text: 'Cache goes cold in under a minute ✻ rewarming later costs ~$0.40 · At this pace the 5h limit runs out in 41m, before its reset in 2h 9m',
+        timeoutMs: 8000,
+      },
+    ])
+  })
+
   test('a session without a terminal gets no recap and no alerts', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on, { served: expiring(90_000) })
