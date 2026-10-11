@@ -71,7 +71,7 @@ pub fn stop(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn stopped(stopped: Stopped) -> String {
+pub fn stopped(stopped: Stopped) -> String {
     match stopped {
         Stopped::Stopped { pid: Some(pid) } => {
             format!("✻ Stopped the claude-plus daemon · pid {pid}")

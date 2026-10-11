@@ -1,14 +1,14 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
-use super::daemon::ensured;
+use super::daemon::{ensured, stopped};
 use crate::daemon::control::{self, is_older};
 use crate::paths::Paths;
 use crate::setup::bundle::{self, PLUGIN_ID};
 use crate::setup::claude::{self, ClaudeCode, Outcome, Step};
-use crate::setup::{Found, install_steps};
+use crate::setup::{Found, install_steps, uninstall_steps};
 
 const BINARY: &str = "claude-plus";
 
@@ -49,6 +49,46 @@ pub fn install(paths: &Paths, yes: bool) -> Result<()> {
     }
     println!(
         "✻ Start a new Claude Code session to see the pane: it docks beside the conversation from 144 columns, and /plus opens it at any width"
+    );
+    Ok(())
+}
+
+pub fn uninstall(paths: &Paths, purge: bool, yes: bool) -> Result<()> {
+    if purge && let Some(refusal) = purge_refusal(paths) {
+        bail!(refusal);
+    }
+    let claude = ClaudeCode::default();
+    let found = match claude.version()? {
+        Some(_) => Some(found(&claude)?),
+        None => None,
+    };
+    let steps = found.as_ref().map(uninstall_steps).unwrap_or_default();
+    let deleted = if purge {
+        vec![format!(
+            "delete {} with the history claude-plus keeps",
+            paths.data_dir.display()
+        )]
+    } else {
+        Vec::new()
+    };
+    confirm_settings(paths, "uninstall", &steps, &deleted, yes)?;
+    for step in &steps {
+        let outcome = claude.run(step)?;
+        println!("{}", uninstalled(step, &outcome));
+    }
+    if found.is_none() {
+        println!(
+            "Claude Code was not found on PATH, so the plus mod may still be installed: run claude plugin uninstall {PLUGIN_ID} where it is"
+        );
+    }
+    println!("{}", stopped(control::stop(paths)?));
+    bundle::remove(&paths.marketplace_dir())?;
+    if purge {
+        remove_dir(&paths.data_dir)?;
+        println!("✻ Deleted {}", paths.data_dir.display());
+    }
+    println!(
+        "✻ claude-plus is uninstalled · close open Claude Code sessions, or their pane starts the daemon again"
     );
     Ok(())
 }
@@ -133,10 +173,52 @@ fn installed(step: &Step, found: &Found, outcome: &Outcome) -> String {
     }
 }
 
+fn uninstalled(step: &Step, outcome: &Outcome) -> String {
+    match (step, outcome) {
+        (Step::Uninstall, Outcome::Done(_)) => "✻ Uninstalled the plus mod".into(),
+        (Step::RemoveMarketplace, Outcome::Done(_)) => {
+            "✻ Removed the claude-plus marketplace".into()
+        }
+        _ => said(outcome),
+    }
+}
+
 fn said(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Done(message) | Outcome::AlreadyDone(message) => format!("  {message}"),
     }
+}
+
+fn remove_dir(dir: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("cannot delete {}", dir.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn purge_refusal(paths: &Paths) -> Option<String> {
+    let data = paths
+        .data_dir
+        .canonicalize()
+        .unwrap_or(paths.data_dir.clone());
+    let guarded = [
+        paths.home.as_path(),
+        paths.claude_dir.as_path(),
+        Path::new("/"),
+    ];
+    guarded
+        .iter()
+        .map(|dir| dir.canonicalize().unwrap_or(dir.to_path_buf()))
+        .any(|dir| dir.starts_with(&data))
+        .then(|| {
+            format!(
+                "refusing to purge {}: it holds {} or your home directory",
+                paths.data_dir.display(),
+                paths.claude_dir.display()
+            )
+        })
 }
 
 pub fn path_warning(exe: &Path, path_var: Option<std::ffi::OsString>) -> Option<String> {
@@ -199,6 +281,25 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn purging_never_reaches_home_or_the_claude_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let refused = |plus: PathBuf| purge_refusal(&Paths::resolve(home, None, Some(plus)));
+        assert_eq!(refused(home.join(".claude-plus")), None);
+        assert!(refused(home.to_path_buf()).is_some());
+        assert!(refused(PathBuf::from("/")).is_some());
+        assert!(refused(home.join(".claude")).is_some());
+        assert!(
+            purge_refusal(&Paths::resolve(
+                home,
+                Some(home.join("a/claude")),
+                Some(home.join("a"))
+            ))
+            .is_some()
+        );
     }
 
     #[test]

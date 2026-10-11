@@ -42,6 +42,16 @@ enum Command {
         #[arg(short, long, help = "Agree to the Claude Code changes without asking")]
         yes: bool,
     },
+    #[command(about = "Remove the claude-plus pane from Claude Code and stop the daemon")]
+    Uninstall {
+        #[arg(
+            long,
+            help = "Also delete the claude-plus data directory and the history it keeps"
+        )]
+        purge: bool,
+        #[arg(short, long, help = "Agree to the changes without asking")]
+        yes: bool,
+    },
     #[command(about = "Read new Claude Code transcripts into the local store")]
     Import,
     #[command(about = "Show daily cost per model, importing first")]
@@ -102,6 +112,7 @@ pub fn run() -> Result<()> {
         Command::Doctor => doctor::run(&paths, &prices),
         Command::Reindex => reindex::run(&paths, &prices),
         Command::Install { yes } => setup::install(&paths, yes),
+        Command::Uninstall { purge, yes } => setup::uninstall(&paths, purge, yes),
         Command::Daemon {
             action: Some(DaemonAction::Stop),
             ..

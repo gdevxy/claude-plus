@@ -625,13 +625,14 @@ fn help_describes_every_command() {
     let env = env();
     let help = stdout_of(&env, &["--help"]);
     for line in [
-        "  install  Add the claude-plus pane to Claude Code and start the daemon\n",
-        "  import   Read new Claude Code transcripts into the local store\n",
-        "  stats    Show daily cost per model, importing first\n",
-        "  export   Print stored usage per day, project and model, importing first\n",
-        "  doctor   Check the setup and compare totals with Claude Code, read-only\n",
-        "  reindex  Rebuild every derived table from the stored records\n",
-        "  daemon   Run the daemon that keeps the store live, in the foreground\n",
+        "  install    Add the claude-plus pane to Claude Code and start the daemon\n",
+        "  uninstall  Remove the claude-plus pane from Claude Code and stop the daemon\n",
+        "  import     Read new Claude Code transcripts into the local store\n",
+        "  stats      Show daily cost per model, importing first\n",
+        "  export     Print stored usage per day, project and model, importing first\n",
+        "  doctor     Check the setup and compare totals with Claude Code, read-only\n",
+        "  reindex    Rebuild every derived table from the stored records\n",
+        "  daemon     Run the daemon that keeps the store live, in the foreground\n",
     ] {
         assert!(help.contains(line), "missing {line:?} in\n{help}");
     }

@@ -185,3 +185,94 @@ fn a_failing_claude_plugin_command_stops_the_install_with_its_reason() {
     );
     assert!(!env.plus.join("daemon.sock").exists());
 }
+
+#[test]
+fn uninstall_removes_the_mod_and_its_marketplace_and_stops_the_daemon() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    let before = env.claude_calls().len();
+    cmd(&env, &["uninstall", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(
+            "^✻ Uninstalled the plus mod\n✻ Removed the claude-plus marketplace\n✻ Stopped the claude-plus daemon · pid [0-9]+\n✻ claude-plus is uninstalled · close open Claude Code sessions, or their pane starts the daemon again\n$",
+        ).unwrap());
+    assert_eq!(
+        env.claude_calls()[before..],
+        [
+            "--version",
+            "plugin marketplace list --json",
+            "plugin list --json",
+            "plugin uninstall plus@claude-plus --json",
+            "plugin marketplace remove claude-plus --json",
+        ]
+    );
+    assert!(!marketplace(&env).exists());
+    assert!(env.plus.join("data.db").exists());
+}
+
+#[test]
+fn uninstall_asks_first_and_purge_deletes_the_data_dir() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["install", "--yes"]).assert().success();
+    cmd(&env, &["uninstall", "--purge"])
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(format!(
+            "  delete {} with the history claude-plus keeps\nContinue? [y/N] ",
+            env.plus.display()
+        )));
+    assert!(env.plus.join("data.db").exists());
+    cmd(&env, &["uninstall", "--purge"])
+        .write_stdin("y\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "✻ Deleted {}\n",
+            env.plus.display()
+        )));
+    assert!(!env.plus.exists());
+}
+
+#[test]
+fn purge_refuses_a_data_dir_that_holds_the_claude_dir_before_changing_anything() {
+    let env = env();
+    let parent = env.claude.parent().unwrap();
+    cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("CLAUDE_PLUS_HOME", parent)
+        .assert()
+        .failure()
+        .stderr(format!(
+            "claude-plus: refusing to purge {}: it holds {} or your home directory\n",
+            parent.display(),
+            env.claude.display()
+        ));
+    assert_eq!(env.claude_calls(), Vec::<String>::new());
+    assert!(env.claude.join("projects").exists());
+}
+
+#[test]
+fn uninstall_without_claude_code_still_stops_the_daemon() {
+    let env = env();
+    let _daemon = Daemon(&env);
+    cmd(&env, &["daemon", "--ensure"]).assert().success();
+    cmd(&env, &["uninstall"])
+        .env("PATH", "/usr/bin:/bin")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(
+            "Claude Code was not found on PATH, so the plus mod may still be installed: run claude plugin uninstall plus@claude-plus where it is\n✻ Stopped the claude-plus daemon · pid ",
+        ));
+}
+
+#[test]
+fn uninstalling_twice_finds_nothing_left() {
+    let env = env();
+    cmd(&env, &["uninstall"])
+        .assert()
+        .success()
+        .stdout("No claude-plus daemon is running\n✻ claude-plus is uninstalled · close open Claude Code sessions, or their pane starts the daemon again\n");
+}
