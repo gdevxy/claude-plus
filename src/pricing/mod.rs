@@ -105,6 +105,16 @@ impl PriceTable {
         Some(self.priced(&price.rates_for(tokens.prompt_total()), tokens))
     }
 
+    pub fn cost_within(
+        &self,
+        model: &str,
+        part: &TokenCounts,
+        whole_prompt_tokens: u64,
+    ) -> Option<f64> {
+        let price = self.models.get(normalize_model(model))?;
+        Some(self.priced(&price.rates_for(whole_prompt_tokens), part))
+    }
+
     pub fn base_cost(&self, model: &str, tokens: &TokenCounts) -> Option<f64> {
         let price = self.models.get(normalize_model(model))?;
         Some(self.priced(&price.base_rates(), tokens))

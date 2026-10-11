@@ -15,6 +15,7 @@ pub(crate) const SINCE: i64 = NOW_S - WINDOW_DAYS * DAY_S;
 pub(crate) const PROJECT: &str = "-work-demo";
 pub(crate) const OPUS: &str = "claude-opus-5-5";
 pub(crate) const SONNET: &str = "claude-sonnet-5-5";
+pub(crate) const HAIKU: &str = "claude-haiku-5-5";
 
 pub(crate) struct Fixture {
     pub prices: PriceTable,

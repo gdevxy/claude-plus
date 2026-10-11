@@ -101,7 +101,7 @@ impl Rule for LargeToolResults {
                 .main_requests()
                 .filter(|r| r.session_id == result.session_id)
                 .filter(|r| r.point.ts > result.ts && r.point.ts < until)
-                .map(|r| kept as f64 * ctx.per_prompt_token(r))
+                .map(|r| ctx.carried_usd(r, kept))
                 .sum();
             let tool = result.tool.clone().unwrap_or_else(|| "A tool".into());
             let source = sources.entry((tool, target_of(ctx, result))).or_default();
@@ -142,7 +142,7 @@ impl Rule for LargeToolResults {
             how: format!(
                 "Looks at main-thread tool results of {} characters or more in the last 14 days. \
                  Everything past the first {} characters is priced on each later request until the next compaction, \
-                 at what those requests paid per prompt token.",
+                 at what each request paid for the front of its prompt: a cache read while the cache was warm, a cache write when it was rewritten.",
                 grouped(LARGE_RESULT_CHARS),
                 grouped(KEPT_RESULT_CHARS)
             ),
@@ -190,8 +190,7 @@ impl Rule for LateCompaction {
             let session = sessions.entry(&request.session_id).or_default();
             session.0 += 1;
             session.1 = session.1.max(prompt);
-            session.2 +=
-                REGROWTH * (prompt - LATE_PROMPT_TOKENS) as f64 * ctx.per_prompt_token(request);
+            session.2 += REGROWTH * ctx.carried_usd(request, prompt - LATE_PROMPT_TOKENS);
         }
         let mut late: Vec<(&str, (usize, u64, f64))> = sessions
             .into_iter()
@@ -408,7 +407,7 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.session("s1", PROJECT, Some("Big refactor"));
         for n in 1..=100 {
-            fixture.request("s1", SINCE + n * 10, OPUS, counts(0, 100_000, 0, 10));
+            fixture.request("s1", SINCE + n * 10, OPUS, counts(2_000, 100_000, 0, 10));
         }
         fixture.large(
             "s1",

@@ -1,5 +1,6 @@
 use super::fixture::*;
 use super::*;
+use crate::transcript::TokenCounts;
 
 fn finding(rule: RuleId, saving_usd: Option<f64>) -> Finding {
     Finding {
@@ -50,16 +51,35 @@ fn findings_rank_by_weekly_saving_then_rule_with_unpriced_ones_last() {
 }
 
 #[test]
-fn a_prompt_token_costs_what_its_request_paid_per_prompt_token() {
+fn carried_tokens_cost_what_the_front_of_each_prompt_paid() {
     let mut fixture = Fixture::new();
     fixture.request("s1", SINCE + 10, OPUS, counts(1_000, 99_000, 0, 5_000));
-    fixture.request("s1", SINCE + 20, OPUS, counts(0, 0, 0, 5_000));
-    let ctx = fixture.ctx();
-    close(
-        ctx.per_prompt_token(&fixture.requests[0]),
-        0.0238 / 100_000.0,
+    fixture.request("s1", SINCE + 20, OPUS, counts(0, 0, 100_000, 5_000));
+    fixture.request(
+        "s1",
+        SINCE + 30,
+        OPUS,
+        TokenCounts {
+            input: 50_000,
+            cache_read: 4_000,
+            cache_write_1h: 3_000,
+            cache_write_5m: 2_000,
+            output: 5_000,
+            ..Default::default()
+        },
     );
-    close(ctx.per_prompt_token(&fixture.requests[1]), 0.0);
+    fixture.request("s1", SINCE + 40, OPUS, counts(6_000, 0, 0, 5_000));
+    fixture.request("s1", SINCE + 50, HAIKU, counts(0, 150_000, 0, 5_000));
+    let ctx = fixture.ctx();
+    let usd = |n: usize| ctx.carried_usd(&fixture.requests[n], 10_000);
+    close(usd(0), 10_000.0 * 0.2 / 1e6);
+    close(usd(1), 10_000.0 * 5.0 / 1e6);
+    close(
+        usd(2),
+        (4_000.0 * 0.2 + 3_000.0 * 8.0 + 2_000.0 * 5.0 + 1_000.0 * 4.0) / 1e6,
+    );
+    close(usd(3), 6_000.0 * 4.0 / 1e6);
+    close(usd(4), 10_000.0 * 0.05 / 1e6);
 }
 
 #[test]
@@ -67,13 +87,17 @@ fn carrying_tokens_costs_them_on_every_main_request_of_the_project() {
     let mut fixture = Fixture::new();
     fixture.session("s1", PROJECT, None);
     fixture.session("s2", "-work-other", None);
+    fixture.request("s1", SINCE + 5, OPUS, counts(0, 0, 100_000, 10));
     fixture.request("s1", SINCE + 10, OPUS, counts(0, 100_000, 0, 10));
     fixture.request("s1", SINCE + 20, OPUS, counts(0, 100_000, 0, 10));
     fixture.subagent("s1", SINCE + 30, OPUS, counts(0, 100_000, 0, 10));
     fixture.request("s2", SINCE + 40, OPUS, counts(0, 100_000, 0, 10));
     let ctx = fixture.ctx();
-    close(ctx.carrying_usd(10_000), 2.0 * 10_000.0 * 0.2 / 1e6);
-    assert_eq!(ctx.project_requests(), 2);
+    close(
+        ctx.carrying_usd(10_000),
+        10_000.0 * 5.0 / 1e6 + 2.0 * 10_000.0 * 0.2 / 1e6,
+    );
+    assert_eq!(ctx.project_requests(), 3);
     fixture.project = None;
     close(fixture.ctx().carrying_usd(10_000), 0.0);
 }

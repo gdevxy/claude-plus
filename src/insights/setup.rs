@@ -97,7 +97,7 @@ fn unused(
             Confidence::Medium
         },
         how: format!(
-            "{} Every main-thread request in this project carries {}, and the saving prices them at what those requests paid per prompt token. {}",
+            "{} Every main-thread request in this project carries {}, and the saving prices them at what each request paid for the front of its prompt: a cache read while the cache was warm, a cache write when it was rewritten. {}",
             if measured {
                 "Token sizes come from Claude Code's own /context breakdown."
             } else {
@@ -226,11 +226,19 @@ mod tests {
     use super::*;
     use crate::insights::fixture::*;
 
+    const OPUS_READ: f64 = 0.2 / 1e6;
+    const OPUS_WRITE_5M: f64 = 5.0 / 1e6;
+
     fn busy(fixture: &mut Fixture) {
         fixture.session("s1", PROJECT, None);
-        for n in 0..1_000 {
+        fixture.request("s1", SINCE, OPUS, counts(0, 0, 100_000, 10));
+        for n in 1..1_000 {
             fixture.request("s1", SINCE + n, OPUS, counts(0, 100_000, 0, 10));
         }
+    }
+
+    fn carried_on_busy(tokens: f64) -> f64 {
+        tokens * OPUS_WRITE_5M + 999.0 * tokens * OPUS_READ
     }
 
     #[test]
@@ -251,7 +259,7 @@ mod tests {
             "turn off 2 MCP servers you have not used in 14 days"
         );
         assert_eq!(finding.confidence, Confidence::High);
-        assert!((finding.saving_usd.unwrap() - 1_000.0 * 60_000.0 * 0.2 / 1e6 / 2.0).abs() < 1e-9);
+        assert!((finding.saving_usd.unwrap() - carried_on_busy(60_000.0) / 2.0).abs() < 1e-9);
         assert_eq!(
             finding.evidence,
             [
@@ -313,7 +321,7 @@ mod tests {
         let carried = fixture
             .ratios
             .tokens(2 * rule.len() as u64 + excess, TextKind::Prose);
-        let expected = 1_000.0 * carried as f64 * 0.2 / 1e6 / 2.0;
+        let expected = carried_on_busy(carried as f64) / 2.0;
         assert!((finding.saving_usd.unwrap() - expected).abs() < 1e-9);
     }
 

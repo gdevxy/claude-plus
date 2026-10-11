@@ -128,11 +128,19 @@ pub fn rank(mut findings: Vec<Finding>) -> Vec<Finding> {
     findings
 }
 
-pub fn prompt_part(tokens: &TokenCounts) -> TokenCounts {
+pub fn front_of_prompt(tokens: &TokenCounts, carried: u64) -> TokenCounts {
+    let mut left = carried;
+    let mut take = |available: u64| {
+        let taken = left.min(available);
+        left -= taken;
+        taken
+    };
     TokenCounts {
-        output: 0,
-        thinking: 0,
-        ..*tokens
+        cache_read: take(tokens.cache_read),
+        cache_write_1h: take(tokens.cache_write_1h),
+        cache_write_5m: take(tokens.cache_write_5m),
+        input: take(tokens.input),
+        ..Default::default()
     }
 }
 
@@ -185,20 +193,21 @@ impl InsightContext<'_> {
             })
     }
 
-    pub fn per_prompt_token(&self, request: &SpentRequest) -> f64 {
-        let prompt = request.point.tokens.prompt_total();
-        if prompt == 0 {
-            return 0.0;
-        }
+    pub fn carried_usd(&self, request: &SpentRequest, carried: u64) -> f64 {
+        let tokens = &request.point.tokens;
         self.prices
-            .cost(&request.point.model, &prompt_part(&request.point.tokens))
-            .map_or(0.0, |usd| usd / prompt as f64)
+            .cost_within(
+                &request.point.model,
+                &front_of_prompt(tokens, carried),
+                tokens.prompt_total(),
+            )
+            .unwrap_or(0.0)
     }
 
     pub fn carrying_usd(&self, tokens: u64) -> f64 {
         self.main_requests()
             .filter(|r| self.in_project(&r.session_id))
-            .map(|r| tokens as f64 * self.per_prompt_token(r))
+            .map(|r| self.carried_usd(r, tokens))
             .sum()
     }
 
