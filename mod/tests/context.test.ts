@@ -243,6 +243,13 @@ describe('context screen', () => {
     )
   })
 
+  test('says how old a breakdown is once it is more than a few minutes old', () => {
+    const report = contextReport()
+    const old = contextReport({ live: { ...report.live!, ts_ms: NOW_MS - 3 * 60 * MINUTE_MS } })
+    expect(text(line(contextScreen(input({ report: old })), 'ctx-categories'))).toBe('By category · 3h ago'.padEnd(36))
+    expect(text(line(contextScreen(input()), 'ctx-categories'))).toBe('By category'.padEnd(36))
+  })
+
   test('colors categories with Claude Code theme keys and falls back to text', () => {
     expect(themeColor('permission')).toBe('permission')
     expect(themeColor('purple_FOR_SUBAGENTS_ONLY')).toBe('text')

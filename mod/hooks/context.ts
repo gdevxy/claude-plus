@@ -3,7 +3,7 @@ import type { ThemeKey } from 'claude-code'
 import type { ConfigGroup, ContextItem, ContextReport, Daemon, History, ItemKind, LiveContext, Local, Part, SourceKind } from '../types'
 import { bar, duration, fit, modelName, percent, tokens } from './format'
 import type { Line } from './state'
-import { CONTEXT_WARNING, MIN_CONTENT, PADDING, gap, heading, meter, notice, pair, plain, prose } from './state'
+import { CONTEXT_WARNING, MIN_CONTENT, PADDING, WHY_COLUMNS, gap, heading, meter, notice, pair, plain, prose } from './state'
 
 export const LABEL_COLUMNS = 16
 export const VALUE_COLUMNS = 7
@@ -11,6 +11,7 @@ export const TOP_SHOWN = 6
 export const UNUSED_SHOWN = 4
 export const TOOL_RESULTS_SHOWN = 3
 export const DRILL_SHOWN = 8
+export const STALE_BREAKDOWN_MS = 5 * 60_000
 
 const CATEGORY_KINDS: Readonly<Record<string, ItemKind>> = {
   'Memory files': 'memory_file',
@@ -150,7 +151,10 @@ function categories(input: ContextInput, composition: LiveContext, width: number
       : [],
   )
   const drill = { items: reportOf(input)?.items ?? [], expanded: input.expanded }
-  const lines = [heading('ctx-categories', 'By category', width, 'categories'), ...shareRows(rows, width, false, drill)]
+  const age = Math.max(0, input.nowMs - composition.ts_ms)
+  const aged = `By category · ${duration(age)} ago`
+  const title = age > STALE_BREAKDOWN_MS && aged.length <= width - WHY_COLUMNS ? aged : 'By category'
+  const lines = [heading('ctx-categories', title, width, 'categories'), ...shareRows(rows, width, false, drill)]
   composition.categories.forEach((category, index) => {
     if (category.kind === 'free' || category.kind === 'buffer') {
       lines.push(pair(`ctx-cat-${index}`, `  ${category.name}`, tokens(category.tokens), width, { dim: true }, { dim: true }))
