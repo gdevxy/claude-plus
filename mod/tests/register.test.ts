@@ -52,13 +52,13 @@ const MEASURE = {
 }
 
 const HISTORY_HEADERS: Record<number, string> = {
-  40: ' ✻    1: Live 2: Ctx 3: History 4: Tips',
+  40: ' ✻       1: Live 2: Ctx 3: Hist 4: Tips',
   60: ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
   100: ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
 }
 
 const INSIGHTS_HEADERS: Record<number, string> = {
-  40: ' ✻   1: Live 2: Ctx 3: Hist 4: Insights',
+  40: ' ✻       1: Live 2: Ctx 3: Hist 4: Tips',
   60: ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
   100: ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
 }
@@ -155,7 +155,7 @@ const PANE_FRAMES: Record<number, string[]> = {
 
 const CONTEXT_FRAMES: Record<number, string[]> = {
   40: [
-    ' ✻   1: Live 2: Context 3: Hist 4: Tips',
+    ' ✻       1: Live 2: Ctx 3: Hist 4: Tips',
     '',
     ' Context · Opus 5.5          46k / 200k',
     ' ███████▋░░░░░░░░░░░░░░░░░░░░░░░░░  23%',
@@ -1134,7 +1134,7 @@ describe('plus mod', () => {
       const ui = await mount($, columns)
       await ui.press({ key: 'tab-history' })
       await clock.advance(1000)
-      expect((await ui.find({ key: 'tab-history' }))?.props).toEqual({ key: 'tab-history', hotkey: '3', plain: true, dimColor: false, label: 'History' })
+      expect((await ui.find({ key: 'tab-history' }))?.props).toEqual({ key: 'tab-history', hotkey: '3', plain: true, dimColor: false, label: columns === 40 ? 'Hist' : 'History' })
       expect((await ui.find({ key: 'range' }))?.props).toEqual({ key: 'range', hotkey: 'r', plain: true, label: '7 days' })
       expect((await ui.find({ key: 'metric' }))?.props).toEqual({ key: 'metric', hotkey: 'g', plain: true, label: 'Cost' })
       expect(wiring.fetched.filter(call => call.url.includes('/history')).map(call => call.url)).toEqual(['http://claude-plus/history?range=7d'])
@@ -1404,7 +1404,7 @@ describe('plus mod', () => {
       const ui = await mount($, columns)
       await ui.press({ key: 'tab-insights' })
       await clock.advance(1000)
-      expect((await ui.find({ key: 'tab-insights' }))?.props).toEqual({ key: 'tab-insights', hotkey: '4', plain: true, dimColor: false, label: 'Insights' })
+      expect((await ui.find({ key: 'tab-insights' }))?.props).toEqual({ key: 'tab-insights', hotkey: '4', plain: true, dimColor: false, label: columns === 40 ? 'Tips' : 'Insights' })
       expect(wiring.fetched.filter(call => call.url.includes('/insights')).map(call => call.url)).toEqual([
         'http://claude-plus/insights?session=s1',
         'http://claude-plus/insights?session=s1',

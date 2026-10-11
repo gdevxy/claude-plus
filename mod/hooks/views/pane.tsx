@@ -21,7 +21,7 @@ export function brandFor(inner: number, tabs: readonly Tab[]): string {
 
 export function shownTabs(inner: number, tabs: readonly Tab[]): Tab[] {
   if (SHORT_BRAND.length + 1 + buttonsWidth(tabs) <= inner) return [...tabs]
-  return tabs.map(tab => (tab.isActive ? tab : { ...tab, label: tab.short }))
+  return tabs.map(tab => ({ ...tab, label: tab.short }))
 }
 
 export function PaneBody({
