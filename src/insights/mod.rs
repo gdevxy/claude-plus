@@ -1,4 +1,5 @@
 mod cache;
+mod setup;
 pub mod words;
 
 use std::collections::BTreeMap;
@@ -13,6 +14,7 @@ use crate::store::{CompactionPoint, LargeResult, PromptPoint, SessionInfo, Spent
 use crate::transcript::TokenCounts;
 
 pub use cache::{CacheBusts, IdleRebuilds};
+pub use setup::{OversizedMemory, Retention, UnusedMcpServers, UnusedSkills};
 
 pub const INSIGHTS_VERSION: u32 = 1;
 pub const WINDOW_DAYS: i64 = 14;
@@ -94,7 +96,14 @@ pub struct InsightContext<'a> {
 }
 
 pub fn rules() -> Vec<Box<dyn Rule>> {
-    vec![Box::new(IdleRebuilds), Box::new(CacheBusts)]
+    vec![
+        Box::new(IdleRebuilds),
+        Box::new(UnusedMcpServers),
+        Box::new(UnusedSkills),
+        Box::new(OversizedMemory),
+        Box::new(CacheBusts),
+        Box::new(Retention),
+    ]
 }
 
 pub fn evaluate(ctx: &InsightContext) -> Vec<Finding> {

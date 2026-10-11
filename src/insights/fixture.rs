@@ -1,7 +1,7 @@
 use super::{DAY_S, InsightContext, MemoryText, Rebuilt, WINDOW_DAYS};
 use crate::cache_model::FIVE_MINUTES_MS;
 use crate::cache_model::{Rebuild, RebuildCause};
-use crate::context_model::{Item, Ratios};
+use crate::context_model::{Item, ItemKind, Ratios};
 use crate::history::Rates;
 use crate::limits::Fit;
 use crate::pricing::PriceTable;
@@ -33,7 +33,7 @@ pub(crate) struct Fixture {
     pub retention_days: Option<u64>,
 }
 
-pub(crate) fn tokens(input: u64, cache_read: u64, cache_write_5m: u64, output: u64) -> TokenCounts {
+pub(crate) fn counts(input: u64, cache_read: u64, cache_write_5m: u64, output: u64) -> TokenCounts {
     TokenCounts {
         input,
         cache_read,
@@ -153,5 +153,24 @@ impl Fixture {
                 effort: None,
             },
         });
+    }
+}
+
+pub(crate) fn item(kind: ItemKind, name: &str, tokens: u64, estimated: bool, uses: u64) -> Item {
+    Item {
+        kind,
+        name: name.into(),
+        detail: None,
+        tokens,
+        estimated,
+        uses_session: Some(0),
+        uses_14d: Some(uses),
+    }
+}
+
+pub(crate) fn memory(name: &str, text: &str) -> MemoryText {
+    MemoryText {
+        name: name.into(),
+        text: text.into(),
     }
 }

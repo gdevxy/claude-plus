@@ -52,8 +52,8 @@ fn findings_rank_by_weekly_saving_then_rule_with_unpriced_ones_last() {
 #[test]
 fn a_prompt_token_costs_what_its_request_paid_per_prompt_token() {
     let mut fixture = Fixture::new();
-    fixture.request("s1", SINCE + 10, OPUS, tokens(1_000, 99_000, 0, 5_000));
-    fixture.request("s1", SINCE + 20, OPUS, tokens(0, 0, 0, 5_000));
+    fixture.request("s1", SINCE + 10, OPUS, counts(1_000, 99_000, 0, 5_000));
+    fixture.request("s1", SINCE + 20, OPUS, counts(0, 0, 0, 5_000));
     let ctx = fixture.ctx();
     close(
         ctx.per_prompt_token(&fixture.requests[0]),
@@ -67,10 +67,10 @@ fn carrying_tokens_costs_them_on_every_main_request_of_the_project() {
     let mut fixture = Fixture::new();
     fixture.session("s1", PROJECT, None);
     fixture.session("s2", "-work-other", None);
-    fixture.request("s1", SINCE + 10, OPUS, tokens(0, 100_000, 0, 10));
-    fixture.request("s1", SINCE + 20, OPUS, tokens(0, 100_000, 0, 10));
-    fixture.subagent("s1", SINCE + 30, OPUS, tokens(0, 100_000, 0, 10));
-    fixture.request("s2", SINCE + 40, OPUS, tokens(0, 100_000, 0, 10));
+    fixture.request("s1", SINCE + 10, OPUS, counts(0, 100_000, 0, 10));
+    fixture.request("s1", SINCE + 20, OPUS, counts(0, 100_000, 0, 10));
+    fixture.subagent("s1", SINCE + 30, OPUS, counts(0, 100_000, 0, 10));
+    fixture.request("s2", SINCE + 40, OPUS, counts(0, 100_000, 0, 10));
     let ctx = fixture.ctx();
     close(ctx.carrying_usd(10_000), 2.0 * 10_000.0 * 0.2 / 1e6);
     assert_eq!(ctx.project_requests(), 2);
@@ -81,7 +81,7 @@ fn carrying_tokens_costs_them_on_every_main_request_of_the_project() {
 #[test]
 fn a_priced_finding_reports_a_weekly_saving_with_its_share_of_a_five_hour_window() {
     let mut fixture = Fixture::new();
-    fixture.request("s1", SINCE + 10, OPUS, tokens(0, 100_000, 0, 10));
+    fixture.request("s1", SINCE + 10, OPUS, counts(0, 100_000, 0, 10));
     assert_eq!(
         fixture.ctx().priced(draft(), 3.0),
         Some(Finding {
@@ -104,9 +104,9 @@ fn a_priced_finding_reports_a_weekly_saving_with_its_share_of_a_five_hour_window
 fn the_dominant_model_is_the_one_the_main_thread_spent_most_on() {
     let mut fixture = Fixture::new();
     assert_eq!(fixture.ctx().dominant_model(), "");
-    fixture.request("s1", SINCE + 10, SONNET, tokens(100_000, 0, 0, 10));
-    fixture.request("s1", SINCE + 20, OPUS, tokens(10_000, 0, 0, 10));
-    fixture.subagent("s1", SINCE + 30, OPUS, tokens(900_000, 0, 0, 10));
+    fixture.request("s1", SINCE + 10, SONNET, counts(100_000, 0, 0, 10));
+    fixture.request("s1", SINCE + 20, OPUS, counts(10_000, 0, 0, 10));
+    fixture.subagent("s1", SINCE + 30, OPUS, counts(900_000, 0, 0, 10));
     assert_eq!(fixture.ctx().dominant_model(), SONNET);
 }
 
