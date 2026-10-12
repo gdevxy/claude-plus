@@ -1167,7 +1167,7 @@ describe('plus mod', () => {
     expect((sent?.data.mcpTools as unknown[]).length).toBe(1)
   })
 
-  test('the Live view asks for a breakdown once per ten minutes of turns, the Context view once a minute', async ($, on) => {
+  test('the Live view asks for a breakdown once per ten minutes of turns, the Context view once a minute', { options: { animations: false } }, async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
     const wiring = wire(on)
     await start($)
