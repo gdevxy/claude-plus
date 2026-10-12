@@ -92,7 +92,7 @@ A session is Unknown when claude-plus cannot tell its account, which is the case
 Unknown sessions count under All accounts only, so History, `stats` and the budget of an account leave them out.
 
 Sessions run in the Claude desktop app are attributed to the account the desktop app is signed in to, even when the CLI is signed in to another one.
-claude-plus reads the session list the desktop app keeps in `~/Library/Application Support/Claude/claude-code-sessions` (`~/.config/Claude` on Linux) on every import and every minute in the daemon, and only reads it.
+claude-plus reads the session list the desktop app keeps in `~/Library/Application Support/Claude/claude-code-sessions` (`~/.config/Claude/claude-code-sessions` on Linux) on every import and every minute in the daemon, and only reads it.
 An account seen only there is called `Desktop account <first 8 characters of its id>` until the CLI signs in to it or you rename it.
 `claude-plus doctor` shows how many desktop session files it read and how many it skipped, and says so when part of the folder cannot be read.
 `claude-plus import` names skipped files only when it imports locally; when the daemon runs, they are in `daemon.log`.
@@ -165,7 +165,7 @@ Run `claude-plus uninstall` before you remove the binary with `brew uninstall cl
 | `claude-plus accounts assign <account> [--project <glob>] [--since <day>] [--until <day>] [--dry-run]` | Attribute Unknown sessions to an account. |
 | `claude-plus accounts unassign [--project <glob>] [--since <day>] [--until <day>] [--dry-run]` | Make assigned sessions Unknown again. |
 | `claude-plus budget set <usd> \| show \| clear [--account <account>]` | Set, show or clear the monthly budget of an account. |
-| `claude-plus doctor` | Check the binary, daemon, mod, Claude Code version and transcript retention. |
+| `claude-plus doctor` | Check the binary, daemon, mod, Claude Code version, transcript retention and the desktop app's sessions. |
 | `claude-plus import` | Read new transcripts into the store, with progress. |
 | `claude-plus reindex` | Rebuild derived tables from stored records. |
 | `claude-plus daemon [--ensure [--unless-stopped]]` | Run the daemon, or start it detached unless one answers; with `--unless-stopped`, leave one stopped by `daemon stop` stopped. |
