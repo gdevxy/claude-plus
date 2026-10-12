@@ -57,7 +57,8 @@ A missing folder means there is nothing to read and is not logged.
 
 From each file claude-plus reads `cliSessionId` and `priorCliSessionIds`, and nothing else.
 Every listed id is attributed to `oauth:<accountUuid>`, where `<accountUuid>` is the file's grandparent folder name.
-A folder name that is not a UUID, a file that is not valid JSON, or a file without `cliSessionId` is skipped and logged once per run.
+A folder name that is not a UUID or a file that is not valid JSON is skipped and logged once per run.
+A file with no `cliSessionId` and no `priorCliSessionIds` is a desktop session that never ran a CLI session; it is ignored silently, since about a quarter of real files are like that.
 Ids that match no imported session are kept anyway, so a transcript imported later is already attributed.
 
 The scan runs:

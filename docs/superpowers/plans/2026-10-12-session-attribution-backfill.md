@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn files_outside_an_account_folder_broken_or_without_a_cli_session_are_skipped() {
+    fn files_outside_an_account_folder_or_broken_are_skipped_and_a_desktop_only_session_is_ignored() {
         let temp = tempfile::tempdir().unwrap();
         write(temp.path(), "not-a-uuid", "a.json", r#"{"cliSessionId":"x"}"#);
         write(temp.path(), ACCOUNT, "b.json", r#"{"cliSession"#);
@@ -548,7 +548,6 @@ mod tests {
             reasons(&scan),
             vec![
                 ("b.json".to_string(), "is not valid JSON"),
-                ("c.json".to_string(), "has no cliSessionId"),
                 ("d.json".to_string(), "is not a desktop session file"),
                 ("a.json".to_string(), "is not in an account folder"),
             ]
@@ -675,7 +674,6 @@ const NOT_IN_ACCOUNT: &str = "is not in an account folder";
 const UNREADABLE: &str = "cannot be read";
 const NOT_JSON: &str = "is not valid JSON";
 const NOT_SESSION_FILE: &str = "is not a desktop session file";
-const NO_CLI_SESSION: &str = "has no cliSessionId";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopSession {
@@ -757,6 +755,7 @@ impl DesktopReader {
             }
             scan.files_read += 1;
             match read_session(path) {
+                Ok(session) if session.cli_session_ids.is_empty() => {}
                 Ok(session) => scan.sessions.push(session),
                 Err(reason) => scan.skipped.push(Skipped {
                     path: path.to_path_buf(),
@@ -785,12 +784,11 @@ fn read_session(path: &Path) -> Result<DesktopSession, &'static str> {
             NOT_JSON
         }
     })?;
-    let current = file
+    let cli_session_ids = file
         .cli_session_id
+        .into_iter()
+        .chain(file.prior_cli_session_ids)
         .filter(|id| !id.is_empty())
-        .ok_or(NO_CLI_SESSION)?;
-    let cli_session_ids = std::iter::once(current)
-        .chain(file.prior_cli_session_ids.into_iter().filter(|id| !id.is_empty()))
         .collect();
     Ok(DesktopSession {
         account_uuid,
