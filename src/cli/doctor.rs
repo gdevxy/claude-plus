@@ -2,11 +2,12 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::format::{duration, plural, usd};
+use super::format::{count, duration, plural, usd};
 use super::labeled;
 use crate::accounts::{Login, read_login};
 use crate::api;
 use crate::daemon::control::{self, Status};
+use crate::desktop::DesktopReader;
 use crate::ingest::discover;
 use crate::paths::Paths;
 use crate::pricing::{PriceTable, UserPrices};
@@ -51,6 +52,10 @@ pub fn run(paths: &Paths, user_prices: &UserPrices) -> Result<()> {
             &prices_line(PriceTable::bundled().version(), user_prices)
         )
     );
+    println!(
+        "{}",
+        labeled("Desktop:", &desktop_line(&paths.desktop_sessions_dir()))
+    );
 
     match readable_store(paths)? {
         Some(store) => print_database(&store, &status),
@@ -86,6 +91,25 @@ fn is_not_found(error: &anyhow::Error) -> bool {
         .root_cause()
         .downcast_ref::<std::io::Error>()
         .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn desktop_line(dir: &Path) -> String {
+    let scan = DesktopReader::default().scan(dir);
+    if let Some(problem) = scan.problem {
+        return format!("cannot read {}: {problem}", dir.display());
+    }
+    if !scan.found {
+        return format!("none found in {}", dir.display());
+    }
+    let mut line = format!(
+        "{} · {}",
+        dir.display(),
+        plural(scan.files_read as u64, "session file", "session files")
+    );
+    if !scan.skipped.is_empty() {
+        line.push_str(&format!(" · {} skipped", count(scan.skipped.len() as u64)));
+    }
+    line
 }
 
 fn prices_line(bundled_version: &str, user_prices: &UserPrices) -> String {

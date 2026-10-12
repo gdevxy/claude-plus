@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 
 use super::format::{plural, usd};
 use crate::accounts;
+use crate::desktop::{self, DesktopReader};
 use crate::ingest::{IngestReport, Ingestor};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
@@ -55,12 +56,29 @@ fn locally(paths: &Paths, prices: &PriceTable) -> Result<(Store, IngestReport, R
     {
         eprintln!("Cannot read the Claude Code login: {error:#}");
     }
+    attribute_desktop(&mut store, paths, now_ms)?;
     accounts::attribute_pending(&mut store)?;
     let reconciled = report
         .reconcile_error
         .clone()
         .map_or(Ok(()), |error| Err(anyhow!(error)));
     Ok((store, report, reconciled))
+}
+
+fn attribute_desktop(store: &mut Store, paths: &Paths, now_ms: i64) -> Result<()> {
+    let scan = DesktopReader::default().scan(&paths.desktop_sessions_dir());
+    if let Some(problem) = &scan.problem {
+        eprintln!("Cannot read desktop sessions: {problem}");
+    }
+    for skipped in &scan.skipped {
+        eprintln!(
+            "Skipped the desktop session file {}, it {}",
+            skipped.path.display(),
+            skipped.reason
+        );
+    }
+    desktop::attribute(store, &scan.sessions, now_ms)?;
+    Ok(())
 }
 
 pub fn issue_lines(report: &IngestReport) -> Vec<String> {

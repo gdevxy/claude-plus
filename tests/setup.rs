@@ -292,7 +292,9 @@ fn purge_deletes_the_data_dir_of_a_daemon_stopped_by_hand() {
 fn purge_refuses_a_data_dir_that_holds_the_claude_dir_before_changing_anything() {
     let env = env();
     let parent = env.claude.parent().unwrap();
+    let home = tempfile::tempdir_in("/tmp").unwrap();
     cmd(&env, &["uninstall", "--purge", "--yes"])
+        .env("HOME", home.path())
         .env("CLAUDE_PLUS_HOME", parent)
         .assert()
         .failure()

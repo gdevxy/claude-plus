@@ -3,7 +3,10 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use common::{Env, STATS_TABLE, cmd, env, stdout_of, stdout_of_with};
+use common::{
+    DEMO_SESSION, DESKTOP_ACCOUNT, DESKTOP_ORG, Env, STATS_TABLE, cmd, env, stdout_of,
+    stdout_of_with,
+};
 use predicates::prelude::*;
 
 #[test]
@@ -80,6 +83,7 @@ fn missing_claude_dir_is_friendly() {
     Command::cargo_bin("claude-plus")
         .unwrap()
         .args(["stats"])
+        .env("HOME", temp.path())
         .env("CLAUDE_CONFIG_DIR", temp.path().join("nope"))
         .env("CLAUDE_PLUS_HOME", temp.path().join("plus"))
         .assert()
@@ -143,12 +147,14 @@ fn doctor_output_is_exact() {
   Account:     none seen yet
   Login:       no .claude.json yet (never signed in)
   Prices:      Anthropic's 2026-10-10
+  Desktop:     none found in {desktop}
   Imported:    5 requests in 4 files · 1 unparsable line
   Cross-check: 1 session · transcripts $0.0012 · Claude Code $0.0123 · reconciled $0.0123
   Uncounted:   1 session with subagents has no Claude Code counter, its subagent output may be understated
 ",
         claude = env.claude.display(),
-        plus = env.plus.display()
+        plus = env.plus.display(),
+        desktop = env.desktop_sessions().display()
     );
     assert_eq!(stdout_of(&env, &["doctor"]), expected);
 }
@@ -215,6 +221,7 @@ fn import_without_transcripts_is_friendly() {
     Command::cargo_bin("claude-plus")
         .unwrap()
         .args(["import"])
+        .env("HOME", temp.path())
         .env("CLAUDE_CONFIG_DIR", temp.path().join("nope"))
         .env("CLAUDE_PLUS_HOME", temp.path().join("plus"))
         .assert()
@@ -372,10 +379,12 @@ fn doctor_header(env: &Env, transcript_files: u64, imported: &str) -> String {
   Account:     none seen yet
   Login:       no .claude.json yet (never signed in)
   Prices:      Anthropic's 2026-10-10
+  Desktop:     none found in {desktop}
   Imported:    {imported}
 ",
         claude = env.claude.display(),
-        plus = env.plus.display()
+        plus = env.plus.display(),
+        desktop = env.desktop_sessions().display()
     )
 }
 
@@ -466,10 +475,12 @@ fn doctor_on_a_fresh_home_creates_nothing() {
   Account:     none seen yet
   Login:       no .claude.json yet (never signed in)
   Prices:      Anthropic's 2026-10-10
+  Desktop:     none found in {desktop}
   Database:    not created yet, run claude-plus import
 ",
         claude = env.claude.display(),
-        plus = env.plus.display()
+        plus = env.plus.display(),
+        desktop = env.desktop_sessions().display()
     );
     assert_eq!(stdout_of(&env, &["doctor"]), expected);
     assert!(!env.plus.exists());
@@ -778,6 +789,7 @@ fn export_without_transcripts_prints_an_empty_export_and_the_notice_on_stderr() 
         Command::cargo_bin("claude-plus")
             .unwrap()
             .args(["export", "--format", format])
+            .env("HOME", temp.path())
             .env("CLAUDE_CONFIG_DIR", temp.path().join("nope"))
             .env("CLAUDE_PLUS_HOME", temp.path().join("plus"))
             .assert()
@@ -1247,4 +1259,92 @@ fn stats_say_nothing_extra_when_only_the_current_account_spent() {
         .get_output()
         .clone();
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+}
+
+const CLI_ACCOUNT: &str = "c478b5d6-2b7e-4f0a-8c3d-0123456789ab";
+const DESKTOP_SESSION: &str = "33333333-3333-3333-3333-333333333333";
+
+fn desktop_file(cli_session: &str) -> String {
+    format!(
+        r#"{{"sessionId":"local_9f1c","cliSessionId":"{cli_session}","priorCliSessionIds":[],"cwd":"/work/demo","createdAt":1791021000000,"title":"kept private"}}"#
+    )
+}
+
+#[test]
+fn import_moves_a_desktop_session_off_the_cli_login_to_the_desktop_account() {
+    let env = env();
+    env.write_claude_json(&format!(
+        r#"{{"oauthAccount":{{"accountUuid":"{CLI_ACCOUNT}","organizationName":"Me","organizationType":"claude_max"}}}}"#
+    ));
+    env.write_transcript_at(
+        DESKTOP_SESSION,
+        "claude-opus-5-5",
+        "2026-10-03T10:00:00Z",
+        1_000,
+    );
+    cmd(&env, &["import"]).assert().success();
+    env.seed_start(DESKTOP_SESSION, &format!("oauth:{CLI_ACCOUNT}"));
+    assert_eq!(
+        env.attribution(DESKTOP_SESSION),
+        Some((format!("oauth:{CLI_ACCOUNT}"), "start".into()))
+    );
+    let file = env.write_desktop_session(
+        DESKTOP_ACCOUNT,
+        DESKTOP_ORG,
+        "local_9f1c.json",
+        &desktop_file(DESKTOP_SESSION),
+    );
+    let before = std::fs::read(&file).unwrap();
+    cmd(&env, &["import"]).assert().success().stderr("");
+    assert_eq!(
+        env.attribution(DESKTOP_SESSION),
+        Some((format!("oauth:{DESKTOP_ACCOUNT}"), "desktop".into()))
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let accounts = stdout_of(&env, &["accounts"]);
+    assert!(accounts.contains("Desktop account e08c8984"), "{accounts}");
+    let stats = stdout_of(
+        &env,
+        &[
+            "stats",
+            "--days",
+            "1",
+            "--account",
+            "desktop account E08C8984",
+        ],
+    );
+    assert!(
+        stats.starts_with("Account: Desktop account e08c8984\n"),
+        "{stats}"
+    );
+    assert!(stats.contains("claude-opus-5-5"), "{stats}");
+}
+
+#[test]
+fn a_skipped_desktop_file_is_named_on_stderr_and_counted_by_doctor() {
+    let env = env();
+    env.write_desktop_session(
+        DESKTOP_ACCOUNT,
+        DESKTOP_ORG,
+        "local_a.json",
+        &desktop_file(DEMO_SESSION),
+    );
+    let broken =
+        env.write_desktop_session(DESKTOP_ACCOUNT, DESKTOP_ORG, "local_b.json", "{\"cliSess");
+    cmd(&env, &["import"]).assert().success().stderr(format!(
+        "Skipped the desktop session file {}, it is not valid JSON\n",
+        broken.display()
+    ));
+    assert_eq!(
+        env.attribution(DEMO_SESSION),
+        Some((format!("oauth:{DESKTOP_ACCOUNT}"), "desktop".into()))
+    );
+    let doctor = stdout_of(&env, &["doctor"]);
+    assert!(
+        doctor.contains(&format!(
+            "  Prices:      Anthropic's 2026-10-10\n  Desktop:     {} · 2 session files · 1 skipped\n",
+            env.desktop_sessions().display()
+        )),
+        "{doctor}"
+    );
 }

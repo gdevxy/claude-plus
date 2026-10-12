@@ -50,6 +50,7 @@ impl Server {
             PriceTable::bundled(),
             projects,
             temp.path().join("claude.json"),
+            temp.path().join("desktop/claude-code-sessions"),
             log.clone(),
         )
         .unwrap();

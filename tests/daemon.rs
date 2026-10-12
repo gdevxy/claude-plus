@@ -6,7 +6,9 @@ use std::process::{Child, Stdio};
 use claude_plus::api::client::Client;
 use claude_plus::api::wire::{Health, Snapshot};
 use claude_plus::daemon::lock::InstanceLock;
-use common::{Env, STATS_TABLE, cmd, env, eventually, process, stdout_of};
+use common::{
+    DESKTOP_ACCOUNT, DESKTOP_ORG, Env, STATS_TABLE, cmd, env, eventually, process, stdout_of,
+};
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::json;
 
@@ -636,5 +638,26 @@ fn an_ensured_daemon_leads_its_own_session() {
     assert_ne!(
         rustix::process::getsid(None).unwrap(),
         rustix::process::getsid(Some(daemon)).unwrap()
+    );
+}
+
+#[test]
+fn a_desktop_session_file_added_while_running_is_attributed_on_the_next_rescan() {
+    let env = env();
+    let _daemon = Foreground::start(&env, &["--rescan-secs", "1"]);
+    idle_health(&env);
+    assert_eq!(env.attribution(SESSION_1), None);
+    env.write_desktop_session(
+        DESKTOP_ACCOUNT,
+        DESKTOP_ORG,
+        "local_live.json",
+        &format!(r#"{{"cliSessionId":"{SESSION_1}","priorCliSessionIds":[]}}"#),
+    );
+    let attributed = eventually("the rescan to attribute the desktop session", || {
+        env.attribution(SESSION_1)
+    });
+    assert_eq!(
+        attributed,
+        (format!("oauth:{DESKTOP_ACCOUNT}"), "desktop".to_string())
     );
 }

@@ -13,6 +13,7 @@ use super::log::Log;
 use crate::accounts::{self, Auth};
 use crate::api::epoch_ms;
 use crate::api::wire::{MEASURE_KIND, START_KIND, USAGE_KIND};
+use crate::desktop::{self, DesktopReader};
 use crate::ingest::{IngestReport, Ingestor, Rebuilt, TranscriptFile};
 use crate::limits;
 use crate::pricing::PriceTable;
@@ -191,6 +192,7 @@ pub fn spawn(
     prices: PriceTable,
     projects_dir: PathBuf,
     claude_json: PathBuf,
+    desktop_sessions: PathBuf,
     log: Arc<Log>,
 ) -> Result<(WriterHandle, JoinHandle<()>)> {
     let (jobs, queue) = mpsc::channel();
@@ -213,6 +215,8 @@ pub fn spawn(
         prices,
         projects_dir,
         claude_json,
+        desktop_sessions,
+        desktop: DesktopReader::default(),
         log,
         shared: handle.shared.clone(),
         cancel: handle.cancel.clone(),
@@ -232,6 +236,8 @@ struct Worker {
     prices: PriceTable,
     projects_dir: PathBuf,
     claude_json: PathBuf,
+    desktop_sessions: PathBuf,
+    desktop: DesktopReader,
     log: Arc<Log>,
     shared: Arc<Shared>,
     cancel: Arc<AtomicBool>,
@@ -269,6 +275,7 @@ impl Worker {
                 Job::Scan(reply) => {
                     self.observe_login();
                     let outcome = self.scan(&mut drain);
+                    self.attribute_desktop();
                     self.publish_rebuilding(None);
                     self.finish_ingest(outcome, reply, true);
                 }
@@ -412,6 +419,33 @@ impl Worker {
         }
     }
 
+    fn attribute_desktop(&mut self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let scan = self.desktop.scan(&self.desktop_sessions);
+        if let Some(problem) = &scan.problem {
+            self.log.warn_once(
+                "desktop",
+                format!("cannot read desktop sessions: {problem}"),
+            );
+        }
+        for skipped in &scan.skipped {
+            self.log.warn(format!(
+                "skipped the desktop session file {}, it {}",
+                skipped.path.display(),
+                skipped.reason
+            ));
+        }
+        if let Err(error) =
+            desktop::attribute(&mut self.store, &scan.sessions, epoch_ms(SystemTime::now()))
+        {
+            self.desktop = DesktopReader::default();
+            self.log
+                .warn(format!("cannot attribute desktop sessions: {error:#}"));
+        }
+    }
+
     fn refresh_fit(&mut self) {
         if self.fitted_at.is_some_and(|at| at.elapsed() < FIT_EVERY) {
             return;
@@ -550,6 +584,7 @@ mod tests {
                 PriceTable::bundled(),
                 projects.clone(),
                 temp.path().join(".claude.json"),
+                temp.path().join("desktop/claude-code-sessions"),
                 log,
             )
             .unwrap();
@@ -772,6 +807,7 @@ mod tests {
             PriceTable::bundled(),
             temp.path().join("projects"),
             temp.path().join(".claude.json"),
+            temp.path().join("desktop/claude-code-sessions"),
             log,
         )
         .unwrap();

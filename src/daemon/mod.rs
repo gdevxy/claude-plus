@@ -81,6 +81,7 @@ fn run_locked(
         prices.clone(),
         paths.projects_dir(),
         paths.claude_json.clone(),
+        paths.desktop_sessions_dir(),
         log.clone(),
     )?;
     let state = Arc::new(State {

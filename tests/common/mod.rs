@@ -9,7 +9,12 @@ pub struct Env {
     pub _temp: tempfile::TempDir,
     pub claude: PathBuf,
     pub plus: PathBuf,
+    pub home: PathBuf,
 }
+
+pub const DESKTOP_ACCOUNT: &str = "e08c8984-5a1e-4c1b-9d2f-0123456789ab";
+pub const DESKTOP_ORG: &str = "7d3f0c2e-8b4a-4e6f-a1c9-0123456789ab";
+pub const DEMO_SESSION: &str = "11111111-1111-1111-1111-111111111111";
 
 pub fn copy_dir(from: &Path, to: &Path) {
     for entry in walkdir::WalkDir::new(from) {
@@ -36,10 +41,13 @@ pub fn env() -> Env {
             .as_path(),
         &claude,
     );
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
     Env {
         _temp: temp,
         claude,
         plus,
+        home,
     }
 }
 
@@ -94,6 +102,59 @@ impl Env {
         writer.commit().unwrap();
     }
 
+    pub fn desktop_sessions(&self) -> PathBuf {
+        let app = if cfg!(target_os = "macos") {
+            "Library/Application Support/Claude"
+        } else {
+            ".config/Claude"
+        };
+        self.home.join(app).join("claude-code-sessions")
+    }
+
+    pub fn write_desktop_session(
+        &self,
+        account: &str,
+        org: &str,
+        name: &str,
+        body: &str,
+    ) -> PathBuf {
+        let dir = self.desktop_sessions().join(account).join(org);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    pub fn attribution(&self, session: &str) -> Option<(String, String)> {
+        use rusqlite::OptionalExtension;
+        let connection = rusqlite::Connection::open_with_flags(
+            self.plus.join("data.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?;
+        connection
+            .query_row(
+                "SELECT account_id, source FROM session_accounts WHERE session_id = ?1",
+                [session],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    pub fn seed_start(&self, session: &str, account: &str) {
+        let mut store = claude_plus::store::Store::open(&self.plus.join("data.db")).unwrap();
+        let mut writer = store.writer().unwrap();
+        writer
+            .attribute(
+                session,
+                account,
+                claude_plus::store::AttributionSource::Start,
+            )
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
     pub fn claude_state(&self) -> PathBuf {
         self._temp.path().join("fake-claude")
     }
@@ -122,6 +183,7 @@ pub fn cmd(env: &Env, args: &[&str]) -> Command {
     let mut command = Command::cargo_bin("claude-plus").unwrap();
     command
         .args(args)
+        .env("HOME", &env.home)
         .env("CLAUDE_CONFIG_DIR", &env.claude)
         .env("CLAUDE_PLUS_HOME", &env.plus)
         .env("PATH", fake_claude_path())
@@ -134,6 +196,7 @@ pub fn process(env: &Env, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_claude-plus"));
     command
         .args(args)
+        .env("HOME", &env.home)
         .env("CLAUDE_CONFIG_DIR", &env.claude)
         .env("CLAUDE_PLUS_HOME", &env.plus)
         .env("PATH", fake_claude_path())
