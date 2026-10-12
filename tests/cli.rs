@@ -1348,3 +1348,179 @@ fn a_skipped_desktop_file_is_named_on_stderr_and_counted_by_doctor() {
         "{doctor}"
     );
 }
+
+const DEMO_SESSION_2: &str = "22222222-2222-2222-2222-222222222222";
+
+#[test]
+fn assign_previews_writes_then_selects_nothing_and_unassign_restores_unknown() {
+    let env = env();
+    env.seed_accounts(&[("oauth:me", "Me · Max")]);
+    let assign = |extra: &[&str]| {
+        stdout_of(
+            &env,
+            &[
+                &["accounts", "assign", "me · max", "--project", "/work/*"][..],
+                extra,
+            ]
+            .concat(),
+        )
+    };
+    assert_eq!(
+        assign(&["--dry-run"]),
+        "Would assign 2 sessions to Me · Max\n  2026-10-01 to 2026-10-03 · $0.0812\n"
+    );
+    assert_eq!(env.attribution(DEMO_SESSION), None);
+    assert_eq!(
+        assign(&[]),
+        "Assigned 2 sessions to Me · Max\n  2026-10-01 to 2026-10-03 · $0.0812\n"
+    );
+    for session in [DEMO_SESSION, DEMO_SESSION_2] {
+        assert_eq!(
+            env.attribution(session),
+            Some(("oauth:me".into(), "assign".into()))
+        );
+    }
+    assert_eq!(assign(&[]), "No Unknown sessions match\n");
+    assert_eq!(
+        stdout_of(&env, &["stats", "--account", "Me · Max"]),
+        STATS_TABLE.replacen("Account: All accounts", "Account: Me · Max", 1)
+    );
+    assert_eq!(
+        stdout_of(
+            &env,
+            &["accounts", "unassign", "--project", "/work/*", "--dry-run"]
+        ),
+        "Would unassign 2 sessions\n  2026-10-01 to 2026-10-03 · $0.0812\n"
+    );
+    assert_eq!(
+        env.attribution(DEMO_SESSION),
+        Some(("oauth:me".into(), "assign".into()))
+    );
+    assert_eq!(
+        stdout_of(&env, &["accounts", "unassign", "--project", "/work/*"]),
+        "Unassigned 2 sessions\n  2026-10-01 to 2026-10-03 · $0.0812\n"
+    );
+    assert_eq!(env.attribution(DEMO_SESSION), None);
+    assert_eq!(
+        stdout_of(&env, &["accounts", "unassign", "--project", "/work/*"]),
+        "No assigned sessions match\n"
+    );
+}
+
+#[test]
+fn assign_takes_inclusive_days_and_leaves_other_attributions_alone() {
+    let env = env();
+    env.seed_accounts(&[
+        ("oauth:me", "Me · Max"),
+        ("oauth:work", "Acme · Enterprise"),
+    ]);
+    cmd(&env, &["import"]).assert().success();
+    env.seed_start(DEMO_SESSION, "oauth:work");
+    let day = stdout_of(
+        &env,
+        &[
+            "accounts",
+            "assign",
+            "oauth:me",
+            "--since",
+            "2026-10-01",
+            "--until",
+            "2026-10-03",
+        ],
+    );
+    assert!(
+        day.starts_with("Assigned 1 session to Me · Max\n  2026-10-03 · $"),
+        "{day}"
+    );
+    assert_eq!(
+        env.attribution(DEMO_SESSION),
+        Some(("oauth:work".into(), "start".into()))
+    );
+    assert_eq!(
+        env.attribution(DEMO_SESSION_2),
+        Some(("oauth:me".into(), "assign".into()))
+    );
+    cmd(&env, &["accounts", "unassign", "--until", "2026-10-03"])
+        .assert()
+        .success();
+    assert_eq!(
+        env.attribution(DEMO_SESSION),
+        Some(("oauth:work".into(), "start".into()))
+    );
+    assert_eq!(env.attribution(DEMO_SESSION_2), None);
+}
+
+#[test]
+fn assign_refuses_a_bare_command_bad_days_and_an_unknown_account_before_writing() {
+    let env = env();
+    env.seed_accounts(&[("oauth:me", "Me · Max")]);
+    let fails = |args: &[&str], stderr: &str| {
+        cmd(&env, args)
+            .assert()
+            .failure()
+            .stderr(format!("claude-plus: {stderr}\n"));
+    };
+    fails(
+        &["accounts", "assign", "oauth:me"],
+        "pass --project, --since or --until to choose the sessions",
+    );
+    fails(
+        &["accounts", "unassign", "--dry-run"],
+        "pass --project, --since or --until to choose the sessions",
+    );
+    fails(
+        &["accounts", "assign", "oauth:me", "--since", "03/10/2026"],
+        "--since takes a day as YYYY-MM-DD, not 03/10/2026",
+    );
+    fails(
+        &[
+            "accounts",
+            "assign",
+            "oauth:me",
+            "--since",
+            "2026-10-03",
+            "--until",
+            "2026-10-01",
+        ],
+        "--until 2026-10-01 is before --since 2026-10-03",
+    );
+    fails(
+        &["accounts", "assign", "nobody", "--project", "*"],
+        "no account called \"nobody\"; the accounts are Me · Max (oauth:me)",
+    );
+    assert_eq!(env.attribution(DEMO_SESSION), None);
+}
+
+#[test]
+fn assign_with_no_account_known_says_so() {
+    let env = env();
+    cmd(&env, &["accounts", "assign", "api", "--project", "*"])
+        .assert()
+        .failure()
+        .stderr(
+            "claude-plus: no account called \"api\"; no account is known yet, see claude-plus accounts\n",
+        );
+}
+
+#[test]
+fn accounts_help_lists_assign_and_unassign() {
+    let env = env();
+    let help = stdout_of(&env, &["accounts", "--help"]);
+    assert!(
+        help.contains("Attribute Unknown sessions to an account by project and days"),
+        "{help}"
+    );
+    assert!(
+        help.contains("Make sessions given with assign Unknown again"),
+        "{help}"
+    );
+    let assign = stdout_of(&env, &["accounts", "assign", "--help"]);
+    for flag in [
+        "--project <GLOB>",
+        "--since <DAY>",
+        "--until <DAY>",
+        "--dry-run",
+    ] {
+        assert!(assign.contains(flag), "missing {flag} in\n{assign}");
+    }
+}

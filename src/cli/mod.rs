@@ -87,7 +87,9 @@ enum Command {
         )]
         account: Option<String>,
     },
-    #[command(about = "List the accounts claude-plus has seen, or rename one")]
+    #[command(
+        about = "List the accounts claude-plus has seen, rename one, or assign Unknown sessions to one"
+    )]
     Accounts {
         #[command(subcommand)]
         action: Option<AccountsAction>,
@@ -129,6 +131,37 @@ enum Command {
 enum AccountsAction {
     #[command(about = "Give an account your own label")]
     Rename { account: String, label: String },
+    #[command(about = "Attribute Unknown sessions to an account by project and days")]
+    Assign {
+        account: String,
+        #[command(flatten)]
+        selection: SelectionArgs,
+    },
+    #[command(about = "Make sessions given with assign Unknown again")]
+    Unassign {
+        #[command(flatten)]
+        selection: SelectionArgs,
+    },
+}
+
+#[derive(clap::Args)]
+struct SelectionArgs {
+    #[arg(
+        long,
+        value_name = "GLOB",
+        help = "Working directory of the session, where * matches anything, / included"
+    )]
+    project: Option<String>,
+    #[arg(long, value_name = "DAY", help = "First day, YYYY-MM-DD in local time")]
+    since: Option<String>,
+    #[arg(
+        long,
+        value_name = "DAY",
+        help = "Last day, YYYY-MM-DD in local time, included"
+    )]
+    until: Option<String>,
+    #[arg(long, help = "Show what would change and write nothing")]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]

@@ -1,14 +1,16 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::Local;
 use comfy_table::{Cell, CellAlignment, Table, presets::UTF8_FULL_CONDENSED};
 
-use super::format::{column_decimals, count, usd, usd_with};
-use super::{AccountsAction, BudgetAction};
+use super::format::{column_decimals, count, plural, usd, usd_with};
+use super::{AccountsAction, BudgetAction, SelectionArgs};
 use crate::accounts::{Auth, auth_account};
+use crate::assign::{Filter, Selection, expand_home, select};
 use crate::limits::{SPEND_LIMIT, month_start_utc, monthly_pace, next_month_start_utc};
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
 use crate::scope::Scope;
-use crate::store::{AccountInfo, AccountRow, Store};
+use crate::store::{AccountInfo, AccountRow, AttributionSource, Store};
 
 const ALL_ACCOUNTS: &str = "All accounts";
 const MINUTE_MS: i64 = 60_000;
@@ -19,6 +21,10 @@ const BUDGET_HINT: &str = "claude-plus budget set <usd> shows dollars";
 pub fn accounts(paths: &Paths, prices: &PriceTable, action: Option<AccountsAction>) -> Result<()> {
     match action {
         Some(AccountsAction::Rename { account, label }) => rename(paths, &account, &label),
+        Some(AccountsAction::Assign { account, selection }) => {
+            assign(paths, prices, &account, &selection)
+        }
+        Some(AccountsAction::Unassign { selection }) => unassign(paths, prices, &selection),
         None => list(paths, prices),
     }
 }
@@ -173,6 +179,116 @@ fn rename(paths: &Paths, given: &str, label: &str) -> Result<()> {
     writer.commit()?;
     println!("{id} is now called {label}");
     Ok(())
+}
+
+fn filter_of(paths: &Paths, selection: &SelectionArgs) -> Result<Filter> {
+    Filter::new(
+        selection
+            .project
+            .as_deref()
+            .map(|pattern| expand_home(pattern, &paths.home)),
+        selection.since.as_deref(),
+        selection.until.as_deref(),
+        &Local,
+    )
+}
+
+fn assign(
+    paths: &Paths,
+    prices: &PriceTable,
+    given: &str,
+    selection: &SelectionArgs,
+) -> Result<()> {
+    let filter = filter_of(paths, selection)?;
+    let mut store = imported(paths, prices)?;
+    let account = assignable(&store, given)?;
+    let chosen = select(store.unknown_sessions()?, &filter);
+    if chosen.sessions.is_empty() {
+        println!("No Unknown sessions match");
+        return Ok(());
+    }
+    if !selection.dry_run {
+        let mut writer = store.writer()?;
+        for session in &chosen.sessions {
+            writer.attribute(session, &account.id, AttributionSource::Assign)?;
+        }
+        writer.commit()?;
+    }
+    let verb = if selection.dry_run {
+        "Would assign"
+    } else {
+        "Assigned"
+    };
+    println!(
+        "{verb} {} to {}",
+        plural(chosen.sessions.len() as u64, "session", "sessions"),
+        account.label
+    );
+    println!("{}", selection_line(&chosen));
+    Ok(())
+}
+
+fn unassign(paths: &Paths, prices: &PriceTable, selection: &SelectionArgs) -> Result<()> {
+    let filter = filter_of(paths, selection)?;
+    let mut store = imported(paths, prices)?;
+    let chosen = select(store.assigned_sessions()?, &filter);
+    if chosen.sessions.is_empty() {
+        println!("No assigned sessions match");
+        return Ok(());
+    }
+    if !selection.dry_run {
+        let mut writer = store.writer()?;
+        for session in &chosen.sessions {
+            writer.unassign(session)?;
+        }
+        writer.commit()?;
+    }
+    let verb = if selection.dry_run {
+        "Would unassign"
+    } else {
+        "Unassigned"
+    };
+    println!(
+        "{verb} {}",
+        plural(chosen.sessions.len() as u64, "session", "sessions")
+    );
+    println!("{}", selection_line(&chosen));
+    Ok(())
+}
+
+fn assignable(store: &Store, given: &str) -> Result<AccountInfo> {
+    let accounts = store.accounts()?;
+    let wanted = given.to_lowercase();
+    let known = accounts
+        .iter()
+        .any(|a| a.id == given || a.label.to_lowercase() == wanted);
+    if !known && accounts.is_empty() {
+        bail!("no account called \"{given}\"; no account is known yet, see claude-plus accounts");
+    }
+    if !known {
+        bail!(
+            "no account called \"{given}\"; the accounts are {}",
+            accounts
+                .iter()
+                .map(|a| format!("{} ({})", a.label, a.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let id = resolve(store, Some(given))?;
+    accounts
+        .into_iter()
+        .find(|a| a.id == id)
+        .with_context(|| format!("no account called \"{given}\"; see claude-plus accounts"))
+}
+
+fn selection_line(chosen: &Selection) -> String {
+    let spend = usd(chosen.spend_usd);
+    match chosen.days(&Local) {
+        Some((first, last)) if first == last => format!("  {first} · {spend}"),
+        Some((first, last)) => format!("  {first} to {last} · {spend}"),
+        None => format!("  {spend}"),
+    }
 }
 
 fn parse_budget(usd: &str) -> Result<f64> {
