@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config_scan;
 pub mod context_model;
 pub mod daemon;
+pub mod desktop;
 pub mod forecast;
 pub mod history;
 pub mod ingest;

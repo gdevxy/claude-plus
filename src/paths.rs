@@ -61,6 +61,10 @@ impl Paths {
         self.claude_dir.join("projects")
     }
 
+    pub fn desktop_sessions_dir(&self) -> PathBuf {
+        desktop_dir_in(&self.home, std::env::consts::OS).join("claude-code-sessions")
+    }
+
     pub fn user_prices(&self) -> PathBuf {
         self.data_dir.join("prices.toml")
     }
@@ -170,6 +174,13 @@ pub const DAEMON_FILES: &[&str] = &[
 const MARKER_TEXT: &str =
     "claude-plus keeps its data here; claude-plus uninstall --purge deletes what it wrote\n";
 
+fn desktop_dir_in(home: &Path, os: &str) -> PathBuf {
+    match os {
+        "macos" => home.join("Library/Application Support/Claude"),
+        _ => home.join(".config/Claude"),
+    }
+}
+
 pub fn retention_days_in(claude_dir: &Path) -> Option<u64> {
     std::fs::read_to_string(claude_dir.join("settings.json"))
         .ok()
@@ -180,6 +191,23 @@ pub fn retention_days_in(claude_dir: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_desktop_app_keeps_its_sessions_in_its_own_data_folder() {
+        let home = Path::new("/home/ada");
+        assert_eq!(
+            desktop_dir_in(home, "macos"),
+            PathBuf::from("/home/ada/Library/Application Support/Claude")
+        );
+        assert_eq!(
+            desktop_dir_in(home, "linux"),
+            PathBuf::from("/home/ada/.config/Claude")
+        );
+        assert_eq!(
+            Paths::resolve(home, Some(PathBuf::from("/cfg")), None).desktop_sessions_dir(),
+            desktop_dir_in(home, std::env::consts::OS).join("claude-code-sessions")
+        );
+    }
 
     #[test]
     fn defaults_live_under_home() {
