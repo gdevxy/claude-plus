@@ -10,7 +10,7 @@ use crate::limits::{SPEND_LIMIT, month_start_utc, monthly_pace, next_month_start
 use crate::paths::Paths;
 use crate::pricing::PriceTable;
 use crate::scope::Scope;
-use crate::store::{AccountInfo, AccountRow, AttributionSource, Store};
+use crate::store::{AccountInfo, AccountRow, AttributionSource, Candidate, Store, Writer};
 
 const ALL_ACCOUNTS: &str = "All accounts";
 const MINUTE_MS: i64 = 60_000;
@@ -202,17 +202,19 @@ fn assign(
     let filter = filter_of(paths, selection)?;
     let mut store = writable(paths, prices, None)?;
     let account = assignable(&store, given)?;
-    let chosen = select(store.unknown_sessions()?, &filter);
+    let chosen = if selection.dry_run {
+        select(store.unknown_sessions()?, &filter)
+    } else {
+        write_matching(
+            &mut store,
+            &filter,
+            |writer| writer.unknown_sessions(),
+            |writer, session| writer.attribute(session, &account.id, AttributionSource::Assign),
+        )?
+    };
     if chosen.sessions.is_empty() {
         println!("No Unknown sessions match");
         return Ok(());
-    }
-    if !selection.dry_run {
-        let mut writer = store.writer()?;
-        for session in &chosen.sessions {
-            writer.attribute(session, &account.id, AttributionSource::Assign)?;
-        }
-        writer.commit()?;
     }
     let verb = if selection.dry_run {
         "Would assign"
@@ -231,17 +233,19 @@ fn assign(
 fn unassign(paths: &Paths, prices: &PriceTable, selection: &SelectionArgs) -> Result<()> {
     let filter = filter_of(paths, selection)?;
     let mut store = writable(paths, prices, None)?;
-    let chosen = select(store.assigned_sessions()?, &filter);
+    let chosen = if selection.dry_run {
+        select(store.assigned_sessions()?, &filter)
+    } else {
+        write_matching(
+            &mut store,
+            &filter,
+            |writer| writer.assigned_sessions(),
+            |writer, session| writer.unassign(session),
+        )?
+    };
     if chosen.sessions.is_empty() {
         println!("No assigned sessions match");
         return Ok(());
-    }
-    if !selection.dry_run {
-        let mut writer = store.writer()?;
-        for session in &chosen.sessions {
-            writer.unassign(session)?;
-        }
-        writer.commit()?;
     }
     let verb = if selection.dry_run {
         "Would unassign"
@@ -254,6 +258,23 @@ fn unassign(paths: &Paths, prices: &PriceTable, selection: &SelectionArgs) -> Re
     );
     println!("{}", selection_line(&chosen));
     Ok(())
+}
+
+fn write_matching(
+    store: &mut Store,
+    filter: &Filter,
+    candidates: impl Fn(&Writer<'_>) -> Result<Vec<Candidate>>,
+    mut write: impl FnMut(&mut Writer<'_>, &str) -> Result<bool>,
+) -> Result<Selection> {
+    let mut writer = store.writer()?;
+    let mut written = Vec::new();
+    for candidate in candidates(&writer)? {
+        if filter.keeps(&candidate) && write(&mut writer, &candidate.id)? {
+            written.push(candidate);
+        }
+    }
+    writer.commit()?;
+    Ok(select(written, filter))
 }
 
 fn assignable(store: &Store, given: &str) -> Result<AccountInfo> {
@@ -503,6 +524,40 @@ fn until(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_sessions_actually_written_are_reported() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut writer = store.writer().unwrap();
+        for (id, ts) in [("s1", 10), ("s2", 20), ("s3", 30)] {
+            writer
+                .session(&crate::store::SessionRow {
+                    id: id.into(),
+                    project: "p".into(),
+                    cwd: Some(format!("/w/{id}")),
+                    ts: Some(ts),
+                })
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let filter = Filter::new(Some("/w/*".into()), None, None, &chrono::Utc).unwrap();
+        let written = write_matching(
+            &mut store,
+            &filter,
+            |writer| writer.unknown_sessions(),
+            |_, session| Ok(session != "s2"),
+        )
+        .unwrap();
+        assert_eq!(
+            written,
+            Selection {
+                sessions: vec!["s1".into(), "s3".into()],
+                first_ts: Some(10),
+                last_ts: Some(30),
+                spend_usd: 0.0,
+            }
+        );
+    }
 
     fn at(text: &str) -> i64 {
         chrono::DateTime::parse_from_rfc3339(text)

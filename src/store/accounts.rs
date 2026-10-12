@@ -88,9 +88,35 @@ const CANDIDATES: &str = "SELECT s.id, s.cwd, s.started_at,
       + COALESCE((SELECT SUM(j.cost_usd) FROM adjustments j WHERE j.session_id = s.id), 0.0)
      FROM sessions s LEFT JOIN session_accounts a ON a.session_id = s.id";
 
+const UNKNOWN: &str = "a.session_id IS NULL";
+const ASSIGNED: &str = "a.source = 'assign'";
+
+fn candidates(conn: &Connection, condition: &str) -> Result<Vec<Candidate>> {
+    let mut statement = conn.prepare_cached(&format!(
+        "{CANDIDATES} WHERE {condition} ORDER BY s.started_at, s.id"
+    ))?;
+    let rows = statement.query_map([], |r| {
+        Ok(Candidate {
+            id: r.get(0)?,
+            cwd: r.get(1)?,
+            started_at: r.get(2)?,
+            spend_usd: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 const ACCOUNT_COLUMNS: &str = "id, kind, label, organization_type, first_seen_ms";
 
 impl Writer<'_> {
+    pub fn unknown_sessions(&self) -> Result<Vec<Candidate>> {
+        candidates(&self.tx, UNKNOWN)
+    }
+
+    pub fn assigned_sessions(&self) -> Result<Vec<Candidate>> {
+        candidates(&self.tx, ASSIGNED)
+    }
+
     pub fn upsert_account(&mut self, row: &AccountRow, now_ms: i64) -> Result<()> {
         self.tx
             .prepare_cached(
@@ -305,26 +331,11 @@ impl Store {
     }
 
     pub fn unknown_sessions(&self) -> Result<Vec<Candidate>> {
-        self.candidates("a.session_id IS NULL")
+        candidates(&self.conn, UNKNOWN)
     }
 
     pub fn assigned_sessions(&self) -> Result<Vec<Candidate>> {
-        self.candidates("a.source = 'assign'")
-    }
-
-    fn candidates(&self, condition: &str) -> Result<Vec<Candidate>> {
-        let mut statement = self.conn.prepare_cached(&format!(
-            "{CANDIDATES} WHERE {condition} ORDER BY s.started_at, s.id"
-        ))?;
-        let rows = statement.query_map([], |r| {
-            Ok(Candidate {
-                id: r.get(0)?,
-                cwd: r.get(1)?,
-                started_at: r.get(2)?,
-                spend_usd: r.get(3)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        candidates(&self.conn, ASSIGNED)
     }
 
     pub fn session_accounts(&self) -> Result<HashMap<String, String>> {
@@ -1045,8 +1056,9 @@ mod tests {
             started_at,
             spend_usd,
         };
+        let store_unknown = store.unknown_sessions().unwrap();
         assert_eq!(
-            store.unknown_sessions().unwrap(),
+            store_unknown,
             vec![
                 candidate("s2", None, None, 0.0),
                 candidate("s1", Some("/w/a"), Some(10), 2.25),
@@ -1057,6 +1069,11 @@ mod tests {
             vec![candidate("s3", Some("/w/b"), Some(30), 2.0)]
         );
         let mut w = store.writer().unwrap();
+        assert_eq!(w.unknown_sessions().unwrap(), store_unknown);
+        assert_eq!(
+            w.assigned_sessions().unwrap(),
+            vec![candidate("s3", Some("/w/b"), Some(30), 2.0)]
+        );
         assert!(!w.unassign("s4").unwrap());
         assert!(w.unassign("s3").unwrap());
         assert!(!w.unassign("s3").unwrap());
