@@ -402,6 +402,16 @@ fn workflows() -> Vec<(String, String)> {
     found
 }
 
+fn is_env_mapping(line: &str) -> bool {
+    let Some((name, _)) = line.split_once(": ${{ ") else {
+        return false;
+    };
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 fn is_pinned(action: &str) -> bool {
     let Some((name, rest)) = action.split_once('@') else {
         return false;
@@ -448,7 +458,7 @@ fn workflows_pin_every_action_to_a_commit_and_every_runner_to_an_image() {
             }
             assert!(!line.contains("pull_request_target"), "{name}: {line}");
             assert!(
-                !line.contains("${{ github.event") || line.starts_with("TAG: "),
+                !line.contains("${{ github.event") || is_env_mapping(line),
                 "{name}: {line}"
             );
             assert!(
@@ -461,6 +471,17 @@ fn workflows_pin_every_action_to_a_commit_and_every_runner_to_an_image() {
             );
         }
     }
+    assert!(is_env_mapping("TAG: ${{ github.event.release.tag_name }}"));
+    assert!(is_env_mapping(
+        "RELEASE_2: ${{ github.event.release.name }}"
+    ));
+    assert!(!is_env_mapping(
+        "run: echo ${{ github.event.release.name }}"
+    ));
+    assert!(!is_env_mapping("2TAG: ${{ github.event.release.name }}"));
+    assert!(!is_env_mapping(
+        "TAG: echo ${{ github.event.release.name }}"
+    ));
     assert!(!is_pinned("actions/checkout@v4"));
     assert!(!is_pinned(
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
