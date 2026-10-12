@@ -29,18 +29,20 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
-fn findings_rank_by_weekly_saving_then_rule_with_unpriced_ones_last() {
+fn a_limit_that_ran_out_comes_first_then_findings_rank_by_weekly_saving_with_unpriced_ones_last() {
     let ranked = rank(vec![
         finding(RuleId::Retention, None),
         finding(RuleId::CacheBusts, Some(1.0)),
         finding(RuleId::CostlyTasks, None),
         finding(RuleId::UnusedSkills, Some(4.0)),
         finding(RuleId::IdleRebuilds, Some(1.0)),
+        finding(RuleId::LimitHits, None),
     ]);
     let order: Vec<RuleId> = ranked.iter().map(|f| f.rule).collect();
     assert_eq!(
         order,
         [
+            RuleId::LimitHits,
             RuleId::UnusedSkills,
             RuleId::IdleRebuilds,
             RuleId::CacheBusts,

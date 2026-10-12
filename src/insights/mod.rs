@@ -1,4 +1,5 @@
 mod cache;
+mod hits;
 mod report;
 mod setup;
 pub mod sources;
@@ -15,11 +16,14 @@ use crate::cache_model::Rebuild;
 use crate::context_model::{Item, Ratios};
 use crate::history::Rates;
 use crate::pricing::PriceTable;
-use crate::store::{CompactionPoint, LargeResult, PromptPoint, SessionInfo, SpentRequest};
+use crate::store::{
+    CompactionPoint, LargeResult, LimitSample, PromptPoint, SessionInfo, SpentRequest,
+};
 use crate::timeline::Observed;
 use crate::transcript::TokenCounts;
 
 pub use cache::{CacheBusts, IdleRebuilds};
+pub use hits::LimitHits;
 pub use report::{Day, InsightsReport, Recap, Request, Wins, days, read, recap, wins};
 pub use setup::{OversizedMemory, Retention, UnusedMcpServers, UnusedSkills};
 pub use subagents::SubagentModelFit;
@@ -46,6 +50,7 @@ pub enum RuleId {
     SubagentModelFit,
     CacheBusts,
     CacheTtl,
+    LimitHits,
     CostlyTasks,
     Retention,
 }
@@ -108,6 +113,7 @@ pub struct InsightContext<'a> {
     pub memory: &'a [MemoryText],
     pub ratios: &'a Ratios,
     pub retention_days: Option<u64>,
+    pub limit_samples: &'a [LimitSample],
 }
 
 pub fn rules() -> Vec<Box<dyn Rule>> {
@@ -122,6 +128,7 @@ pub fn rules() -> Vec<Box<dyn Rule>> {
         Box::new(SubagentModelFit),
         Box::new(CacheBusts),
         Box::new(CacheTtl),
+        Box::new(LimitHits),
         Box::new(CostlyTasks),
         Box::new(Retention),
     ]
@@ -133,9 +140,13 @@ pub fn evaluate(ctx: &InsightContext) -> Vec<Finding> {
 
 pub fn rank(mut findings: Vec<Finding>) -> Vec<Finding> {
     findings.sort_by(|a, b| {
-        b.saving_usd
-            .unwrap_or(-1.0)
-            .total_cmp(&a.saving_usd.unwrap_or(-1.0))
+        (b.rule == RuleId::LimitHits)
+            .cmp(&(a.rule == RuleId::LimitHits))
+            .then_with(|| {
+                b.saving_usd
+                    .unwrap_or(-1.0)
+                    .total_cmp(&a.saving_usd.unwrap_or(-1.0))
+            })
             .then_with(|| a.rule.cmp(&b.rule))
     });
     findings

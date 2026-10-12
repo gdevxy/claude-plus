@@ -8,7 +8,7 @@ use crate::history::Rates;
 use crate::limits::Fit;
 use crate::pricing::PriceTable;
 use crate::store::{
-    CompactionPoint, LargeResult, PromptPoint, RequestPoint, SessionInfo, SpentRequest,
+    CompactionPoint, LargeResult, LimitSample, PromptPoint, RequestPoint, SessionInfo, SpentRequest,
 };
 use crate::timeline::{Observed, Source, Thread};
 use crate::transcript::TokenCounts;
@@ -36,6 +36,7 @@ pub(crate) struct Fixture {
     pub memory: Vec<MemoryText>,
     pub ratios: Ratios,
     pub retention_days: Option<u64>,
+    pub limit_samples: Vec<LimitSample>,
 }
 
 pub(crate) fn counts(input: u64, cache_read: u64, cache_write_5m: u64, output: u64) -> TokenCounts {
@@ -66,6 +67,7 @@ impl Fixture {
             memory: Vec::new(),
             ratios: Ratios::default(),
             retention_days: Some(90),
+            limit_samples: Vec::new(),
         }
     }
 
@@ -88,6 +90,7 @@ impl Fixture {
             memory: &self.memory,
             ratios: &self.ratios,
             retention_days: self.retention_days,
+            limit_samples: &self.limit_samples,
         }
     }
 
@@ -139,6 +142,18 @@ impl Fixture {
             ttl_ms: FIVE_MINUTES_MS,
             kinds: kinds.iter().map(|k| k.to_string()).collect(),
             mcp_changed: false,
+        });
+    }
+
+    pub fn limit(&mut self, window: &str, ts: i64, used_pct: f64, resets: i64) {
+        self.limit_samples.push(LimitSample {
+            ts_ms: ts * 1000,
+            session_id: "s1".into(),
+            account_id: Some("oauth:me".into()),
+            model: Some(OPUS.into()),
+            window: window.into(),
+            used_pct,
+            resets_at_ms: Some(resets * 1000),
         });
     }
 

@@ -221,6 +221,14 @@ where
     let (rebuilds, compactions) =
         rebuilds(store, prices, &requests, since, spans.until, request.now_ms)?;
     let agent_types = store.agent_types_between(since, spans.until)?;
+    let limit_samples = match scope.account() {
+        Some(account) => store
+            .limit_samples_since(since * 1000)?
+            .into_iter()
+            .filter(|s| s.account_id.as_deref() == Some(account))
+            .collect(),
+        None => Vec::new(),
+    };
     let project = store.session_project(request.session)?;
     let live = store
         .live_breakdown(request.session)?
@@ -280,6 +288,7 @@ where
         memory: &memory,
         ratios: &ratios,
         retention_days: request.retention_days,
+        limit_samples: &limit_samples,
     };
     Ok(InsightsReport {
         v: INSIGHTS_VERSION,
@@ -1068,5 +1077,27 @@ mod tests {
         );
         let untyped = report_for(&account_store(None, &[]), "s1");
         assert_eq!(untyped.findings[0].tip, "run subagents on Sonnet\u{a0}5.5");
+    }
+
+    #[test]
+    fn the_report_reads_the_limits_of_the_requesting_session_account_only() {
+        let store = account_store(
+            Some("Explore"),
+            &[
+                ("oauth:me", "2026-10-10T08:00:00Z", 50.0),
+                ("oauth:me", "2026-10-10T10:00:00Z", 100.0),
+                ("oauth:work", "2026-10-10T08:00:00Z", 100.0),
+            ],
+        );
+        let mine = report_for(&store, "s1");
+        let rules: Vec<RuleId> = mine.findings.iter().map(|f| f.rule).collect();
+        assert_eq!(rules, [RuleId::LimitHits, RuleId::SubagentModelFit]);
+        assert_eq!(
+            mine.findings[0].evidence[0],
+            "The 5-hour limit ran out once, 1h before it reset"
+        );
+        let unattributed = report_for(&store, "s2");
+        let rules: Vec<RuleId> = unattributed.findings.iter().map(|f| f.rule).collect();
+        assert_eq!(rules, [RuleId::SubagentModelFit]);
     }
 }
