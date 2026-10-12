@@ -46,6 +46,7 @@ The spec is silent or does not match the code on these points, so this plan deci
 4. An attribution write that would leave the same account and source in place reports no change and writes nothing, so a rescan of unchanged data is free.
 5. `accounts` counts only sessions that were imported (`account_sessions_count` joins `sessions`), since desktop ids without a transcript are now stored.
 6. A skipped desktop file is reported once per process: the stamp cache means it is read again only after it changes.
+   An unreadable file is not stamped, so it is read again on every scan, but the daemon logs each path and reason only once per run.
    The CLI prints `Skipped the desktop session file <path>, it <reason>` on stderr; the daemon logs `skipped the desktop session file <path>, it <reason>` as a warning.
    An unreadable desktop folder is printed by the CLI as `Cannot read desktop sessions: <error>` and logged by the daemon once per run.
    The CLI's messages only appear for local imports: when the daemon runs, `import` goes through its socket and the messages only reach `daemon.log`, so `doctor` is the place to see skipped files.

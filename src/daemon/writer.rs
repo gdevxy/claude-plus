@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -217,6 +217,7 @@ pub fn spawn(
         claude_json,
         desktop_sessions,
         desktop: DesktopReader::default(),
+        logged_skips: HashSet::new(),
         log,
         shared: handle.shared.clone(),
         cancel: handle.cancel.clone(),
@@ -238,6 +239,7 @@ struct Worker {
     claude_json: PathBuf,
     desktop_sessions: PathBuf,
     desktop: DesktopReader,
+    logged_skips: HashSet<(PathBuf, &'static str)>,
     log: Arc<Log>,
     shared: Arc<Shared>,
     cancel: Arc<AtomicBool>,
@@ -430,7 +432,13 @@ impl Worker {
                 format!("cannot read desktop sessions: {problem}"),
             );
         }
-        for skipped in &scan.skipped {
+        for skipped in scan.skipped {
+            if !self
+                .logged_skips
+                .insert((skipped.path.clone(), skipped.reason))
+            {
+                continue;
+            }
             self.log.warn(format!(
                 "skipped the desktop session file {}, it {}",
                 skipped.path.display(),
@@ -664,6 +672,34 @@ mod tests {
         assert!(log.contains("cannot attribute desktop sessions"), "{log}");
         side.execute_batch("ALTER TABLE held RENAME TO session_accounts")
             .unwrap();
+        fx.handle.import().await.unwrap();
+        assert_eq!(
+            fx.reader().session_account("s1").unwrap(),
+            Some(format!("oauth:{account}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_desktop_file_is_retried_but_logged_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = Fixture::new();
+        let account = "e08c8984-5a1e-4c1b-9d2f-0123456789ab";
+        let folder = fx
+            .temp
+            .path()
+            .join("desktop/claude-code-sessions")
+            .join(account)
+            .join("7d3f0c2e-8b4a-4e6f-a1c9-0123456789ab");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("local_1.json");
+        std::fs::write(&file, r#"{"cliSessionId":"s1"}"#).unwrap();
+        let mode = |bits| std::fs::set_permissions(&file, std::fs::Permissions::from_mode(bits));
+        mode(0o000).unwrap();
+        fx.handle.import().await.unwrap();
+        fx.handle.import().await.unwrap();
+        let log = std::fs::read_to_string(fx.temp.path().join("daemon.log")).unwrap();
+        assert_eq!(log.matches("it cannot be read").count(), 1, "{log}");
+        mode(0o600).unwrap();
         fx.handle.import().await.unwrap();
         assert_eq!(
             fx.reader().session_account("s1").unwrap(),
