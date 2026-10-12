@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::words::{count, money, tokens};
-use super::{Confidence, Draft, Finding, InsightContext, Rule, RuleId, is_main};
+use super::{Confidence, DAY_S, Draft, Finding, InsightContext, Rule, RuleId, is_main};
 use crate::cache_model::{FIVE_MINUTES_MS, MIN_REBUILD_PREFIX, ONE_HOUR_MS, Ttl, read_instead};
 use crate::pricing::normalize_model;
 use crate::store::SpentRequest;
@@ -20,6 +20,8 @@ struct Replay {
     turns: u64,
     written_1h: u64,
     written_5m: u64,
+    recent_1h: u64,
+    recent_5m: u64,
     premium_1h_usd: f64,
     premium_5m_usd: f64,
     paused_warm: u64,
@@ -54,11 +56,18 @@ impl Rule for CacheTtl {
                 .or_default()
                 .push(request);
         }
+        let mut latest: BTreeMap<Bucket, i64> = BTreeMap::new();
+        for ((bucket, _, _), thread) in &threads {
+            let last = thread.iter().map(|r| r.point.ts).max().unwrap_or(i64::MIN);
+            let entry = latest.entry(*bucket).or_insert(last);
+            *entry = (*entry).max(last);
+        }
         let mut replays: BTreeMap<Bucket, Replay> = BTreeMap::new();
         for ((bucket, session, _), mut thread) in threads {
             thread.sort_by_key(|r| r.point.ts);
+            let recent_since = latest.get(&bucket).map_or(i64::MIN, |ts| ts - DAY_S);
             let replay = replays.entry(bucket).or_default();
-            replay_thread(ctx, bucket, session, &thread, replay);
+            replay_thread(ctx, bucket, session, &thread, recent_since, replay);
         }
         let mut switches: Vec<Switch> = replays
             .into_iter()
@@ -92,28 +101,35 @@ fn replay_thread(
     bucket: Bucket,
     session: &str,
     thread: &[&SpentRequest],
+    recent_since: i64,
     replay: &mut Replay,
 ) {
     let mut moved_by_index = vec![0u64; thread.len()];
+    let mut cached_1h = None;
     for (index, pair) in thread.windows(2).enumerate() {
         let (previous, request) = (pair[0], pair[1]);
         replay.turns += 1;
+        if previous.point.tokens.cache_write() > 0 {
+            cached_1h = Some(previous.point.tokens.cache_write_1h > 0);
+        }
         let prefix = previous.point.tokens.cache_read + previous.point.tokens.cache_write();
-        let gap_ms = (sent(request) - previous.point.ts) * 1000;
+        let gap_ms = (sent(request) - sent(previous)) * 1000;
         let paused = (FIVE_MINUTES_MS..ONE_HOUR_MS).contains(&gap_ms);
         let same_model =
             normalize_model(&previous.point.model) == normalize_model(&request.point.model);
-        if !paused
-            || !same_model
-            || prefix < MIN_REBUILD_PREFIX
-            || compacted_between(ctx, bucket, session, previous.point.ts, request.point.ts)
-        {
+        let Some(cached_1h) = cached_1h.filter(|_| {
+            paused
+                && same_model
+                && prefix >= MIN_REBUILD_PREFIX
+                && !compacted_between(ctx, bucket, session, previous.point.ts, request.point.ts)
+        }) else {
             continue;
-        }
+        };
         let tokens = &request.point.tokens;
         let total = tokens.prompt_total();
         let model = request.point.model.as_str();
-        if tokens.cache_read * 10 < prefix && tokens.cache_write() * 2 >= prefix {
+        let rebuilt = tokens.cache_read * 10 < prefix && tokens.cache_write() * 2 >= prefix;
+        if rebuilt && !cached_1h {
             let moved = tokens.cache_write().min(prefix);
             moved_by_index[index + 1] = moved.min(tokens.cache_write_5m);
             let paid = ctx.prices.cost(model, tokens).unwrap_or(0.0);
@@ -123,7 +139,7 @@ fn replay_thread(
                 .unwrap_or(0.0);
             replay.paused_rebuilds += 1;
             replay.paused_rebuild_usd += paid - warm;
-        } else {
+        } else if !rebuilt && cached_1h {
             let moved = tokens.cache_read.min(prefix);
             let rewrite = cost_of(ctx, model, total, Ttl::FiveMinutes.written(moved));
             let read = cost_of(
@@ -145,8 +161,22 @@ fn replay_thread(
         let model = request.point.model.as_str();
         replay.written_1h += tokens.cache_write_1h;
         replay.written_5m += tokens.cache_write_5m;
+        if request.point.ts >= recent_since {
+            replay.recent_1h += tokens.cache_write_1h;
+            replay.recent_5m += tokens.cache_write_5m;
+        }
         replay.premium_1h_usd += premium(ctx, model, total, tokens.cache_write_1h);
         replay.premium_5m_usd += premium(ctx, model, total, tokens.cache_write_5m - moved);
+    }
+}
+
+impl Replay {
+    fn uses_1h(&self) -> bool {
+        let (written_1h, written_5m) = match self.recent_1h + self.recent_5m {
+            0 => (self.written_1h, self.written_5m),
+            _ => (self.recent_1h, self.recent_5m),
+        };
+        written_1h > 0 && written_1h >= written_5m
     }
 }
 
@@ -155,7 +185,7 @@ fn switch(bucket: Bucket, replay: &Replay) -> Option<Switch> {
         Bucket::Main => "Main thread",
         Bucket::Subagents => "Subagents",
     };
-    if replay.written_1h > 0 && replay.written_1h >= replay.written_5m {
+    if replay.uses_1h() {
         return Some(Switch {
             bucket,
             to_5m: true,
@@ -351,6 +381,53 @@ mod tests {
     }
 
     #[test]
+    fn a_switch_to_the_one_hour_cache_already_made_is_not_suggested_again() {
+        let mut fixture = Fixture::new();
+        fixture.request("s1", SINCE, OPUS, counts(10, 0, 100_000, 10));
+        for pause in 1..=5 {
+            fixture.request("s1", SINCE + pause * 600, OPUS, counts(10, 0, 100_000, 10));
+        }
+        let recent = NOW_S - 3 * 3_600;
+        fixture.request("s2", recent, OPUS, written_1h(0, 100_000));
+        fixture.request("s2", recent + 1_200, OPUS, written_1h(100_000, 0));
+        fixture.request("s2", recent + 2_400, OPUS, written_1h(0, 100_000));
+        fixture.request("s2", recent + 3_000, OPUS, written_1h(100_000, 0));
+        assert!(CacheTtl.evaluate(&fixture.ctx()).is_empty());
+    }
+
+    #[test]
+    fn a_rebuild_after_a_pause_counts_only_when_the_cache_lived_five_minutes() {
+        let mut fixture = Fixture::new();
+        fixture.request("s1", SINCE, OPUS, written_1h(0, 100_000));
+        fixture.request("s1", SINCE + 1_200, OPUS, counts(10, 0, 100_000, 10));
+        fixture.request("s1", SINCE + 1_260, OPUS, counts(10, 100_000, 0, 10));
+        fixture.request("s1", SINCE + 1_860, OPUS, counts(10, 0, 100_000, 10));
+        fixture.request("s1", SINCE + 2_460, OPUS, counts(10, 0, 100_000, 10));
+        let finding = &CacheTtl.evaluate(&fixture.ctx())[0];
+        assert_eq!(
+            finding.tip,
+            "use the 1-hour cache, your pauses often outlast 5 minutes"
+        );
+        assert_eq!(
+            finding.evidence,
+            [
+                "Main thread: 2\u{a0}rebuilds after 5 to 60-minute pauses, $0.96",
+                "The 1-hour rate on the other cache writes would add $0.30",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pause_runs_from_when_the_turn_before_was_sent() {
+        let mut fixture = Fixture::new();
+        fixture.request("s1", SINCE + 180, OPUS, written_1h(0, 100_000));
+        fixture.requests.last_mut().unwrap().point.sent = Some(SINCE);
+        fixture.request("s1", SINCE + 400, OPUS, written_1h(100_000, 0));
+        fixture.requests.last_mut().unwrap().point.sent = Some(SINCE + 360);
+        assert!(CacheTtl.evaluate(&fixture.ctx()).is_empty());
+    }
+
+    #[test]
     fn pauses_that_cost_more_than_the_premium_keep_the_one_hour_cache() {
         let paused = |gap: i64, model: &str, compacted: bool| {
             let mut fixture = Fixture::new();
@@ -364,6 +441,7 @@ mod tests {
         assert!(paused(1_200, OPUS, false).is_empty());
         for kept in [
             paused(3_600, OPUS, false),
+            paused(NOW_S - SINCE - 100, OPUS, false),
             paused(1_200, SONNET, false),
             paused(1_200, OPUS, true),
         ] {
