@@ -47,6 +47,9 @@ type Wiring = {
   placed: boolean
   duringUsage: (() => void) | null
   reportSession: string | null
+  bundle: string | null
+  ensureRewritesBundle: string | null
+  reloads: number
 }
 
 const MEASURE = {
@@ -282,7 +285,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
 }
 
 function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, unknown> = { fullscreen: true }, env: Record<string, string> = {}): Wiring {
-  const wiring: Wiring = { session: 's1', model: 'claude-opus-5-5', served: snapshot(), report: contextReport(), insights: insightsReport(), insightsLag: null, toasts: [], played: [], histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, historyStatus: null, insightsStatus: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], holdingRuns: false, heldRuns: [], knowsUnlessStopped: true, opened: [], closed: [], statuses: [], blits: [], placed: true, duringUsage: null, reportSession: null, ...overrides }
+  const wiring: Wiring = { session: 's1', model: 'claude-opus-5-5', served: snapshot(), report: contextReport(), insights: insightsReport(), insightsLag: null, toasts: [], played: [], histories: { '7d': historyReport(), '24h': dayReport() }, theme: 'dark', usages: [], serving: 'current', lag: null, historyLag: null, historyStatus: null, insightsStatus: null, openRefusal: null, resets: 0, ensureCures: true, silent: false, holding: false, held: [], down: false, rebuilding: false, exitCode: 0, fetched: [], delivered: [], ran: [], holdingRuns: false, heldRuns: [], knowsUnlessStopped: true, opened: [], closed: [], statuses: [], blits: [], placed: true, duringUsage: null, reportSession: null, bundle: null, ensureRewritesBundle: null, reloads: 0, ...overrides }
   mock.env(on, { HOME: '/Users/me', ...env })
   mock.store(on, stored)
   on('session.id', () => ({ value: wiring.session }))
@@ -329,6 +332,7 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
       return { value: { exitCode: 2, stdout: '', stderr: "error: unexpected argument '--unless-stopped' found\n", isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (wiring.serving === 'older' && wiring.ensureCures) wiring.serving = 'current'
+    if (wiring.ensureRewritesBundle !== null) wiring.bundle = wiring.ensureRewritesBundle
     return { value: { exitCode: wiring.exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('http.fetch', async ($, e) => {
@@ -357,6 +361,14 @@ function wire(on: On, overrides: Partial<Wiring> = {}, stored: Record<string, un
         ? JSON.stringify({ v: 1, ...wiring.report, session: wiring.reportSession ?? wiring.session })
         : '{"accepted":1,"rejected":[]}'
     return { value: { status: 200, ok: true, headers: {}, text: body } }
+  })
+  on('fs.read', ($, e) => {
+    if (!e.path.endsWith('/.bundle-hash') || wiring.bundle === null) return { deny: `ENOENT: ${e.path}` }
+    return { value: wiring.bundle }
+  })
+  on('command.run', { command: 'reload-plugins' }, () => {
+    wiring.reloads += 1
+    return { text: 'Reloaded' }
   })
   on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', props: {}, children: ['? for shortcuts'] }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -452,6 +464,43 @@ describe('plus mod', () => {
     expect(wiring.opened).toEqual(['plus'])
     expect(wiring.fetched[0]?.init?.socketPath).toBe('/Users/me/.claude-plus/daemon.sock')
     expect(kinds(wiring)).toEqual(['session.start'])
+  })
+
+  test('a session whose start installs a newer mod reloads plugins once so it shows the new pane', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { bundle: 'old-build', ensureRewritesBundle: 'new-build' })
+    await start($)
+    await clock.settle()
+    expect(wiring.reloads).toBe(1)
+    await clock.advance(10 * MINUTE_MS)
+    expect(wiring.reloads).toBe(1)
+  })
+
+  test('a session whose mod is already current does not reload plugins', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { bundle: 'same-build' })
+    await start($)
+    await clock.settle()
+    expect(wiring.ran).toHaveLength(1)
+    expect(wiring.reloads).toBe(0)
+  })
+
+  test('a mod loaded from outside the claude-plus marketplace never reloads plugins', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { bundle: null })
+    await start($)
+    await clock.settle()
+    expect(wiring.ran).toHaveLength(1)
+    expect(wiring.reloads).toBe(0)
+  })
+
+  test('a headless session leaves plugins alone when its start installs a newer mod', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on, { bundle: 'old-build', ensureRewritesBundle: 'new-build' })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false })
+    await clock.settle()
+    expect(wiring.ran).toHaveLength(1)
+    expect(wiring.reloads).toBe(0)
   })
 
   test('a session start says which provider it talks to and whether a key is set, never the key', async ($, on) => {

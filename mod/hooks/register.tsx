@@ -106,6 +106,8 @@ type Runtime = {
   greeting: boolean
   greetPending: boolean
   toastUntilMs: number
+  bundle: string | null | undefined
+  reloadAsked: boolean
 }
 
 function fresh(options: PluginOptions): Runtime {
@@ -139,6 +141,8 @@ function fresh(options: PluginOptions): Runtime {
     greeting: false,
     greetPending: false,
     toastUntilMs: -Infinity,
+    bundle: undefined,
+    reloadAsked: false,
   }
 }
 
@@ -603,7 +607,9 @@ function ensureDaemon($: EngineInterface, mode: EnsureMode = 'always'): Promise<
   const done = (async () => {
     try {
       runtime.ensuredAtMs = await $.clock.now()
+      const loaded = await loadedBundle($)
       const outcome = await runEnsure($, mode)
+      quietly(reloadIfRewritten($, loaded))
       await update($, daemon, known => (outcome.status === 'ok' && settlesOnPoll(known.status) ? known : outcome))
       if (outcome.status !== 'ok') return
       await flush($)
@@ -622,6 +628,26 @@ function afterwards(running: Promise<void> | undefined): Promise<void> {
 
 function covers(running: EnsureMode, wanted: EnsureMode): boolean {
   return running === 'always' || wanted === 'unless-stopped'
+}
+
+async function loadedBundle($: EngineInterface): Promise<string | null> {
+  if (runtime.bundle === undefined) runtime.bundle = await bundleOf($)
+  return runtime.bundle
+}
+
+function bundleOf($: EngineInterface): Promise<string | null> {
+  return $.fs.read(`${$.plugin.root}/../.bundle-hash`).then(
+    text => text.trim() || null,
+    () => null,
+  )
+}
+
+async function reloadIfRewritten($: EngineInterface, loaded: string | null): Promise<void> {
+  if (!runtime.interactive || runtime.reloadAsked || loaded === null) return
+  const now = await bundleOf($)
+  if (now === null || now === loaded) return
+  runtime.reloadAsked = true
+  await $.command.run({ command: 'reload-plugins' })
 }
 
 async function runEnsure($: EngineInterface, mode: EnsureMode): Promise<Daemon> {
