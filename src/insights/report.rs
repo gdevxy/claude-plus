@@ -220,6 +220,7 @@ where
         .collect();
     let (rebuilds, compactions) =
         rebuilds(store, prices, &requests, since, spans.until, request.now_ms)?;
+    let agent_types = store.agent_types_between(since, spans.until)?;
     let project = store.session_project(request.session)?;
     let live = store
         .live_breakdown(request.session)?
@@ -267,6 +268,7 @@ where
         prices,
         rates: &rates,
         requests: &requests,
+        agent_types: &agent_types,
         sessions: &sessions,
         project: project.as_deref(),
         prompts: &prompts,
@@ -395,7 +397,8 @@ mod tests {
     use crate::config_scan::Roots;
     use crate::insights::RuleId;
     use crate::store::{
-        AttachmentRow, AttributionSource, PromptRow, RequestPoint, RequestRow, SessionRow,
+        AgentRow, AttachmentRow, AttributionSource, LimitSample, PromptRow, RequestPoint,
+        RequestRow, SessionRow,
     };
     use crate::transcript::TokenCounts;
 
@@ -975,5 +978,95 @@ mod tests {
         .unwrap();
         let rules: Vec<RuleId> = report.findings.iter().map(|f| f.rule).collect();
         assert_eq!(rules, [RuleId::ModelFit]);
+    }
+
+    fn account_store(subagent_type: Option<&str>, limits: &[(&str, &str, f64)]) -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.session(&SessionRow {
+            id: "s1".into(),
+            project: "-work".into(),
+            cwd: None,
+            ts: Some(utc("2026-10-10T09:00:00Z")),
+        })
+        .unwrap();
+        w.attribute("s1", "oauth:me", AttributionSource::Start)
+            .unwrap();
+        if let Some(agent_type) = subagent_type {
+            w.agent(&AgentRow {
+                agent_id: "a1".into(),
+                session_id: "s1".into(),
+                agent_type: agent_type.into(),
+            })
+            .unwrap();
+        }
+        let tokens = TokenCounts {
+            input: 1_000_000,
+            ..Default::default()
+        };
+        w.request(&RequestRow {
+            key: "r1".into(),
+            session_id: "s1".into(),
+            ts: utc("2026-10-10T09:30:00Z"),
+            sent_ts: None,
+            model: OPUS.into(),
+            cost_usd: PriceTable::bundled().cost(OPUS, &tokens),
+            tokens,
+            is_sidechain: true,
+            agent_id: Some("a1".into()),
+            skill: None,
+            mcp_server: None,
+            effort: None,
+        })
+        .unwrap();
+        for (account, at, used_pct) in limits {
+            w.limit_sample(&LimitSample {
+                ts_ms: utc(at) * 1000,
+                session_id: "s1".into(),
+                account_id: Some(account.to_string()),
+                model: Some(OPUS.into()),
+                window: "five_hour".into(),
+                used_pct: *used_pct,
+                resets_at_ms: Some(utc("2026-10-10T11:00:00Z") * 1000),
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        store
+    }
+
+    fn report_for(store: &Store, session: &str) -> InsightsReport {
+        let temp = tempfile::tempdir().unwrap();
+        let scan = config_scan::scan(&Roots {
+            home: temp.path().join("home"),
+            claude_dir: temp.path().join("claude"),
+            claude_json: temp.path().join("claude.json"),
+            project: None,
+        });
+        read(
+            store,
+            &PriceTable::bundled(),
+            &Request {
+                session,
+                scan: &scan,
+                retention_days: Some(90),
+                now_ms: utc("2026-10-11T12:00:00Z") * 1000,
+            },
+            &Utc,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_report_names_subagents_by_the_type_the_store_keeps() {
+        let typed = report_for(&account_store(Some("Explore"), &[]), "s1");
+        let rules: Vec<RuleId> = typed.findings.iter().map(|f| f.rule).collect();
+        assert_eq!(rules, [RuleId::SubagentModelFit]);
+        assert_eq!(
+            typed.findings[0].tip,
+            "run Explore subagents on Sonnet\u{a0}5.5"
+        );
+        let untyped = report_for(&account_store(None, &[]), "s1");
+        assert_eq!(untyped.findings[0].tip, "run subagents on Sonnet\u{a0}5.5");
     }
 }

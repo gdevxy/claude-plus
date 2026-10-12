@@ -2,6 +2,7 @@ mod cache;
 mod report;
 mod setup;
 pub mod sources;
+mod subagents;
 mod ttl;
 mod usage;
 pub mod words;
@@ -21,6 +22,7 @@ use crate::transcript::TokenCounts;
 pub use cache::{CacheBusts, IdleRebuilds};
 pub use report::{Day, InsightsReport, Recap, Request, Wins, days, read, recap, wins};
 pub use setup::{OversizedMemory, Retention, UnusedMcpServers, UnusedSkills};
+pub use subagents::SubagentModelFit;
 pub use ttl::CacheTtl;
 pub use usage::{CostlyTasks, LargeToolResults, LateCompaction, ModelFit, Task, tasks};
 
@@ -41,6 +43,7 @@ pub enum RuleId {
     LargeToolResults,
     LateCompaction,
     ModelFit,
+    SubagentModelFit,
     CacheBusts,
     CacheTtl,
     CostlyTasks,
@@ -93,6 +96,7 @@ pub struct InsightContext<'a> {
     pub prices: &'a PriceTable,
     pub rates: &'a Rates,
     pub requests: &'a [SpentRequest],
+    pub agent_types: &'a BTreeMap<String, String>,
     pub sessions: &'a [SessionInfo],
     pub project: Option<&'a str>,
     pub prompts: &'a [PromptPoint],
@@ -115,6 +119,7 @@ pub fn rules() -> Vec<Box<dyn Rule>> {
         Box::new(LargeToolResults),
         Box::new(LateCompaction),
         Box::new(ModelFit),
+        Box::new(SubagentModelFit),
         Box::new(CacheBusts),
         Box::new(CacheTtl),
         Box::new(CostlyTasks),

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::{DAY_S, InsightContext, MemoryText, Rebuilt, WINDOW_DAYS};
 use crate::cache_model::FIVE_MINUTES_MS;
 use crate::cache_model::{Rebuild, RebuildCause};
@@ -22,6 +24,7 @@ pub(crate) struct Fixture {
     pub prices: PriceTable,
     pub rates: Rates,
     pub requests: Vec<SpentRequest>,
+    pub agent_types: BTreeMap<String, String>,
     pub sessions: Vec<SessionInfo>,
     pub project: Option<String>,
     pub prompts: Vec<PromptPoint>,
@@ -51,6 +54,7 @@ impl Fixture {
             prices: PriceTable::bundled(),
             rates: Rates::of(&[]),
             requests: Vec::new(),
+            agent_types: BTreeMap::new(),
             sessions: Vec::new(),
             project: Some(PROJECT.into()),
             prompts: Vec::new(),
@@ -72,6 +76,7 @@ impl Fixture {
             prices: &self.prices,
             rates: &self.rates,
             requests: &self.requests,
+            agent_types: &self.agent_types,
             sessions: &self.sessions,
             project: self.project.as_deref(),
             prompts: &self.prompts,
@@ -190,6 +195,22 @@ impl Fixture {
 
     pub fn subagent(&mut self, session: &str, ts: i64, model: &str, tokens: TokenCounts) {
         self.push(session, ts, model, tokens, Some("a1"));
+    }
+
+    pub fn push_agent(&mut self, agent: &str, ts: i64, model: &str, tokens: TokenCounts) {
+        self.push("s1", ts, model, tokens, Some(agent));
+    }
+
+    pub fn typed(
+        &mut self,
+        agent: &str,
+        agent_type: &str,
+        ts: i64,
+        model: &str,
+        tokens: TokenCounts,
+    ) {
+        self.push("s1", ts, model, tokens, Some(agent));
+        self.agent_types.insert(agent.into(), agent_type.into());
     }
 
     fn push(
