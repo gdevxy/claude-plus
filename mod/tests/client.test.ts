@@ -98,6 +98,13 @@ describe('daemon client', () => {
     expect(await fetchSnapshot(serve({ v: 1 }), '/s.sock', 's1')).toEqual({ kind: 'failed', reason: 'unreadable snapshot' })
   })
 
+  test('a snapshot names the version of the daemon, or none when an older daemon leaves it out', () => {
+    const { version: _version, ...unnamed } = snapshot()
+    expect(parseSnapshot(JSON.stringify({ v: 1, ...snapshot() }))?.version).toBe('0.3.0')
+    expect(parseSnapshot(JSON.stringify({ v: 1, ...unnamed }))?.version).toBeNull()
+    expect(parseSnapshot(JSON.stringify({ v: 1, ...snapshot(), version: '' }))?.version).toBeNull()
+  })
+
   test('only a version 1 snapshot with a live section is accepted', () => {
     const good = { v: 1, ...snapshot() }
     expect(parseSnapshot(JSON.stringify(good))?.live.cache.ttl).toBe('1h')

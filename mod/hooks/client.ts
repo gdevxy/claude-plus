@@ -105,6 +105,7 @@ export function parseSnapshot(text: string): Snapshot | null {
   const live = value.live
   if (!isObject(value.totals) || !isObject(live) || !isObject(live.cache) || !Array.isArray(live.limits)) return null
   if (isObject(live.forecast) && !Array.isArray(live.forecast.lineup)) live.forecast.lineup = []
+  if (typeof value.version !== 'string' || value.version === '') value.version = null
   if (!isObject(live.account)) live.account = null
   if (!isObject(live.budget)) live.budget = null
   return value as unknown as Snapshot

@@ -838,6 +838,7 @@ export const register: Register = (on, options) => {
         ui={ui}
         width={e.props.bodyColumns}
         lines={lines}
+        version={status.status === 'ok' ? (shown?.version ?? null) : null}
         palette={e.surface === 'terminal' ? paletteOf(await read($, theme)) : null}
         tabs={[
           { key: 'tab-live', hotkey: '1', label: 'Live', short: 'Live', isActive: shownView === 'live', onPress: () => quietly(showView($, 'live')) },

@@ -69,6 +69,8 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub v: u32,
+    #[serde(default)]
+    pub version: String,
     pub session: String,
     pub known: bool,
     pub generated_at_ms: i64,
@@ -132,6 +134,7 @@ impl Snapshot {
         };
         Ok(Self {
             v: SNAPSHOT_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
             session: session.to_string(),
             known: totals.known || measure.is_some(),
             generated_at_ms: now_ms,
@@ -186,6 +189,7 @@ mod tests {
 
     const SNAPSHOT_V1: &str = r#"{
   "v": 1,
+  "version": "@VERSION@",
   "session": "11111111-1111-1111-1111-111111111111",
   "known": true,
   "generated_at_ms": 1791021600000,
@@ -450,11 +454,9 @@ mod tests {
             1_791_021_600_000,
         )
         .unwrap();
-        assert_eq!(
-            serde_json::to_string_pretty(&snapshot).unwrap(),
-            SNAPSHOT_V1
-        );
-        let parsed: Snapshot = serde_json::from_str(SNAPSHOT_V1).unwrap();
+        let documented = SNAPSHOT_V1.replace("@VERSION@", env!("CARGO_PKG_VERSION"));
+        assert_eq!(serde_json::to_string_pretty(&snapshot).unwrap(), documented);
+        let parsed: Snapshot = serde_json::from_str(&documented).unwrap();
         assert_eq!(parsed, snapshot);
     }
 

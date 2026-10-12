@@ -81,6 +81,7 @@ export type Live = {
 }
 
 export type Snapshot = {
+  version: string | null
   session: string
   known: boolean
   generated_at_ms: number

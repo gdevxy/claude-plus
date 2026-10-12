@@ -267,6 +267,7 @@ fn the_snapshot_carries_session_totals_from_the_store() {
     assert_eq!(outcome.reconcile_error, None);
     let snapshot = server.client().snapshot(SESSION).unwrap();
     assert_eq!(snapshot.v, 1);
+    assert_eq!(snapshot.version, env!("CARGO_PKG_VERSION"));
     assert_eq!(snapshot.session, SESSION);
     assert!((snapshot.totals.cost_usd - 0.06404).abs() < 1e-9);
     assert_eq!(snapshot.totals.requests, 1);

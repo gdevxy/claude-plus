@@ -5,8 +5,11 @@ import type { Bucket, ContextReport, Finding, HistoryRange, HistoryReport, Insig
 export const NOW_MS = Date.parse('2026-10-11T09:00:00Z')
 export const MINUTE_MS = 60_000
 
+export const DAEMON_VERSION = '0.3.0'
+
 export function snapshot(overrides: Partial<Snapshot['live']> = {}): Snapshot {
   return {
+    version: DAEMON_VERSION,
     session: 's1',
     known: true,
     generated_at_ms: NOW_MS,

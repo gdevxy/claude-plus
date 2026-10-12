@@ -5,7 +5,7 @@ import type { HttpInit, On, SessionUsageArgs } from 'claude-code'
 import type { ContextReport, HistoryReport, InsightsReport, LimitWindow, Snapshot } from '../types'
 import { historyScreen } from '../hooks/history'
 import { insightsScreen } from '../hooks/insights'
-import { MINUTE_MS, NOW_MS, contextReport, dayReport, historyReport, insightsReport, local, snapshot, usage } from './fixtures'
+import { DAEMON_VERSION, MINUTE_MS, NOW_MS, contextReport, dayReport, historyReport, insightsReport, local, snapshot, usage } from './fixtures'
 import { decoded, paintTree, painted, trimmed } from './paint'
 
 type Wiring = {
@@ -59,13 +59,13 @@ const MEASURE = {
 const HISTORY_HEADERS: Record<number, string> = {
   40: ' ✻       1: Live 2: Ctx 3: Hist 4: Tips',
   60: ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
-  100: ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
+  100: ' ✻ claude-plus 0.3.0                                      1: Live 2: Context 3: History 4: Insights',
 }
 
 const INSIGHTS_HEADERS: Record<number, string> = {
   40: ' ✻       1: Live 2: Ctx 3: Hist 4: Tips',
   60: ' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights',
-  100: ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
+  100: ' ✻ claude-plus 0.3.0                                      1: Live 2: Context 3: History 4: Insights',
 }
 
 const PANE_FRAMES: Record<number, string[]> = {
@@ -132,7 +132,7 @@ const PANE_FRAMES: Record<number, string[]> = {
     '         resets in 2d 23h',
   ],
   100: [
-    ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
+    ' ✻ claude-plus 0.3.0                                      1: Live 2: Context 3: History 4: Insights',
     '',
     ' Opus 5.5 · high                                                                              $4.18',
     '',
@@ -242,7 +242,7 @@ const CONTEXT_FRAMES: Record<number, string[]> = {
     '   Plugins                                        5 · 1 off',
   ],
   100: [
-    ' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights',
+    ' ✻ claude-plus 0.3.0                                      1: Live 2: Context 3: History 4: Insights',
     '',
     ' Context · Opus 5.5                                                                      46k / 200k',
     ' █████████████████████▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░  23%',
@@ -652,6 +652,64 @@ describe('plus mod', () => {
       await ui.unmount()
     })
   }
+
+  test('the header names the version of the daemon in a dimmer shade beside the brand', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on)
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 100)
+    expect((await ui.find({ key: 'identity' }))?.children).toEqual([
+      { type: 'Text', props: { color: 'claude', bold: true }, children: ['✻ claude-plus'] },
+      { type: 'Text', props: { dimColor: true }, children: [DAEMON_VERSION] },
+    ])
+    await ui.unmount()
+  })
+
+  test('a pane too narrow for the version drops it before it shortens the brand', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on)
+    await start($)
+    await clock.advance(1000)
+    for (const [columns, header] of [
+      [63, ' ✻ claude-plus 0.3.0 1: Live 2: Context 3: History 4: Insights'],
+      [62, ' ✻ claude-plus      1: Live 2: Context 3: History 4: Insights'],
+      [40, ' ✻       1: Live 2: Ctx 3: Hist 4: Tips'],
+    ] as const) {
+      const ui = await mount($, columns)
+      expect(trimmed(paintTree(await ui.drawn(), columns))[0]).toBe(header)
+      await ui.unmount()
+    }
+  })
+
+  test('a daemon that names no version leaves the brand alone in the header', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    wire(on, { served: { ...snapshot(), version: null } })
+    await start($)
+    await clock.advance(1000)
+    const ui = await mount($, 100)
+    expect((await ui.find({ key: 'identity' }))?.text).toBe('✻ claude-plus')
+    expect(trimmed(paintTree(await ui.drawn(), 100))[0]).toBe(' ✻ claude-plus                                            1: Live 2: Context 3: History 4: Insights')
+    await ui.unmount()
+  })
+
+  test('the version leaves the header while the daemon is unreachable and returns with it', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW_MS })
+    const wiring = wire(on)
+    await start($)
+    await clock.advance(1000)
+    wiring.down = true
+    await clock.advance(3000)
+    const ui = await mount($, 100)
+    expect((await ui.find({ key: 'identity' }))?.text).toBe('✻ claude-plus')
+    await ui.unmount()
+    wiring.down = false
+    wiring.served = { ...snapshot(), version: '0.4.0' }
+    await clock.advance(3000)
+    const back = await mount($, 100)
+    expect((await back.find({ key: 'identity' }))?.text).toBe('✻ claude-plus0.4.0')
+    await back.unmount()
+  })
 
   test('a measure sets the status line and is forwarded to the daemon', async ($, on) => {
     const clock = mock.clock(on, { now: NOW_MS })
@@ -1468,7 +1526,7 @@ describe('plus mod', () => {
             ? [' ✻         1: Live 2: Ctx', '          3: Hist 4: Tips', '']
             : columns === 60
               ? [' ✻ claude-plus    1: Live 2: Context 3: History 4: Insights', '']
-              : [` ✻ claude-plus${' '.repeat(88)}1: Live 2: Context 3: History 4: Insights`, ''],
+              : [` ✻ claude-plus 0.3.0${' '.repeat(82)}1: Live 2: Context 3: History 4: Insights`, ''],
         )
         const controls = rows.slice(top, rows.indexOf('', top))
         expect(controls).toEqual(

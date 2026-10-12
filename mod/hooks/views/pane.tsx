@@ -8,6 +8,8 @@ import { Row } from './widgets'
 export const BRAND = '✻ claude-plus'
 export const SHORT_BRAND = '✻'
 
+export type Brand = { name: string; version: string | null }
+
 export type Tab = { key: string; hotkey: string; label: string; short: string; isActive: boolean; onPress: () => void }
 
 export type Choice = { text: string; isActive: boolean }
@@ -55,8 +57,14 @@ export function buttonsWidth(buttons: readonly { hotkey: string; label: string }
   return buttons.reduce((sum, button) => sum + button.hotkey.length + 2 + button.label.length, 0) + Math.max(0, buttons.length - 1)
 }
 
-export function brandFor(inner: number, tabs: readonly Tab[]): string {
-  return BRAND.length + 1 + buttonsWidth(tabs) <= inner ? BRAND : SHORT_BRAND
+function brandWidth(brand: Brand): number {
+  return brand.name.length + (brand.version === null ? 0 : 1 + brand.version.length)
+}
+
+export function brandFor(inner: number, tabs: readonly Tab[], version: string | null): Brand {
+  const fits = (brand: Brand) => brandWidth(brand) + 1 + buttonsWidth(tabs) <= inner
+  const candidates: Brand[] = [...(version === null ? [] : [{ name: BRAND, version }]), { name: BRAND, version: null }]
+  return candidates.find(fits) ?? { name: SHORT_BRAND, version: null }
 }
 
 export function shownTabs(inner: number, tabs: readonly Tab[]): Tab[] {
@@ -64,11 +72,11 @@ export function shownTabs(inner: number, tabs: readonly Tab[]): Tab[] {
   return tabs.map(tab => ({ ...tab, label: tab.short }))
 }
 
-export function tabRows(inner: number, brand: string, tabs: readonly Tab[]): Tab[][] {
+export function tabRows(inner: number, brand: Brand, tabs: readonly Tab[]): Tab[][] {
   for (let count = 1; count < tabs.length; count += 1) {
     const size = Math.ceil(tabs.length / count)
     const rows = Array.from({ length: Math.ceil(tabs.length / size) }, (_, index) => tabs.slice(index * size, (index + 1) * size))
-    if (rows.every((row, index) => buttonsWidth(row) + (index === 0 ? brand.length + 1 : 0) <= inner)) return rows
+    if (rows.every((row, index) => buttonsWidth(row) + (index === 0 ? brandWidth(brand) + 1 : 0) <= inner)) return rows
   }
   return tabs.map(tab => [tab])
 }
@@ -78,6 +86,7 @@ export function PaneBody({
   width,
   lines,
   tabs,
+  version = null,
   controls = [],
   palette = null,
   onToggle,
@@ -86,6 +95,7 @@ export function PaneBody({
   width: number
   lines: Line[]
   tabs: Tab[]
+  version?: string | null
   controls?: Control[]
   palette?: Palette | null
   onToggle: (key: string) => void
@@ -93,7 +103,7 @@ export function PaneBody({
   const { Box, Text, Button } = ui
   const inner = Math.max(1, width - 2 * PADDING)
   const shown = shownTabs(inner, tabs)
-  const brand = brandFor(inner, shown)
+  const brand = brandFor(inner, shown, version)
   const header = tabRows(inner, brand, shown)
   const rows = controlRows(inner, controls)
   return (
@@ -103,9 +113,16 @@ export function PaneBody({
           {[
             ...(index === 0
               ? [
-                  <Text key="brand" color="claude" bold>
-                    {brand}
-                  </Text>,
+                  <Box key="identity" gap={1}>
+                    <Text color="claude" bold>
+                      {brand.name}
+                    </Text>
+                    {brand.version === null ? null : (
+                      <Text dimColor>
+                        {brand.version}
+                      </Text>
+                    )}
+                  </Box>,
                 ]
               : []),
             <Box key="tabs" gap={1}>
