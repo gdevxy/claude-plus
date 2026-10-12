@@ -1511,7 +1511,7 @@ fn accounts_help_lists_assign_and_unassign() {
         "{help}"
     );
     assert!(
-        help.contains("Make sessions given with assign Unknown again"),
+        help.contains("Make assigned sessions Unknown again"),
         "{help}"
     );
     let assign = stdout_of(&env, &["accounts", "assign", "--help"]);
@@ -1523,4 +1523,8 @@ fn accounts_help_lists_assign_and_unassign() {
     ] {
         assert!(assign.contains(flag), "missing {flag} in\n{assign}");
     }
+    assert!(
+        assign.contains("<ACCOUNT>  Account id or label, see claude-plus accounts"),
+        "{assign}"
+    );
 }

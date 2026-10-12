@@ -130,14 +130,20 @@ enum Command {
 #[derive(Subcommand)]
 enum AccountsAction {
     #[command(about = "Give an account your own label")]
-    Rename { account: String, label: String },
+    Rename {
+        #[arg(help = "Account id or label, see claude-plus accounts")]
+        account: String,
+        #[arg(help = "The new label")]
+        label: String,
+    },
     #[command(about = "Attribute Unknown sessions to an account by project and days")]
     Assign {
+        #[arg(help = "Account id or label, see claude-plus accounts")]
         account: String,
         #[command(flatten)]
         selection: SelectionArgs,
     },
-    #[command(about = "Make sessions given with assign Unknown again")]
+    #[command(about = "Make assigned sessions Unknown again")]
     Unassign {
         #[command(flatten)]
         selection: SelectionArgs,
