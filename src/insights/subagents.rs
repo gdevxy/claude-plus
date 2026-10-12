@@ -4,9 +4,11 @@ use super::usage::TOP_TIER;
 use super::words::{count, model_name, money};
 use super::{Confidence, Draft, Finding, InsightContext, Rule, RuleId, is_main, listed};
 use crate::forecast::{alternative_for, family};
+use crate::pricing::normalize_model;
 
 pub const READ_ONLY_AGENTS: &[&str] = &["Explore", "Plan", "claude-code-guide", "statusline-setup"];
 pub const UNKNOWN_AGENT: &str = "untyped";
+pub const FORK_AGENT: &str = "fork";
 
 pub struct SubagentModelFit;
 
@@ -38,17 +40,22 @@ impl Rule for SubagentModelFit {
         for request in ctx.requests {
             let paid = request.cost_usd.unwrap_or(0.0);
             all += paid;
-            let Some(agent) = request
-                .point
-                .agent_id
-                .as_deref()
-                .filter(|_| !is_main(request))
-            else {
+            if is_main(request) {
+                continue;
+            }
+            subagents += paid;
+            let Some(agent) = request.point.agent_id.as_deref() else {
                 continue;
             };
-            subagents += paid;
-            let model = request.point.model.as_str();
+            let model = normalize_model(&request.point.model);
             if !TOP_TIER.contains(&family(model)) {
+                continue;
+            }
+            let kind = ctx
+                .agent_types
+                .get(agent)
+                .map_or(UNKNOWN_AGENT, String::as_str);
+            if kind == FORK_AGENT {
                 continue;
             }
             let Some(cheaper) = alternative_for(model)
@@ -56,10 +63,6 @@ impl Rule for SubagentModelFit {
             else {
                 continue;
             };
-            let kind = ctx
-                .agent_types
-                .get(agent)
-                .map_or(UNKNOWN_AGENT, String::as_str);
             let spent = by_type.entry(kind).or_default();
             spent.runs.insert(agent);
             spent.paid += paid;
@@ -75,15 +78,19 @@ impl Rule for SubagentModelFit {
         let mut evidence = listed(
             &ordered,
             |(kind, spent)| {
-                let model = spent.model();
-                format!(
-                    "{kind}: {} on {} cost {}, {} on {}",
-                    count(spent.runs.len() as u64, "run", "runs"),
-                    model_name(model),
-                    money(spent.paid),
-                    money(spent.cheaper),
-                    model_name(alternative_for(model).unwrap_or_default())
-                )
+                let runs = count(spent.runs.len() as u64, "run", "runs");
+                let (paid, cheaper) = (money(spent.paid), money(spent.cheaper));
+                match spent.by_model.len() {
+                    1 => {
+                        let model = spent.model();
+                        format!(
+                            "{kind}: {runs} on {} cost {paid}, {cheaper} on {}",
+                            model_name(model),
+                            model_name(alternative_for(model).unwrap_or_default())
+                        )
+                    }
+                    _ => format!("{kind}: {runs} cost {paid}, {cheaper} on cheaper models"),
+                }
             },
             "agent types",
         );
@@ -100,9 +107,10 @@ impl Rule for SubagentModelFit {
                 kind => format!("run {kind} subagents on {}", model_name(alternative)),
             },
             evidence,
-            confidence: match READ_ONLY_AGENTS.contains(top) {
-                true => Confidence::Medium,
-                false => Confidence::Low,
+            confidence: if READ_ONLY_AGENTS.contains(top) {
+                Confidence::Medium
+            } else {
+                Confidence::Low
             },
             how: "Reprices the subagent requests of the last 14 days that ran on Opus, Fable or Mythos \
                   on the next model down at the same token counts, by the agent type each subagent's .meta.json names. \
@@ -205,6 +213,45 @@ mod tests {
         let finding = &SubagentModelFit.evaluate(&untyped.ctx())[0];
         assert_eq!(finding.tip, "run subagents on Sonnet\u{a0}5.5");
         assert_eq!(finding.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn a_type_on_several_top_tier_models_is_priced_without_naming_one_alternative() {
+        let mut fixture = Fixture::new();
+        let input = counts(100_000, 0, 0, 0);
+        fixture.typed("a1", "reviewer", SINCE, "claude-fable-5-1", input);
+        fixture.typed("a2", "reviewer", SINCE + 10, OPUS, input);
+        fixture.typed("a3", "Explore", SINCE + 20, OPUS, input);
+        fixture.typed(
+            "a3",
+            "Explore",
+            SINCE + 30,
+            "claude-opus-5-5-20261001",
+            input,
+        );
+        fixture.typed("f1", "fork", SINCE + 40, OPUS, counts(1_000_000, 0, 0, 0));
+        fixture.request("s1", SINCE + 50, SONNET, input);
+        fixture.requests.last_mut().unwrap().point.is_sidechain = true;
+        fixture.request("s1", SINCE + 60, OPUS, input);
+        let finding = &SubagentModelFit.evaluate(&fixture.ctx())[0];
+        assert_eq!(finding.tip, "run reviewer subagents on Opus\u{a0}5.5");
+        assert_eq!(finding.confidence, Confidence::Low);
+        close(finding.saving_usd, (0.8 + 0.4) / 2.0);
+        assert_eq!(
+            finding.evidence,
+            [
+                "reviewer: 2\u{a0}runs cost $1.40, $0.60 on cheaper models",
+                "Explore: 1\u{a0}run on Opus\u{a0}5.5 cost $0.80, $0.40 on Sonnet\u{a0}5.5",
+                "Subagents drew 94% of your spend",
+            ]
+        );
+    }
+
+    #[test]
+    fn fork_subagents_are_never_repriced() {
+        let mut fixture = Fixture::new();
+        fixture.typed("f1", "fork", SINCE, OPUS, counts(1_000_000, 0, 0, 1_000));
+        assert!(SubagentModelFit.evaluate(&fixture.ctx()).is_empty());
     }
 
     #[test]
