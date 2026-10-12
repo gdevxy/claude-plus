@@ -11,8 +11,8 @@ use anyhow::Result;
 
 use crate::pricing::PriceTable;
 use crate::store::{
-    AttachmentRow, Busy, CompactionRow, CostStateRow, FileCheckpoint, FileProgress, PromptRow,
-    RequestRow, RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
+    AgentRow, AttachmentRow, Busy, CompactionRow, CostStateRow, FileCheckpoint, FileProgress,
+    PromptRow, RequestRow, RequestWrite, SessionRow, Store, ToolResultRow, ToolUseRow, Writer,
 };
 use crate::transcript::location::Location;
 use crate::transcript::redact::redact;
@@ -21,6 +21,7 @@ use crate::transcript::{Parsed, Record, parse_line};
 pub use discover::{TranscriptFile, discover, is_transcript};
 
 pub const BATCH_LINES: u64 = 5000;
+pub const AGENT_TYPE_CHARS: usize = 64;
 pub const SKIPPED_RAW_KINDS: &[&str] = &[
     "file-history-snapshot",
     "file-history-delta",
@@ -219,6 +220,9 @@ impl<'a> Ingestor<'a> {
             files_seen: 1,
             ..Default::default()
         };
+        if let Some(agent_id) = &file.location.agent_id {
+            self.record_agent_type(file, agent_id)?;
+        }
         let metadata = std::fs::metadata(&file.path)?;
         let size = metadata.len();
         let mtime = metadata
@@ -315,6 +319,31 @@ impl<'a> Ingestor<'a> {
         report.files_changed = u64::from(replaced || report.lines > 0);
         Ok(report)
     }
+}
+
+impl Ingestor<'_> {
+    fn record_agent_type(&mut self, file: &TranscriptFile, agent_id: &str) -> Result<()> {
+        if self.store.knows_agent(agent_id)? {
+            return Ok(());
+        }
+        let Some(agent_type) = agent_type(&file.path.with_extension("meta.json")) else {
+            return Ok(());
+        };
+        let mut writer = self.store.writer()?;
+        writer.agent(&AgentRow {
+            agent_id: agent_id.to_string(),
+            session_id: file.location.session_hint.clone(),
+            agent_type,
+        })?;
+        writer.commit()
+    }
+}
+
+fn agent_type(meta: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(meta).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let name = value.get("agentType")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.chars().take(AGENT_TYPE_CHARS).collect())
 }
 
 fn reconcile_touched(writer: &mut Writer, prices: &PriceTable, report: &mut IngestReport) {
@@ -590,6 +619,71 @@ mod tests {
             ),
             ("s1", Some("a1"))
         );
+    }
+
+    #[test]
+    fn a_subagent_type_is_read_from_its_meta_file_once_it_exists() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        fx.write("-w-proj/s1/subagents/agent-a1.jsonl", &format!("{line}\n"));
+        fx.write("-w-proj/s1/subagents/agent-a2.jsonl", &format!("{line}\n"));
+        fx.write("-w-proj/s1/subagents/agent-a2.meta.json", "{not json");
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        assert!(!store.knows_agent("a1").unwrap());
+        assert!(!store.knows_agent("a2").unwrap());
+        fx.write(
+            "-w-proj/s1/subagents/agent-a1.meta.json",
+            r#"{"agentType":"Explore","description":"Find the parser","toolUseId":"toolu_1"}"#,
+        );
+        fx.run(&mut store);
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let types = store.agent_types_between(since, since + 86_400).unwrap();
+        assert_eq!(
+            types.into_iter().collect::<Vec<_>>(),
+            [("a1".to_string(), "Explore".to_string())]
+        );
+        fx.write(
+            "-w-proj/s1/subagents/agent-a1.meta.json",
+            r#"{"agentType":"reviewer"}"#,
+        );
+        fx.run(&mut store);
+        let kept = store.agent_types_between(since, since + 86_400).unwrap();
+        assert_eq!(kept.get("a1").map(String::as_str), Some("Explore"));
+    }
+
+    #[test]
+    fn workflow_agents_keep_their_type_and_a_long_type_is_cut() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        let run = "-w-proj/s1/subagents/workflows/wf_1";
+        fx.write(&format!("{run}/agent-w1.jsonl"), &format!("{line}\n"));
+        let long = "x".repeat(100);
+        fx.write(
+            &format!("{run}/agent-w1.meta.json"),
+            &format!(r#"{{"agentType":"{long}"}}"#),
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let types = store.agent_types_between(since, since + 86_400).unwrap();
+        assert_eq!(types.get("w1").map(String::len), Some(AGENT_TYPE_CHARS));
     }
 
     #[test]

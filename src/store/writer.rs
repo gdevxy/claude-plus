@@ -62,6 +62,13 @@ pub struct PromptRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentRow {
+    pub agent_id: String,
+    pub session_id: String,
+    pub agent_type: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ToolResultRow {
     pub tool_use_id: String,
     pub session_id: String,
@@ -282,6 +289,14 @@ impl Writer<'_> {
         self.exec(
             "INSERT OR IGNORE INTO prompts (uuid, session_id, ts) VALUES (?1, ?2, ?3)",
             params![row.uuid, row.session_id, row.ts],
+        )?;
+        Ok(())
+    }
+
+    pub fn agent(&mut self, row: &AgentRow) -> Result<()> {
+        self.exec(
+            "INSERT OR REPLACE INTO agents (agent_id, session_id, agent_type) VALUES (?1, ?2, ?3)",
+            params![row.agent_id, row.session_id, row.agent_type],
         )?;
         Ok(())
     }

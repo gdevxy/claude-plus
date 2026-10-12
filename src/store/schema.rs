@@ -212,6 +212,13 @@ ALTER TABLE limit_samples ADD COLUMN account_id TEXT;
 CREATE INDEX limit_samples_by_account ON limit_samples(account_id, window, ts_ms);
 "#,
     "CREATE INDEX limit_samples_by_time ON limit_samples(ts_ms);",
+    r#"
+CREATE TABLE agents (
+    agent_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    agent_type TEXT NOT NULL
+);
+"#,
 ];
 
 pub fn version_of(index: usize) -> usize {

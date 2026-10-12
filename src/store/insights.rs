@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params};
@@ -40,6 +42,12 @@ const LAST_PROMPT_BEFORE: &str = "SELECT session_id, ts FROM prompts WHERE sessi
 
 const SESSION_PROJECT: &str = "SELECT project FROM sessions WHERE id = ?1";
 
+const AGENT_TYPES_BETWEEN: &str = "SELECT DISTINCT a.agent_id, a.agent_type
+     FROM requests r JOIN agents a ON a.agent_id = r.agent_id
+     WHERE r.ts >= ?1 AND r.ts < ?2";
+
+const KNOWS_AGENT: &str = "SELECT 1 FROM agents WHERE agent_id = ?1";
+
 fn prefix_kinds_sql() -> String {
     let kinds = vec!["?"; PREFIX_KINDS.len()].join(", ");
     format!(
@@ -57,6 +65,8 @@ fn insights_statements() -> Vec<String> {
         LARGE_RESULTS_BETWEEN.to_string(),
         prefix_kinds_sql(),
         SESSION_PROJECT.to_string(),
+        AGENT_TYPES_BETWEEN.to_string(),
+        KNOWS_AGENT.to_string(),
     ]
 }
 
@@ -116,6 +126,20 @@ impl Store {
             .optional()?)
     }
 
+    pub fn agent_types_between(
+        &self,
+        since_ts: i64,
+        until_ts: i64,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut statement = self.conn.prepare_cached(AGENT_TYPES_BETWEEN)?;
+        let rows = statement.query_map([since_ts, until_ts], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn knows_agent(&self, agent_id: &str) -> Result<bool> {
+        Ok(self.conn.prepare_cached(KNOWS_AGENT)?.exists([agent_id])?)
+    }
+
     pub fn prefix_kinds_between(
         &self,
         session_id: &str,
@@ -151,7 +175,8 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{AttachmentRow, PromptRow, ToolResultRow, ToolUseRow};
+    use crate::store::{AgentRow, AttachmentRow, PromptRow, RequestRow, ToolResultRow, ToolUseRow};
+    use crate::transcript::TokenCounts;
 
     fn plan(store: &Store, sql: &str) -> String {
         let mut statement = store
@@ -344,5 +369,54 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn agent_types_are_read_for_the_subagents_that_spent_in_a_span() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        for (agent_id, agent_type) in [("a1", "Explore"), ("a2", "reviewer"), ("a3", "Plan")] {
+            w.agent(&AgentRow {
+                agent_id: agent_id.into(),
+                session_id: "s1".into(),
+                agent_type: agent_type.into(),
+            })
+            .unwrap();
+        }
+        for (key, ts, agent_id) in [
+            ("r1", 100, Some("a1")),
+            ("r2", 110, Some("a1")),
+            ("r3", 120, Some("a2")),
+            ("r4", 130, None),
+            ("r5", 300, Some("a3")),
+            ("r6", 140, Some("a4")),
+        ] {
+            w.request(&RequestRow {
+                key: key.into(),
+                session_id: "s1".into(),
+                ts,
+                sent_ts: None,
+                model: "claude-opus-5-5".into(),
+                tokens: TokenCounts::default(),
+                cost_usd: Some(0.0),
+                is_sidechain: agent_id.is_some(),
+                agent_id: agent_id.map(String::from),
+                skill: None,
+                mcp_server: None,
+                effort: None,
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        let types = store.agent_types_between(100, 200).unwrap();
+        assert_eq!(
+            types.into_iter().collect::<Vec<_>>(),
+            [
+                ("a1".to_string(), "Explore".to_string()),
+                ("a2".to_string(), "reviewer".to_string()),
+            ]
+        );
+        assert!(store.knows_agent("a3").unwrap());
+        assert!(!store.knows_agent("a4").unwrap());
     }
 }
