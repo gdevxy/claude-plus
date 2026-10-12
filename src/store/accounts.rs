@@ -164,6 +164,9 @@ impl Writer<'_> {
                            WHERE accounts.id = session_accounts.account_id AND accounts.kind = 'oauth')))",
             )?
             .execute(params![session_id, account_id, source.as_str()])?;
+        if changed > 0 {
+            self.move_limit_samples(session_id, Some(account_id))?;
+        }
         Ok(changed > 0)
     }
 
@@ -174,7 +177,19 @@ impl Writer<'_> {
                 "DELETE FROM session_accounts WHERE session_id = ?1 AND source = 'assign'",
             )?
             .execute([session_id])?;
+        if removed > 0 {
+            self.move_limit_samples(session_id, None)?;
+        }
         Ok(removed > 0)
+    }
+
+    fn move_limit_samples(&mut self, session_id: &str, account_id: Option<&str>) -> Result<()> {
+        self.tx
+            .prepare_cached(
+                "UPDATE limit_samples SET account_id = ?2 WHERE session_id = ?1 AND account_id IS NOT ?2",
+            )?
+            .execute(params![session_id, account_id])?;
+        Ok(())
     }
 
     pub fn rename_account(&mut self, account_id: &str, label: &str) -> Result<bool> {
@@ -711,6 +726,96 @@ mod tests {
         for session in ["start", "timeline", "assign", "desktop", "fresh"] {
             assert_eq!(row_of(&store, session), desktop_row(), "{session}");
         }
+    }
+
+    fn sample(w: &mut Writer, session: &str, account: Option<&str>, used_pct: f64) {
+        w.limit_sample(&crate::store::LimitSample {
+            ts_ms: 1_000 + used_pct as i64,
+            session_id: session.into(),
+            account_id: account.map(String::from),
+            model: None,
+            window: "five_hour".into(),
+            used_pct,
+            resets_at_ms: None,
+        })
+        .unwrap();
+    }
+
+    fn sample_accounts(store: &Store, session: &str) -> Vec<Option<String>> {
+        let mut statement = store
+            .conn
+            .prepare("SELECT account_id FROM limit_samples WHERE session_id = ?1 ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([session], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_desktop_move_carries_the_session_limit_samples_to_the_desktop_account() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("cli", "CLI"), 0).unwrap();
+        w.upsert_account(&oauth("desk", "Desk"), 0).unwrap();
+        w.attribute("s1", "oauth:cli", AttributionSource::Start)
+            .unwrap();
+        sample(&mut w, "s1", Some("oauth:cli"), 10.0);
+        sample(&mut w, "s1", Some("oauth:cli"), 20.0);
+        sample(&mut w, "other", Some("oauth:cli"), 30.0);
+        assert!(
+            w.attribute("s1", "oauth:desk", AttributionSource::Desktop)
+                .unwrap()
+        );
+        w.commit().unwrap();
+        let desk = Some("oauth:desk".to_string());
+        assert_eq!(sample_accounts(&store, "s1"), vec![desk.clone(), desk]);
+        assert_eq!(
+            sample_accounts(&store, "other"),
+            vec![Some("oauth:cli".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_attribution_that_does_not_apply_leaves_the_limit_samples_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("cli", "CLI"), 0).unwrap();
+        w.upsert_account(&oauth("desk", "Desk"), 0).unwrap();
+        w.attribute("s1", "oauth:desk", AttributionSource::Desktop)
+            .unwrap();
+        sample(&mut w, "s1", Some("oauth:desk"), 10.0);
+        assert!(
+            !w.attribute("s1", "oauth:cli", AttributionSource::Start)
+                .unwrap()
+        );
+        w.commit().unwrap();
+        assert_eq!(
+            sample_accounts(&store, "s1"),
+            vec![Some("oauth:desk".to_string())]
+        );
+    }
+
+    #[test]
+    fn assigning_and_unassigning_a_session_moves_its_limit_samples_with_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("a", "A"), 0).unwrap();
+        sample(&mut w, "s1", None, 10.0);
+        assert!(
+            w.attribute("s1", "oauth:a", AttributionSource::Assign)
+                .unwrap()
+        );
+        w.commit().unwrap();
+        assert_eq!(
+            sample_accounts(&store, "s1"),
+            vec![Some("oauth:a".to_string())]
+        );
+        let mut w = store.writer().unwrap();
+        assert!(w.unassign("s1").unwrap());
+        w.commit().unwrap();
+        assert_eq!(sample_accounts(&store, "s1"), vec![None]);
     }
 
     #[test]
