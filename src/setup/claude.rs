@@ -48,6 +48,16 @@ impl Plugin {
     pub fn loaded_version(&self) -> &str {
         self.folder_version.as_deref().unwrap_or(&self.version)
     }
+
+    pub fn reads_from(&self, dir: &Path) -> bool {
+        let Some(folder) = self.folder.as_deref().map(Path::new) else {
+            return false;
+        };
+        match (folder.canonicalize(), dir.canonicalize()) {
+            (Ok(folder), Ok(dir)) => folder.starts_with(dir),
+            _ => folder.starts_with(dir),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +250,32 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reading(folder: Option<&Path>) -> Plugin {
+        Plugin {
+            id: PLUGIN_ID.into(),
+            version: "0.1.0".into(),
+            scope: "user".into(),
+            enabled: true,
+            folder: folder.map(|folder| folder.display().to_string()),
+            folder_version: None,
+        }
+    }
+
+    #[test]
+    fn a_plugin_reads_from_a_folder_inside_the_dir_even_through_a_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("marketplace");
+        std::fs::create_dir_all(dir.join("mod")).unwrap();
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(reading(Some(&dir.join("mod"))).reads_from(&dir));
+        assert!(reading(Some(&link.join("mod"))).reads_from(&dir));
+        assert!(reading(Some(&dir.join("mod"))).reads_from(&link));
+        assert!(!reading(Some(&temp.path().join("marketplace.new/mod"))).reads_from(&dir));
+        assert!(!reading(Some(Path::new("/elsewhere/mod"))).reads_from(&dir));
+        assert!(!reading(None).reads_from(&dir));
+    }
 
     #[test]
     fn each_step_runs_the_claude_plugin_command_it_shows() {

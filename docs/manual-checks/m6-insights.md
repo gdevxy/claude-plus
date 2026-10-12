@@ -7,7 +7,7 @@ Nothing here writes to `~/.claude/dev-mods`; `--plugin-dir` loads the mod for on
 
 Build the daemon from the working tree and make sure the running one is this build.
 Stop the running daemon first, so the new one opens the store and moves it to schema 16, after the check of "An older daemon kept running" below if an M5 daemon runs.
-Expected: a line starting with `✻`, then `claude-plus doctor` reports a running daemon and no `run claude-plus import to upgrade` line.
+Expected: a line starting with `✻`, then `claude-plus doctor` reports a running daemon and no `schema v…, … upgrades it` line.
 
 ```bash
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH" && cargo build --release --locked

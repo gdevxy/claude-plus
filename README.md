@@ -138,7 +138,7 @@ After editing it, run `claude-plus daemon stop` and then `claude-plus reindex`; 
 
 Upgrade the binary with `brew upgrade claude-plus` or by running the install script again.
 The next Claude Code session restarts the daemon on the new version, updates the mod in place and reloads its plugins, so it shows the new pane a moment after it opens.
-A session that was already open keeps the pane it loaded until you run `/reload-plugins` or restart it.
+A session that was already open keeps the pane it loaded, and `/reload-plugins` there shows the new pane only once a new session or `claude-plus daemon --ensure` has updated the mod.
 Upgrading from v0.2.2 or older, the first session still shows the old pane, as that pane predates the reload: run `/reload-plugins` once.
 An older `claude-plus` found first on `PATH` never replaces a newer mod: `claude-plus install` keeps a newer mod in `~/.claude-plus/marketplace` and says so.
 When the `plus` mod comes from another marketplace, such as the GitHub one above, `claude-plus install` asks before it points the `claude-plus` marketplace at its own folder.

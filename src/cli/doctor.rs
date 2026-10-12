@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use super::format::{count, duration, plural, usd};
 use super::labeled;
+use super::setup::path_warning;
 use crate::accounts::{Login, read_login};
 use crate::api;
 use crate::daemon::control::{self, Status};
@@ -40,7 +41,14 @@ pub fn run(paths: &Paths, user_prices: &UserPrices) -> Result<()> {
     }
     let (line, status) = daemon(paths);
     println!("{}", labeled("Daemon:", &line));
-    let (claude_code, plus) = setup(&ClaudeCode::default());
+    let socket_ok = api::socket_path_problem(&paths.socket()).is_none();
+    let pane_runs_this = std::env::current_exe()
+        .is_ok_and(|exe| path_warning(&exe, std::env::var_os("PATH")).is_none());
+    let (claude_code, plugin) = setup(&ClaudeCode::default());
+    let plus = match &plugin {
+        Ok(plugin) => mod_state(plugin.as_ref(), &paths.marketplace_dir(), pane_runs_this),
+        Err(problem) => problem.clone(),
+    };
     println!("{}", labeled("Claude Code:", &claude_code));
     println!("{}", labeled("Mod:", &plus));
     println!("{}", labeled("Account:", &account_line(paths)));
@@ -57,7 +65,13 @@ pub fn run(paths: &Paths, user_prices: &UserPrices) -> Result<()> {
         labeled("Desktop:", &desktop_line(&paths.desktop_sessions_dir()))
     );
 
-    match readable_store(paths)? {
+    let upgraded_by_sessions = sessions_upgrade(
+        plugin.ok().flatten().as_ref(),
+        &status,
+        socket_ok,
+        pane_runs_this,
+    );
+    match readable_store(paths, upgraded_by_sessions)? {
         Some(store) => print_database(&store, &status),
         None => Ok(()),
     }
@@ -148,7 +162,7 @@ fn daemon(paths: &Paths) -> (String, Status) {
     (line, status)
 }
 
-fn setup(claude: &ClaudeCode) -> (String, String) {
+fn setup(claude: &ClaudeCode) -> (String, Result<Option<Plugin>, String>) {
     let version = match claude.version() {
         Ok(Some(version)) => version,
         Ok(None) => {
@@ -157,21 +171,20 @@ fn setup(claude: &ClaudeCode) -> (String, String) {
                     "not found on PATH, the pane needs {} or newer",
                     claude::MIN_VERSION
                 ),
-                "unknown without Claude Code".into(),
+                Err("unknown without Claude Code".into()),
             );
         }
-        Err(error) => return (format!("{error:#}"), "unknown".into()),
+        Err(error) => return (format!("{error:#}"), Err("unknown".into())),
     };
-    let plugin = claude.plugins().map(|plugins| {
-        plugins
-            .into_iter()
-            .find(|plugin| plugin.id == PLUGIN_ID && plugin.scope == "user")
-    });
-    let plus = match plugin {
-        Ok(plugin) => mod_state(plugin.as_ref()),
-        Err(error) => format!("{error:#}"),
-    };
-    (claude_code_state(&version), plus)
+    let plugin = claude
+        .plugins()
+        .map(|plugins| {
+            plugins
+                .into_iter()
+                .find(|plugin| plugin.id == PLUGIN_ID && plugin.scope == "user")
+        })
+        .map_err(|error| format!("{error:#}"));
+    (claude_code_state(&version), plugin)
 }
 
 fn claude_code_state(version: &str) -> String {
@@ -185,7 +198,9 @@ fn claude_code_state(version: &str) -> String {
     }
 }
 
-fn mod_state(plugin: Option<&Plugin>) -> String {
+const UPDATED_BY: &str = "the next Claude Code session or claude-plus daemon --ensure";
+
+fn mod_state(plugin: Option<&Plugin>, marketplace: &Path, pane_runs_this: bool) -> String {
     let Some(plugin) = plugin else {
         return "not installed, run claude-plus install".into();
     };
@@ -197,6 +212,19 @@ fn mod_state(plugin: Option<&Plugin>) -> String {
         .unwrap_or_default();
     if !plugin.enabled {
         format!("plus v{version} is disabled, run claude-plus install to enable it")
+    } else if control::is_older(version, bundle::VERSION)
+        && pane_runs_this
+        && plugin.reads_from(marketplace)
+    {
+        format!(
+            "plus v{version}, {UPDATED_BY} updates it to v{}",
+            bundle::VERSION
+        )
+    } else if control::is_older(bundle::VERSION, version) {
+        format!(
+            "plus v{version} is newer than this claude-plus v{}, upgrade claude-plus",
+            bundle::VERSION
+        )
     } else if version != bundle::VERSION {
         format!(
             "plus v{version}, run claude-plus install to match this v{}",
@@ -215,7 +243,27 @@ fn reindex_state(pending: bool, daemon: &Status) -> Option<&'static str> {
     }
 }
 
-fn readable_store(paths: &Paths) -> Result<Option<Store>> {
+fn sessions_upgrade(
+    plugin: Option<&Plugin>,
+    daemon: &Status,
+    socket_ok: bool,
+    pane_runs_this: bool,
+) -> bool {
+    plugin.is_some_and(|plugin| plugin.enabled)
+        && socket_ok
+        && pane_runs_this
+        && !matches!(daemon, Status::Unresponsive { .. })
+}
+
+fn schema_line(version: usize, upgraded_by_sessions: bool) -> String {
+    if upgraded_by_sessions {
+        format!("schema v{version}, {UPDATED_BY} upgrades it")
+    } else {
+        format!("schema v{version}, run claude-plus import to upgrade")
+    }
+}
+
+fn readable_store(paths: &Paths, upgraded_by_sessions: bool) -> Result<Option<Store>> {
     let database = paths.database();
     if !database.exists() {
         println!(
@@ -233,8 +281,10 @@ fn readable_store(paths: &Paths) -> Result<Option<Store>> {
     };
     let version = store.schema_version()?;
     if version < Store::latest_schema_version() {
-        let value = format!("schema v{version}, run claude-plus import to upgrade");
-        println!("{}", labeled("Database:", &value));
+        println!(
+            "{}",
+            labeled("Database:", &schema_line(version, upgraded_by_sessions))
+        );
         return Ok(None);
     }
     Ok(Some(store))
@@ -419,19 +469,87 @@ mod tests {
     #[test]
     fn the_mod_line_says_what_loads_and_how_to_fix_it() {
         let this = bundle::VERSION;
+        let ours = Path::new("/home/ada/.claude-plus/marketplace");
         assert_eq!(
-            mod_state(Some(&plus(this, true))),
+            mod_state(Some(&plus(this, true)), ours, true),
             format!("plus v{this} · /home/ada/.claude-plus/marketplace/mod")
         );
-        assert_eq!(mod_state(None), "not installed, run claude-plus install");
         assert_eq!(
-            mod_state(Some(&plus(this, false))),
-            format!("plus v{this} is disabled, run claude-plus install to enable it")
+            mod_state(None, ours, true),
+            "not installed, run claude-plus install"
         );
         assert_eq!(
-            mod_state(Some(&plus("0.0.9", true))),
-            format!("plus v0.0.9, run claude-plus install to match this v{this}")
+            mod_state(Some(&plus("0.0.9", false)), ours, true),
+            "plus v0.0.9 is disabled, run claude-plus install to enable it"
         );
+        assert_eq!(
+            mod_state(Some(&plus("0.0.9", true)), ours, true),
+            format!(
+                "plus v0.0.9, the next Claude Code session or claude-plus daemon --ensure updates it to v{this}"
+            )
+        );
+        let install = format!("plus v0.0.9, run claude-plus install to match this v{this}");
+        assert_eq!(
+            mod_state(Some(&plus("0.0.9", true)), Path::new("/elsewhere"), true),
+            install
+        );
+        assert_eq!(mod_state(Some(&plus("0.0.9", true)), ours, false), install);
+        let unfolded = Plugin {
+            folder: None,
+            ..plus("0.0.9", true)
+        };
+        assert_eq!(mod_state(Some(&unfolded), ours, true), install);
+        assert_eq!(
+            mod_state(Some(&plus("999.0.0", true)), ours, true),
+            format!("plus v999.0.0 is newer than this claude-plus v{this}, upgrade claude-plus")
+        );
+    }
+
+    #[test]
+    fn an_old_schema_is_left_to_the_next_session_only_when_one_would_upgrade_it() {
+        assert_eq!(
+            schema_line(18, true),
+            "schema v18, the next Claude Code session or claude-plus daemon --ensure upgrades it"
+        );
+        assert_eq!(
+            schema_line(18, false),
+            "schema v18, run claude-plus import to upgrade"
+        );
+    }
+
+    #[test]
+    fn only_a_daemon_that_can_start_upgrades_the_store() {
+        let enabled = Some(plus(bundle::VERSION, true));
+        let disabled = Some(plus(bundle::VERSION, false));
+        let not_running = Status::NotRunning;
+        let stuck = Status::Unresponsive { pid: Some(7) };
+        assert!(sessions_upgrade(
+            enabled.as_ref(),
+            &running(false),
+            true,
+            true
+        ));
+        assert!(sessions_upgrade(enabled.as_ref(), &not_running, true, true));
+        assert!(!sessions_upgrade(enabled.as_ref(), &stuck, true, true));
+        assert!(!sessions_upgrade(
+            enabled.as_ref(),
+            &not_running,
+            false,
+            true
+        ));
+        assert!(!sessions_upgrade(
+            enabled.as_ref(),
+            &not_running,
+            true,
+            false
+        ));
+        assert!(!sessions_upgrade(
+            disabled.as_ref(),
+            &not_running,
+            true,
+            true
+        ));
+        assert!(!sessions_upgrade(None, &not_running, true, true));
     }
 
     #[test]
