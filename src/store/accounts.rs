@@ -75,6 +75,19 @@ pub struct Budget {
     pub updated_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    pub id: String,
+    pub cwd: Option<String>,
+    pub started_at: Option<i64>,
+    pub spend_usd: f64,
+}
+
+const CANDIDATES: &str = "SELECT s.id, s.cwd, s.started_at,
+        COALESCE((SELECT SUM(r.cost_usd) FROM requests r WHERE r.session_id = s.id), 0.0)
+      + COALESCE((SELECT SUM(j.cost_usd) FROM adjustments j WHERE j.session_id = s.id), 0.0)
+     FROM sessions s LEFT JOIN session_accounts a ON a.session_id = s.id";
+
 const ACCOUNT_COLUMNS: &str = "id, kind, label, organization_type, first_seen_ms";
 
 impl Writer<'_> {
@@ -152,6 +165,16 @@ impl Writer<'_> {
             )?
             .execute(params![session_id, account_id, source.as_str()])?;
         Ok(changed > 0)
+    }
+
+    pub fn unassign(&mut self, session_id: &str) -> Result<bool> {
+        let removed = self
+            .tx
+            .prepare_cached(
+                "DELETE FROM session_accounts WHERE session_id = ?1 AND source = 'assign'",
+            )?
+            .execute([session_id])?;
+        Ok(removed > 0)
     }
 
     pub fn rename_account(&mut self, account_id: &str, label: &str) -> Result<bool> {
@@ -263,6 +286,29 @@ impl Store {
              ORDER BY s.started_at, s.id",
         )?;
         let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn unknown_sessions(&self) -> Result<Vec<Candidate>> {
+        self.candidates("a.session_id IS NULL")
+    }
+
+    pub fn assigned_sessions(&self) -> Result<Vec<Candidate>> {
+        self.candidates("a.source = 'assign'")
+    }
+
+    fn candidates(&self, condition: &str) -> Result<Vec<Candidate>> {
+        let mut statement = self.conn.prepare_cached(&format!(
+            "{CANDIDATES} WHERE {condition} ORDER BY s.started_at, s.id"
+        ))?;
+        let rows = statement.query_map([], |r| {
+            Ok(Candidate {
+                id: r.get(0)?,
+                cwd: r.get(1)?,
+                started_at: r.get(2)?,
+                spend_usd: r.get(3)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -829,6 +875,90 @@ mod tests {
         assert_eq!(store.account_sessions_count("oauth:a").unwrap(), 1);
         assert_eq!(
             store.session_account("not-imported").unwrap().as_deref(),
+            Some("oauth:a")
+        );
+    }
+
+    #[test]
+    fn unknown_and_assigned_sessions_carry_their_folder_start_and_spend() {
+        use crate::store::RequestRow;
+        use crate::transcript::TokenCounts;
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        for (id, cwd, ts) in [
+            ("s1", Some("/w/a"), Some(10)),
+            ("s2", None, None),
+            ("s3", Some("/w/b"), Some(30)),
+            ("s4", Some("/w/c"), Some(40)),
+        ] {
+            w.session(&SessionRow {
+                id: id.into(),
+                project: "p".into(),
+                cwd: cwd.map(String::from),
+                ts,
+            })
+            .unwrap();
+        }
+        for (key, session, cost, sidechain) in [
+            ("r1", "s1", 1.5, false),
+            ("r2", "s1", 0.25, true),
+            ("r3", "s3", 2.0, false),
+        ] {
+            w.request(&RequestRow {
+                key: key.into(),
+                session_id: session.into(),
+                ts: 10,
+                sent_ts: None,
+                model: "m".into(),
+                tokens: TokenCounts::default(),
+                cost_usd: Some(cost),
+                is_sidechain: sidechain,
+                agent_id: None,
+                skill: None,
+                mcp_server: None,
+                effort: None,
+            })
+            .unwrap();
+        }
+        w.upsert_account(&oauth("a", "A"), 0).unwrap();
+        w.attribute("s3", "oauth:a", AttributionSource::Assign)
+            .unwrap();
+        w.attribute("s4", "oauth:a", AttributionSource::Desktop)
+            .unwrap();
+        w.commit().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO adjustments (session_id, model, ts, input, output, cache_read, cache_write, cost_usd)
+                 VALUES ('s1', 'm', 12, 0, 0, 0, 0, 0.5)",
+                [],
+            )
+            .unwrap();
+        let candidate = |id: &str, cwd: Option<&str>, started_at, spend_usd| Candidate {
+            id: id.into(),
+            cwd: cwd.map(String::from),
+            started_at,
+            spend_usd,
+        };
+        assert_eq!(
+            store.unknown_sessions().unwrap(),
+            vec![
+                candidate("s2", None, None, 0.0),
+                candidate("s1", Some("/w/a"), Some(10), 2.25),
+            ]
+        );
+        assert_eq!(
+            store.assigned_sessions().unwrap(),
+            vec![candidate("s3", Some("/w/b"), Some(30), 2.0)]
+        );
+        let mut w = store.writer().unwrap();
+        assert!(!w.unassign("s4").unwrap());
+        assert!(w.unassign("s3").unwrap());
+        assert!(!w.unassign("s3").unwrap());
+        w.commit().unwrap();
+        assert_eq!(store.session_account("s3").unwrap(), None);
+        assert_eq!(
+            store.session_account("s4").unwrap().as_deref(),
             Some("oauth:a")
         );
     }

@@ -21,7 +21,7 @@ use rusqlite::{
 };
 
 use crate::transcript::location::Location;
-pub use accounts::{AccountInfo, AccountKind, AccountRow, AttributionSource, Budget};
+pub use accounts::{AccountInfo, AccountKind, AccountRow, AttributionSource, Budget, Candidate};
 pub use breakdowns::StoredBreakdown;
 pub use context::{AttachmentPoint, ToolResultPoint};
 pub use events::{EventRow, StoredEvent};

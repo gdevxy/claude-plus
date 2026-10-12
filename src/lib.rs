@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod api;
+pub mod assign;
 pub mod cache_model;
 pub mod cli;
 pub mod config_scan;
