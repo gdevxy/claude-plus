@@ -320,7 +320,7 @@ fn rebuild(
     })
 }
 
-fn read_instead(tokens: &TokenCounts, moved: u64) -> TokenCounts {
+pub fn read_instead(tokens: &TokenCounts, moved: u64) -> TokenCounts {
     let from_1h = if tokens.cache_write() == 0 {
         0
     } else {

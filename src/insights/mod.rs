@@ -2,6 +2,7 @@ mod cache;
 mod report;
 mod setup;
 pub mod sources;
+mod ttl;
 mod usage;
 pub mod words;
 
@@ -20,6 +21,7 @@ use crate::transcript::TokenCounts;
 pub use cache::{CacheBusts, IdleRebuilds};
 pub use report::{Day, InsightsReport, Recap, Request, Wins, days, read, recap, wins};
 pub use setup::{OversizedMemory, Retention, UnusedMcpServers, UnusedSkills};
+pub use ttl::CacheTtl;
 pub use usage::{CostlyTasks, LargeToolResults, LateCompaction, ModelFit, Task, tasks};
 
 pub const INSIGHTS_VERSION: u32 = 1;
@@ -40,6 +42,7 @@ pub enum RuleId {
     LateCompaction,
     ModelFit,
     CacheBusts,
+    CacheTtl,
     CostlyTasks,
     Retention,
 }
@@ -113,6 +116,7 @@ pub fn rules() -> Vec<Box<dyn Rule>> {
         Box::new(LateCompaction),
         Box::new(ModelFit),
         Box::new(CacheBusts),
+        Box::new(CacheTtl),
         Box::new(CostlyTasks),
         Box::new(Retention),
     ]
