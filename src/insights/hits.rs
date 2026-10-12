@@ -3,15 +3,17 @@ use std::collections::BTreeMap;
 use super::usage::TOP_TIER;
 use super::words::{duration, model_name, times};
 use super::{Confidence, Draft, Finding, InsightContext, Rule, RuleId, is_main, median};
+use crate::cache_model::ONE_HOUR_MS;
 use crate::forecast::{alternative_for, family};
 use crate::history::FIVE_HOUR;
 use crate::limits::instances;
+use crate::pricing::normalize_model;
 use crate::store::LimitSample;
 
 pub const SEVEN_DAY: &str = "seven_day";
 pub const CAPPED_PCT: f64 = 100.0;
 pub const SUBAGENT_LED: f64 = 0.5;
-const HOUR_MS: i64 = 3_600_000;
+const DAY_MS: i64 = 24 * ONE_HOUR_MS;
 
 pub struct LimitHits;
 
@@ -38,17 +40,19 @@ impl Rule for LimitHits {
                 .filter(|h| h.window == window)
                 .map(|h| h.waited_ms as f64)
                 .collect();
-            let Some(wait) = median(waits.clone()) else {
+            let ran_out = waits.len() as u64;
+            let Some(wait) = median(waits) else {
                 continue;
             };
             evidence.push(format!(
                 "The {name} limit ran out {}, {}{} before it reset",
-                times(waits.len() as u64),
-                if waits.len() > 1 { "a typical " } else { "" },
+                times(ran_out),
+                if ran_out > 1 { "a typical " } else { "" },
                 duration(wait as i64)
             ));
         }
         let mut by_model: BTreeMap<&str, f64> = BTreeMap::new();
+        let mut subagents_by_model: BTreeMap<&str, f64> = BTreeMap::new();
         let (mut spent, mut subagents) = (0.0, 0.0);
         for request in ctx.requests {
             let at_ms = request.point.ts * 1000;
@@ -59,16 +63,15 @@ impl Rule for LimitHits {
                 continue;
             }
             let paid = request.cost_usd.unwrap_or(0.0);
+            let model = normalize_model(&request.point.model);
             spent += paid;
-            *by_model.entry(request.point.model.as_str()).or_default() += paid;
+            *by_model.entry(model).or_default() += paid;
             if !is_main(request) {
                 subagents += paid;
+                *subagents_by_model.entry(model).or_default() += paid;
             }
         }
-        let model = by_model
-            .iter()
-            .max_by(|a, b| a.1.total_cmp(b.1).then_with(|| b.0.cmp(a.0)))
-            .map(|(model, usd)| (*model, *usd));
+        let model = leading(&by_model);
         if let Some((model, usd)) = model.filter(|_| spent > 0.0) {
             evidence.push(format!(
                 "{} drew {:.0}% of the spend before it ran out",
@@ -76,30 +79,34 @@ impl Rule for LimitHits {
                 usd / spent * 100.0
             ));
         }
-        let subagent_share = if spent > 0.0 { subagents / spent } else { 0.0 };
-        if subagent_share > 0.0 {
+        if spent > 0.0 && subagents > 0.0 {
             evidence.push(format!(
                 "Subagents drew {:.0}% of it",
-                subagent_share * 100.0
+                subagents / spent * 100.0
             ));
         }
+        subagents_by_model.retain(|model, _| TOP_TIER.contains(&family(model)));
+        let subagents_top: f64 = subagents_by_model.values().sum();
+        let subagent_cheaper = leading(&subagents_by_model)
+            .filter(|_| spent > 0.0 && subagents_top / spent >= SUBAGENT_LED)
+            .and_then(|(model, _)| alternative_for(model));
         let cheaper = model
             .map(|(model, _)| model)
             .filter(|model| TOP_TIER.contains(&family(model)))
             .and_then(alternative_for);
-        let tip = match cheaper {
-            Some(alternative) if subagent_share >= SUBAGENT_LED => format!(
+        let tip = match (subagent_cheaper, cheaper) {
+            (Some(alternative), _) => format!(
                 "run subagents on {} so your limits last",
                 model_name(alternative)
             ),
-            Some(alternative) => format!(
+            (None, Some(alternative)) => format!(
                 "move routine work to {} so your limits last",
                 model_name(alternative)
             ),
-            None if hits.iter().all(|h| h.window == SEVEN_DAY) => {
+            (None, None) if hits.iter().any(|h| h.window == SEVEN_DAY) => {
                 "pace heavy work across the week so the weekly limit lasts".into()
             }
-            None => "spread heavy work across 5-hour windows so the limit lasts".into(),
+            (None, None) => "spread heavy work across 5-hour windows so the limit lasts".into(),
         };
         vec![
             Draft {
@@ -109,7 +116,8 @@ impl Rule for LimitHits {
                 confidence: Confidence::Medium,
                 how: "Reads the 5-hour and weekly limits Claude Code reported for this account in the last 14 days. \
                       A limit ran out when it reached 100%, and the wait runs from then to its reset. \
-                      The spend is what this account's requests cost at API prices in each window before its limit ran out. \
+                      The spend is what this account's requests cost at API prices in each window before its limit ran out, \
+                      with the window's start estimated from its reset time. \
                       A limit that ran out stops your work, so this tip comes first."
                     .into(),
             }
@@ -133,10 +141,17 @@ fn hit(ctx: &InsightContext, instance: &[LimitSample]) -> Option<Hit> {
     })
 }
 
+fn leading<'a>(by_model: &BTreeMap<&'a str, f64>) -> Option<(&'a str, f64)> {
+    by_model
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(model, usd)| (*model, *usd))
+}
+
 fn length(window: &str) -> i64 {
     match window {
-        SEVEN_DAY => 7 * 24 * HOUR_MS,
-        _ => 5 * HOUR_MS,
+        SEVEN_DAY => 7 * DAY_MS,
+        _ => 5 * ONE_HOUR_MS,
     }
 }
 
@@ -228,6 +243,80 @@ mod tests {
         assert_eq!(
             finding.evidence[0],
             "The 5-hour limit ran out once, 1h before it reset"
+        );
+    }
+
+    #[test]
+    fn subagents_that_drew_the_limit_down_on_a_cheaper_model_leave_the_tip_to_the_main_thread() {
+        let mut fixture = Fixture::new();
+        fixture.limit(FIVE_HOUR, SINCE + 7 * HOUR, 100.0, SINCE + 10 * HOUR);
+        let spend = [
+            (None, OPUS, 45.0),
+            (Some("a1"), OPUS, 10.0),
+            (Some("a2"), SONNET, 45.0),
+        ];
+        for (offset, (agent, model, usd)) in (0..).zip(spend) {
+            match agent {
+                Some(agent) => {
+                    fixture.push_agent(agent, SINCE + 6 * HOUR + offset, model, counts(1, 0, 0, 0))
+                }
+                None => fixture.request("s1", SINCE + 6 * HOUR + offset, model, counts(1, 0, 0, 0)),
+            }
+            fixture.requests.last_mut().unwrap().cost_usd = Some(usd);
+        }
+        let finding = &LimitHits.evaluate(&fixture.ctx())[0];
+        assert_eq!(
+            finding.tip,
+            "move routine work to Sonnet\u{a0}5.5 so your limits last"
+        );
+        assert_eq!(
+            finding.evidence[1..],
+            [
+                "Opus\u{a0}5.5 drew 55% of the spend before it ran out",
+                "Subagents drew 55% of it",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_subagent_tip_names_the_model_the_subagents_drew_on() {
+        let mut fixture = Fixture::new();
+        fixture.limit(FIVE_HOUR, SINCE + 7 * HOUR, 100.0, SINCE + 10 * HOUR);
+        let spend = [
+            (None, OPUS, 40.0),
+            (Some("a1"), "claude-fable-5-1", 35.0),
+            (Some("a2"), "claude-opus-5-5-20261001", 25.0),
+        ];
+        for (offset, (agent, model, usd)) in (0..).zip(spend) {
+            match agent {
+                Some(agent) => {
+                    fixture.push_agent(agent, SINCE + 6 * HOUR + offset, model, counts(1, 0, 0, 0))
+                }
+                None => fixture.request("s1", SINCE + 6 * HOUR + offset, model, counts(1, 0, 0, 0)),
+            }
+            fixture.requests.last_mut().unwrap().cost_usd = Some(usd);
+        }
+        let finding = &LimitHits.evaluate(&fixture.ctx())[0];
+        assert_eq!(
+            finding.tip,
+            "run subagents on Opus\u{a0}5.5 so your limits last"
+        );
+        assert_eq!(
+            finding.evidence[1],
+            "Opus\u{a0}5.5 drew 65% of the spend before it ran out"
+        );
+    }
+
+    #[test]
+    fn both_windows_out_on_a_cheaper_model_suggest_pacing_the_week() {
+        let mut fixture = Fixture::new();
+        fixture.limit(FIVE_HOUR, SINCE + 7 * HOUR, 100.0, SINCE + 10 * HOUR);
+        fixture.limit(SEVEN_DAY, SINCE + 9 * DAY, 100.0, SINCE + 10 * DAY);
+        fixture.request("s1", SINCE + 6 * HOUR, SONNET, counts(100_000, 0, 0, 0));
+        let finding = &LimitHits.evaluate(&fixture.ctx())[0];
+        assert_eq!(
+            finding.tip,
+            "pace heavy work across the week so the weekly limit lasts"
         );
     }
 
