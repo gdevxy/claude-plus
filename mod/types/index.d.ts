@@ -262,7 +262,10 @@ export type RuleId =
   | 'large_tool_results'
   | 'late_compaction'
   | 'model_fit'
+  | 'subagent_model_fit'
   | 'cache_busts'
+  | 'cache_ttl'
+  | 'limit_hits'
   | 'costly_tasks'
   | 'retention'
 

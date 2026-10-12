@@ -116,6 +116,23 @@ describe('insights screen', () => {
     expect(text(line(lines, 'ins-retention-meta'))).toBe('  high confidence')
   })
 
+  test('a limit that ran out leads with its tip and evidence even without a saving', () => {
+    const limit = finding({
+      rule: 'limit_hits',
+      tip: 'run subagents on Sonnet 5.5 so your limits last',
+      evidence: ['The 5-hour limit ran out twice, a typical 2h before it reset'],
+      saving_usd: null,
+      saving_pct_5h: null,
+      confidence: 'medium',
+    })
+    const lines = insightsScreen(input({ report: insightsReport({ findings: [limit, ...insightsReport().findings] }) }))
+    const keys = lines.map(found => found.key).filter(key => /^ins-[a-z_]+$/.test(key) && !['ins-head', 'ins-sub'].includes(key))
+    expect(keys[0]).toBe('ins-limit_hits')
+    expect(text(line(lines, 'ins-limit_hits'))).toBe('Run subagents on Sonnet 5.5 so your limits last')
+    expect(text(line(lines, 'ins-limit_hits-0'))).toBe('The 5-hour limit ran out twice, a typical 2h before it reset')
+    expect(text(line(lines, 'ins-limit_hits-meta'))).toBe('  medium confidence')
+  })
+
   test('the recap reads like a greeting and leaves out what it does not know', () => {
     const recap = insightsReport().recap
     if (recap === null) throw new Error('no recap')

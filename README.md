@@ -73,6 +73,7 @@ Cost per day and model, cache hit ratio, what the cache saved you, and your top 
 
 Ranked tips drawn from your own sessions, each with the weekly saving it promises and how confident claude-plus is.
 Each tip names the sessions and files behind it, so you can see where the tokens went.
+A 5-hour or weekly limit that ran out in the last two weeks comes first, with what drew it down.
 
 ![Insights view: ranked tips with the weekly saving each one promises](docs/assets/insights.png)
 
