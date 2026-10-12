@@ -427,7 +427,7 @@ fn workflows_pin_every_action_to_a_commit_and_every_runner_to_an_image() {
             .iter()
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>(),
-        ["ci.yml", "release.yml"]
+        ["ci.yml", "release.yml", "tap.yml"]
     );
     for (name, text) in &found {
         for line in text.lines().map(str::trim) {
@@ -447,7 +447,10 @@ fn workflows_pin_every_action_to_a_commit_and_every_runner_to_an_image() {
                 );
             }
             assert!(!line.contains("pull_request_target"), "{name}: {line}");
-            assert!(!line.contains("${{ github.event"), "{name}: {line}");
+            assert!(
+                !line.contains("${{ github.event") || line.starts_with("TAG: "),
+                "{name}: {line}"
+            );
             assert!(
                 !line.contains("| bash") && !line.contains("| sh"),
                 "{name}: {line}"
