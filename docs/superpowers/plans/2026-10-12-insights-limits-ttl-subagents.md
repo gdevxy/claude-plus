@@ -50,6 +50,7 @@ Checked on 2026-10-12 against https://code.claude.com/docs/en/prompt-caching and
    A pair of turns is replayed only with the same model, a prefix of at least 2,048 tokens (`MIN_REBUILD_PREFIX`) and, on the main thread, no compaction between them.
    The finding adds up the groups whose switch saves money, names the larger one in the tip and has medium confidence, since the replay assumes the same turn timing.
 5. This rule can overlap idle rebuilds (rule 1): both count rebuilds after a 5 to 60-minute pause on a 5-minute cache, and the Insights total already says tips can overlap.
+   The cache lifetime switch for subagents can also overlap subagent model fit (Decision 6), since both price the same subagent requests; their savings do not add up.
 6. The subagent rule reprices every subagent request on Opus, Fable or Mythos at the same tokens on `forecast::alternative_for` (the model the forecast already offers), grouped by agent type.
    The tip names the type that would save most; it is medium confidence for Claude Code's read-only agents (`Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) and low otherwise, since a cheaper model may do worse on code.
    A subagent whose meta file is missing or unreadable is grouped as `untyped`, and an untyped lead gives `run subagents on <model>`.
