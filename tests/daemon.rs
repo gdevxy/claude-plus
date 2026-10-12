@@ -676,3 +676,38 @@ fn a_desktop_session_file_added_while_running_is_attributed_on_the_next_rescan()
     );
     assert_eq!(env.attribution(SESSION_1), Some(attributed));
 }
+
+#[test]
+fn assign_and_unassign_write_while_the_daemon_runs() {
+    const SESSION_2: &str = "22222222-2222-2222-2222-222222222222";
+    let env = env();
+    env.seed_accounts(&[
+        ("oauth:me", "Me · Max"),
+        ("oauth:work", "Acme · Enterprise"),
+    ]);
+    let _daemon = Foreground::start(&env, &[]);
+    idle_health(&env);
+    let assign = |account: &str| {
+        stdout_of(
+            &env,
+            &["accounts", "assign", account, "--project", "/work/*"],
+        )
+    };
+    assert_eq!(
+        assign("me · max"),
+        "Assigned 2 sessions to Me · Max\n  2026-10-01 to 2026-10-03 · $0.0812\n"
+    );
+    let assigned = Some(("oauth:me".to_string(), "assign".to_string()));
+    for session in [SESSION_1, SESSION_2] {
+        assert_eq!(env.attribution(session), assigned);
+    }
+    assert_eq!(assign("oauth:work"), "No Unknown sessions match\n");
+    assert_eq!(env.attribution(SESSION_1), assigned);
+    assert_eq!(
+        stdout_of(&env, &["accounts", "unassign", "--project", "/work/*"]),
+        "Unassigned 2 sessions\n  2026-10-01 to 2026-10-03 · $0.0812\n"
+    );
+    for session in [SESSION_1, SESSION_2] {
+        assert_eq!(env.attribution(session), None);
+    }
+}

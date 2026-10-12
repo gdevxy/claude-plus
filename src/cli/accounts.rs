@@ -200,7 +200,7 @@ fn assign(
     selection: &SelectionArgs,
 ) -> Result<()> {
     let filter = filter_of(paths, selection)?;
-    let mut store = imported(paths, prices)?;
+    let mut store = writable(paths, prices, None)?;
     let account = assignable(&store, given)?;
     let chosen = select(store.unknown_sessions()?, &filter);
     if chosen.sessions.is_empty() {
@@ -230,7 +230,7 @@ fn assign(
 
 fn unassign(paths: &Paths, prices: &PriceTable, selection: &SelectionArgs) -> Result<()> {
     let filter = filter_of(paths, selection)?;
-    let mut store = imported(paths, prices)?;
+    let mut store = writable(paths, prices, None)?;
     let chosen = select(store.assigned_sessions()?, &filter);
     if chosen.sessions.is_empty() {
         println!("No assigned sessions match");
