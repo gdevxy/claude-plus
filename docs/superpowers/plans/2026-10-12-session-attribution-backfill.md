@@ -48,6 +48,8 @@ The spec is silent or does not match the code on these points, so this plan deci
 6. A skipped desktop file is reported once per process: the stamp cache means it is read again only after it changes.
    The CLI prints `Skipped the desktop session file <path>, it <reason>` on stderr; the daemon logs `skipped the desktop session file <path>, it <reason>` as a warning.
    An unreadable desktop folder is printed by the CLI as `Cannot read desktop sessions: <error>` and logged by the daemon once per run.
+   The CLI's messages only appear for local imports: when the daemon runs, `import` goes through its socket and the messages only reach `daemon.log`, so `doctor` is the place to see skipped files.
+   A file that cannot be read is not remembered, so it is tried again on the next scan, and files that are gone are forgotten.
 7. If the daemon's desktop write fails, the daemon forgets its stamp cache so the next rescan reads every file again.
 8. `assign` and `unassign` import first, like `accounts` and `budget show`, so desktop and timeline attribution run before Unknown sessions are selected.
    The filter and dates are validated before that import.
@@ -59,8 +61,11 @@ The spec is silent or does not match the code on these points, so this plan deci
 12. Spend is the sum of `requests.cost_usd` and `adjustments.cost_usd` of the selected sessions, the same sum `stats` totals; subagent requests carry their parent's `session_id`, so they are included.
 13. Output wording: `Assigned <n> session(s) to <label>`, `Would assign ...`, `Unassigned <n> session(s)`, `Would unassign ...`, then `  <first day> to <last day> · <spend>` (one day when they are equal, the spend alone when no selected session has a start time).
     Nothing selected prints `No Unknown sessions match` or `No assigned sessions match` and exits 0.
-14. `doctor` prints, after `Prices:`, `Desktop:     none found in <dir>`, or `Desktop:     <dir> · <n> session files[ · <m> skipped]`, or `Desktop:     cannot read <dir>: <error>`.
+14. `doctor` prints, after `Prices:`, `Desktop:     none found in <dir>`, or `Desktop:     <dir> · <n> session files[ · <m> skipped][ · cannot read <path>: <error>]`, or `Desktop:     cannot read <dir>: <error>`.
+    When part of the folder cannot be read, the counts of what was read stay and the first path that could not be read is appended.
+    When the folder itself cannot be read, only the error is printed.
 15. When two desktop files claim the same CLI session id under different accounts, the last one read wins (files are read in path order).
+    In the daemon, once the stamp cache is warm only changed files are read, so the most recently changed file wins until the daemon restarts.
 
 ## Review Focus
 
