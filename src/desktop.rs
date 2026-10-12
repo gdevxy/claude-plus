@@ -56,10 +56,15 @@ struct SessionFile {
 impl DesktopReader {
     pub fn scan(&mut self, root: &Path) -> DesktopScan {
         let mut scan = DesktopScan::default();
+        let mut seen = HashMap::new();
         match std::fs::metadata(root) {
-            Err(error) if error.kind() == ErrorKind::NotFound => return scan,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                self.stamps.clear();
+                return scan;
+            }
             Err(error) => {
-                scan.problem = Some(error.to_string());
+                self.stamps.clear();
+                scan.problem = Some(format!("{}: {error}", root.display()));
                 return scan;
             }
             Ok(_) => scan.found = true,
@@ -72,7 +77,8 @@ impl DesktopReader {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    scan.problem.get_or_insert_with(|| error.to_string());
+                    scan.problem
+                        .get_or_insert_with(|| walk_problem(root, &error));
                     continue;
                 }
             };
@@ -88,11 +94,16 @@ impl DesktopReader {
                 modified: metadata.modified().ok(),
                 len: metadata.len(),
             };
-            if self.stamps.insert(path.to_path_buf(), stamp) == Some(stamp) {
+            if self.stamps.get(path) == Some(&stamp) {
+                seen.insert(path.to_path_buf(), stamp);
                 continue;
             }
             scan.files_read += 1;
-            match read_session(path) {
+            let outcome = read_session(path);
+            if outcome != Err(UNREADABLE) {
+                seen.insert(path.to_path_buf(), stamp);
+            }
+            match outcome {
                 Ok(session) if session.cli_session_ids.is_empty() => {}
                 Ok(session) => scan.sessions.push(session),
                 Err(reason) => scan.skipped.push(Skipped {
@@ -101,7 +112,16 @@ impl DesktopReader {
                 }),
             }
         }
+        self.stamps = seen;
         scan
+    }
+}
+
+fn walk_problem(root: &Path, error: &walkdir::Error) -> String {
+    let path = error.path().unwrap_or(root).display();
+    match error.io_error() {
+        Some(io) => format!("{path}: {io}"),
+        None => format!("{path}: {error}"),
     }
 }
 
@@ -320,6 +340,58 @@ mod tests {
             changed.sessions[0].cli_session_ids,
             vec!["cli-3".to_string()]
         );
+    }
+
+    #[test]
+    fn an_unreadable_file_is_tried_again_on_the_next_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = write(
+            temp.path(),
+            ACCOUNT,
+            "local_4.json",
+            r#"{"cliSessionId":"cli-4"}"#,
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut reader = DesktopReader::default();
+        let locked = reader.scan(temp.path());
+        assert_eq!(
+            reasons(&locked),
+            vec![("local_4.json".to_string(), "cannot be read")]
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let unlocked = reader.scan(temp.path());
+        assert_eq!(unlocked.files_read, 1);
+        assert_eq!(
+            unlocked.sessions[0].cli_session_ids,
+            vec!["cli-4".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_deleted_file_is_forgotten() {
+        let temp = tempfile::tempdir().unwrap();
+        let kept = write(temp.path(), ACCOUNT, "kept.json", r#"{"cliSessionId":"a"}"#);
+        let gone = write(temp.path(), ACCOUNT, "gone.json", r#"{"cliSessionId":"b"}"#);
+        let mut reader = DesktopReader::default();
+        reader.scan(temp.path());
+        std::fs::remove_file(&gone).unwrap();
+        let rescan = reader.scan(temp.path());
+        assert_eq!(rescan.files_read, 0);
+        assert_eq!(reader.stamps.keys().collect::<Vec<_>>(), vec![&kept]);
+        std::fs::remove_dir_all(temp.path().join(ACCOUNT)).unwrap();
+        reader.scan(temp.path());
+        assert!(reader.stamps.is_empty());
+        std::fs::remove_dir(temp.path()).unwrap();
+        reader.stamps.insert(
+            kept,
+            Stamp {
+                modified: None,
+                len: 0,
+            },
+        );
+        reader.scan(temp.path());
+        assert!(reader.stamps.is_empty());
     }
 
     #[test]

@@ -644,6 +644,10 @@ fn an_ensured_daemon_leads_its_own_session() {
 #[test]
 fn a_desktop_session_file_added_while_running_is_attributed_on_the_next_rescan() {
     let env = env();
+    let cli_account = "c478b5d6-2b7e-4f0a-8c3d-0123456789ab";
+    env.write_claude_json(&format!(
+        r#"{{"oauthAccount":{{"accountUuid":"{cli_account}","organizationName":"Me","organizationType":"claude_max"}}}}"#
+    ));
     let _daemon = Foreground::start(&env, &["--rescan-secs", "1"]);
     idle_health(&env);
     assert_eq!(env.attribution(SESSION_1), None);
@@ -660,4 +664,15 @@ fn a_desktop_session_file_added_while_running_is_attributed_on_the_next_rescan()
         attributed,
         (format!("oauth:{DESKTOP_ACCOUNT}"), "desktop".to_string())
     );
+    let terminal_session = "44444444-4444-4444-4444-444444444444";
+    let start = |session: &str| json!({"session": session, "kind": "session.start", "ts_ms": 1_791_021_000_000_i64, "data": {}});
+    let accepted = client(&env)
+        .send_events(&json!({"events": [start(SESSION_1), start(terminal_session)]}))
+        .unwrap();
+    assert_eq!((accepted.accepted, accepted.rejected.len()), (2, 0));
+    assert_eq!(
+        env.attribution(terminal_session),
+        Some((format!("oauth:{cli_account}"), "start".to_string()))
+    );
+    assert_eq!(env.attribution(SESSION_1), Some(attributed));
 }

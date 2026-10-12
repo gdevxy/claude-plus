@@ -95,11 +95,11 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 
 fn desktop_line(dir: &Path) -> String {
     let scan = DesktopReader::default().scan(dir);
-    if let Some(problem) = scan.problem {
-        return format!("cannot read {}: {problem}", dir.display());
-    }
     if !scan.found {
-        return format!("none found in {}", dir.display());
+        return match scan.problem {
+            Some(problem) => format!("cannot read {problem}"),
+            None => format!("none found in {}", dir.display()),
+        };
     }
     let mut line = format!(
         "{} · {}",
@@ -108,6 +108,9 @@ fn desktop_line(dir: &Path) -> String {
     );
     if !scan.skipped.is_empty() {
         line.push_str(&format!(" · {} skipped", count(scan.skipped.len() as u64)));
+    }
+    if let Some(problem) = scan.problem {
+        line.push_str(&format!(" · cannot read {problem}"));
     }
     line
 }
@@ -334,6 +337,52 @@ fn retention(paths: &Paths) -> (String, Option<&'static str>) {
 mod tests {
     use super::*;
     use crate::api::wire::{Health, IngestHealth};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn desktop_file(root: &Path, account: &str, name: &str) {
+        let dir = root
+            .join(account)
+            .join("7d3f0c2e-8b4a-4e6f-a1c9-0123456789ab");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), r#"{"cliSessionId":"s"}"#).unwrap();
+    }
+
+    #[test]
+    fn a_partly_unreadable_desktop_folder_keeps_its_counts_and_names_what_it_cannot_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        let locked = "e08c8984-5a1e-4c1b-9d2f-0123456789ab";
+        desktop_file(&root, "0a0b0c0d-1111-4222-8333-444455556666", "a.json");
+        desktop_file(&root, "0a0b0c0d-1111-4222-8333-444455556666", "b.json");
+        desktop_file(&root, locked, "c.json");
+        let locked = root.join(locked);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let line = desktop_line(&root);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            line.starts_with(&format!(
+                "{} · 2 session files · cannot read {}: ",
+                root.display(),
+                locked.display()
+            )),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_desktop_folder_is_named_with_its_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("Claude");
+        let root = parent.join("claude-code-sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let line = desktop_line(&root);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            line.starts_with(&format!("cannot read {}: ", root.display())),
+            "{line}"
+        );
+    }
 
     fn running(rebuilding: bool) -> Status {
         Status::Running(Health {

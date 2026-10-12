@@ -645,6 +645,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_desktop_write_reads_the_desktop_files_again_on_the_next_scan() {
+        let fx = Fixture::new();
+        let account = "e08c8984-5a1e-4c1b-9d2f-0123456789ab";
+        let folder = fx
+            .temp
+            .path()
+            .join("desktop/claude-code-sessions")
+            .join(account)
+            .join("7d3f0c2e-8b4a-4e6f-a1c9-0123456789ab");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("local_1.json"), r#"{"cliSessionId":"s1"}"#).unwrap();
+        let side = rusqlite::Connection::open(fx.temp.path().join("data.db")).unwrap();
+        side.execute_batch("ALTER TABLE session_accounts RENAME TO held")
+            .unwrap();
+        let _ = fx.handle.import().await;
+        let log = std::fs::read_to_string(fx.temp.path().join("daemon.log")).unwrap();
+        assert!(log.contains("cannot attribute desktop sessions"), "{log}");
+        side.execute_batch("ALTER TABLE held RENAME TO session_accounts")
+            .unwrap();
+        fx.handle.import().await.unwrap();
+        assert_eq!(
+            fx.reader().session_account("s1").unwrap(),
+            Some(format!("oauth:{account}"))
+        );
+    }
+
+    #[tokio::test]
     async fn events_are_stored_in_one_transaction() {
         let fx = Fixture::new();
         let rows: Vec<EventRow> = (1..=3)
