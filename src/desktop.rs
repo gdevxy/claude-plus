@@ -49,8 +49,7 @@ pub struct DesktopReader {
 #[serde(rename_all = "camelCase")]
 struct SessionFile {
     cli_session_id: Option<String>,
-    #[serde(default)]
-    prior_cli_session_ids: Vec<String>,
+    prior_cli_session_ids: Option<Vec<Option<String>>>,
 }
 
 impl DesktopReader {
@@ -145,7 +144,7 @@ fn read_session(path: &Path) -> Result<DesktopSession, &'static str> {
     let cli_session_ids = file
         .cli_session_id
         .into_iter()
-        .chain(file.prior_cli_session_ids)
+        .chain(file.prior_cli_session_ids.into_iter().flatten().flatten())
         .filter(|id| !id.is_empty())
         .collect();
     Ok(DesktopSession {
@@ -251,6 +250,34 @@ mod tests {
         assert_eq!(
             scan.sessions[0].cli_session_ids,
             vec!["cli-only".to_string()]
+        );
+    }
+
+    #[test]
+    fn null_prior_ids_are_taken_as_none() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            ACCOUNT,
+            "local_3.json",
+            r#"{"cliSessionId":"cli-now","priorCliSessionIds":null}"#,
+        );
+        write(
+            temp.path(),
+            ACCOUNT,
+            "local_4.json",
+            r#"{"cliSessionId":null,"priorCliSessionIds":[null,"cli-a",""]}"#,
+        );
+        let scan = DesktopReader::default().scan(temp.path());
+        assert_eq!(reasons(&scan), vec![]);
+        let ids: Vec<_> = scan
+            .sessions
+            .iter()
+            .map(|session| session.cli_session_ids.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![vec!["cli-now".to_string()], vec!["cli-a".to_string()]]
         );
     }
 
