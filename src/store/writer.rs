@@ -295,7 +295,7 @@ impl Writer<'_> {
 
     pub fn agent(&mut self, row: &AgentRow) -> Result<()> {
         self.exec(
-            "INSERT OR REPLACE INTO agents (agent_id, session_id, agent_type) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO agents (agent_id, session_id, agent_type) VALUES (?1, ?2, ?3)",
             params![row.agent_id, row.session_id, row.agent_type],
         )?;
         Ok(())

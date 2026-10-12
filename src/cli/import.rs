@@ -92,6 +92,9 @@ pub fn issue_lines(report: &IngestReport) -> Vec<String> {
     for (path, message) in &report.failures {
         lines.push(format!("  Could not read {path}: {message}"));
     }
+    if let Some(error) = &report.agent_error {
+        lines.push(format!("  Could not record a subagent type: {error}"));
+    }
     lines
 }
 

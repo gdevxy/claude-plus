@@ -372,6 +372,38 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_type_once_written_is_never_replaced() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        for (agent_type, ts) in [("Explore", 100), ("reviewer", 110)] {
+            w.agent(&AgentRow {
+                agent_id: "a1".into(),
+                session_id: "s1".into(),
+                agent_type: agent_type.into(),
+            })
+            .unwrap();
+            w.request(&RequestRow {
+                key: format!("r{ts}"),
+                session_id: "s1".into(),
+                ts,
+                sent_ts: None,
+                model: "claude-opus-5-5".into(),
+                tokens: TokenCounts::default(),
+                cost_usd: Some(0.0),
+                is_sidechain: true,
+                agent_id: Some("a1".into()),
+                skill: None,
+                mcp_server: None,
+                effort: None,
+            })
+            .unwrap();
+        }
+        w.commit().unwrap();
+        let types = store.agent_types_between(100, 200).unwrap();
+        assert_eq!(types.get("a1").map(String::as_str), Some("Explore"));
+    }
+
+    #[test]
     fn agent_types_are_read_for_the_subagents_that_spent_in_a_span() {
         let mut store = Store::open_in_memory().unwrap();
         let mut w = store.writer().unwrap();

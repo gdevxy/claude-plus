@@ -43,6 +43,8 @@ pub struct IngestReport {
     pub sessions_touched: BTreeSet<String>,
     #[serde(skip)]
     pub reconcile_error: Option<String>,
+    #[serde(skip)]
+    pub agent_error: Option<String>,
 }
 
 impl IngestReport {
@@ -60,6 +62,9 @@ impl IngestReport {
             .extend(other.sessions_touched.iter().cloned());
         if other.reconcile_error.is_some() {
             self.reconcile_error.clone_from(&other.reconcile_error);
+        }
+        if other.agent_error.is_some() {
+            self.agent_error.clone_from(&other.agent_error);
         }
     }
 }
@@ -220,8 +225,14 @@ impl<'a> Ingestor<'a> {
             files_seen: 1,
             ..Default::default()
         };
-        if let Some(agent_id) = &file.location.agent_id {
-            self.record_agent_type(file, agent_id)?;
+        if let Some(agent_id) = &file.location.agent_id
+            && let Err(error) = self.record_agent_type(file, agent_id)
+        {
+            if error.is::<Busy>() {
+                return Err(error);
+            }
+            let error = error.context(format!("recording the type of subagent {agent_id}"));
+            report.agent_error = Some(format!("{error:#}"));
         }
         let metadata = std::fs::metadata(&file.path)?;
         let size = metadata.len();
@@ -326,7 +337,7 @@ impl Ingestor<'_> {
         if self.store.knows_agent(agent_id)? {
             return Ok(());
         }
-        let Some(agent_type) = agent_type(&file.path.with_extension("meta.json")) else {
+        let Some(agent_type) = agent_type(&file.path.with_extension("meta.json"))? else {
             return Ok(());
         };
         let mut writer = self.store.writer()?;
@@ -339,11 +350,21 @@ impl Ingestor<'_> {
     }
 }
 
-fn agent_type(meta: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(meta).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let name = value.get("agentType")?.as_str()?.trim();
-    (!name.is_empty()).then(|| name.chars().take(AGENT_TYPE_CHARS).collect())
+fn agent_type(meta: &Path) -> Result<Option<String>> {
+    let text = match std::fs::read_to_string(meta) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(None);
+    };
+    let Some(name) = value.get("agentType").and_then(|name| name.as_str()) else {
+        return Ok(None);
+    };
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim();
+    Ok((!name.is_empty()).then(|| name.chars().take(AGENT_TYPE_CHARS).collect()))
 }
 
 fn reconcile_touched(writer: &mut Writer, prices: &PriceTable, report: &mut IngestReport) {
@@ -658,6 +679,81 @@ mod tests {
         fx.run(&mut store);
         let kept = store.agent_types_between(since, since + 86_400).unwrap();
         assert_eq!(kept.get("a1").map(String::as_str), Some("Explore"));
+    }
+
+    #[test]
+    fn control_characters_are_dropped_from_a_type_before_it_is_cut() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        fx.write("-w-proj/s1/subagents/agent-a1.jsonl", &format!("{line}\n"));
+        let bells = "\\u0007".repeat(AGENT_TYPE_CHARS);
+        fx.write(
+            "-w-proj/s1/subagents/agent-a1.meta.json",
+            &format!(r#"{{"agentType":" {bells}Re\tview\u001b[0mer\n "}}"#),
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let types = store.agent_types_between(since, since + 86_400).unwrap();
+        assert_eq!(types.get("a1").map(String::as_str), Some("Review[0mer"));
+    }
+
+    #[test]
+    fn an_unreadable_meta_file_is_reported_without_failing_the_transcript() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        fx.write("-w-proj/s1/subagents/agent-a1.jsonl", &format!("{line}\n"));
+        std::fs::create_dir_all(fx.projects.join("-w-proj/s1/subagents/agent-a1.meta.json"))
+            .unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let report = fx.run(&mut store);
+        assert_eq!(report.requests_inserted, 1);
+        assert!(report.failures.is_empty());
+        assert!(
+            report
+                .agent_error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("recording the type of subagent a1: ")),
+            "{:?}",
+            report.agent_error
+        );
+        assert!(!store.knows_agent("a1").unwrap());
+    }
+
+    #[test]
+    fn agent_types_survive_a_reindex() {
+        let fx = Fixture::new();
+        let line = assistant(
+            "s1",
+            "req_1",
+            "2026-10-01T10:00:00Z",
+            "claude-opus-5-5",
+            OPUS_USAGE,
+        );
+        fx.write("-w-proj/s1/subagents/agent-a1.jsonl", &format!("{line}\n"));
+        let meta = fx.write(
+            "-w-proj/s1/subagents/agent-a1.meta.json",
+            r#"{"agentType":"Explore"}"#,
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        fx.run(&mut store);
+        std::fs::remove_file(meta).unwrap();
+        reindex(&mut store);
+        assert!(store.knows_agent("a1").unwrap());
     }
 
     #[test]

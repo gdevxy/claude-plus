@@ -384,6 +384,14 @@ impl Worker {
             Err(error) => Some(format!("ingest failed: {error}")),
         };
         self.record(problem, full);
+        if let Ok(done) = &outcome
+            && let Some(error) = &done.report.agent_error
+        {
+            self.log.warn_once(
+                "agent type",
+                format!("cannot record a subagent type: {error}"),
+            );
+        }
         {
             let mut status = lock(&self.shared.status);
             status.backlog.pop_front();
