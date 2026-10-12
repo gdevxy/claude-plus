@@ -88,7 +88,28 @@ Both options are set in Claude Code's plugin settings for `plus`.
 claude-plus keeps each account apart: logging out of a company account and into a private one never mixes their limits, History or tips.
 It learns which account is signed in from Claude Code's `.claude.json`, which it only reads.
 An API key, a gateway (`ANTHROPIC_BASE_URL`) or Bedrock, Vertex or Foundry each count as their own account.
-Sessions from before the upgrade show as Unknown under All accounts.
+A session is Unknown when claude-plus cannot tell its account, which is the case for most sessions recorded before the accounts upgrade.
+Unknown sessions count under All accounts only, so History, `stats` and the budget of an account leave them out.
+
+Sessions run in the Claude desktop app are attributed to the account the desktop app is signed in to, even when the CLI is signed in to another one.
+claude-plus reads the session list the desktop app keeps in `~/Library/Application Support/Claude/claude-code-sessions` (`~/.config/Claude` on Linux) on every import and every minute in the daemon, and only reads it.
+An account seen only there is called `Desktop account <first 8 characters of its id>` until the CLI signs in to it or you rename it.
+`claude-plus doctor` shows how many desktop session files it read and how many it skipped, and says so when part of the folder cannot be read.
+`claude-plus import` names skipped files only when it imports locally; when the daemon runs, they are in `daemon.log`.
+
+You attribute the remaining Unknown sessions yourself, by project folder and days:
+
+```bash
+claude-plus accounts assign "Me · Max" --project '~/private/*' --dry-run
+claude-plus accounts assign "Me · Max" --project '~/private/*'
+claude-plus accounts assign "Acme · Enterprise" --since 2026-06-01 --until 2026-09-30
+```
+
+`--project` matches the session's working directory, where `*` matches anything, `/` included; quote it so the shell leaves it alone.
+`--since` and `--until` are days in local time, both included.
+`assign` only touches Unknown sessions and never overrides an attribution claude-plus made itself.
+`--dry-run` prints what would change, and `claude-plus accounts unassign` with the same options makes assigned sessions Unknown again.
+Moving an attribution also moves the rate-limit samples of that session to the new account.
 The 5h calibration (`Learning how your plan counts tokens… x of 20 readings`) is kept per account, so it starts over once after the upgrade.
 
 `claude-plus budget set 700` sets a monthly budget for the current account, reset on the 1st at 00:00 UTC.
@@ -141,6 +162,8 @@ Run `claude-plus uninstall` before you remove the binary with `brew uninstall cl
 | `claude-plus stats [--days N] [--account <account>]` | Print daily cost per model. |
 | `claude-plus export --format json\|csv [--account <account>]` | Print stored usage per day, project, account and model. |
 | `claude-plus accounts [rename <account> <label>]` | List the accounts claude-plus knows with this month's spend, or rename one. |
+| `claude-plus accounts assign <account> [--project <glob>] [--since <day>] [--until <day>] [--dry-run]` | Attribute Unknown sessions to an account. |
+| `claude-plus accounts unassign [--project <glob>] [--since <day>] [--until <day>] [--dry-run]` | Make assigned sessions Unknown again. |
 | `claude-plus budget set <usd> \| show \| clear [--account <account>]` | Set, show or clear the monthly budget of an account. |
 | `claude-plus doctor` | Check the binary, daemon, mod, Claude Code version and transcript retention. |
 | `claude-plus import` | Read new transcripts into the store, with progress. |

@@ -33,7 +33,7 @@ This change makes the account a first-class dimension, adds a per-account monthl
 
 - Fetching real billed amounts from any API.
 - Per-product breakdown (Chat, Cowork), since that data never reaches the machine.
-- Attributing sessions recorded before the upgrade to an account; they stay "Unknown".
+- Attributing sessions recorded before the upgrade automatically from the timeline; they stay "Unknown" unless the desktop app recorded their account or the user assigns them, see `2026-10-12-session-attribution-backfill-design.md`.
 - Budget periods other than the calendar month.
 
 ## 2. Terms
@@ -80,7 +80,15 @@ The daemon resolves a session's account in this order:
 A session without a `session.start` event (a `claude -p` run, a session while the daemon was down) uses step 4 only.
 A session with no matching period stays unattributed and appears as "Unknown".
 Attribution is stored in its own table, `session_accounts`, because `sessions` is a derived table that `reindex` clears.
-A `session.start` attribution replaces a timeline one, and neither is recomputed later.
+Two more sources attribute a session, from `2026-10-12-session-attribution-backfill-design.md`:
+
+- `desktop`: the Claude desktop app's own record of the account it ran the session under.
+- `assign`: the user's `claude-plus accounts assign`.
+
+A `desktop` attribution replaces any attribution to an `oauth` account and never a `cloud`, `gateway` or `api` one.
+A `session.start` attribution replaces a `timeline` or `assign` one, and never a `desktop` one.
+`timeline` and `assign` only attribute a session that has none.
+Nothing else is recomputed later.
 
 ### Labels
 
