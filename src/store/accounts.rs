@@ -53,6 +53,8 @@ pub struct AccountInfo {
 pub enum AttributionSource {
     Start,
     Timeline,
+    Desktop,
+    Assign,
 }
 
 impl AttributionSource {
@@ -60,6 +62,8 @@ impl AttributionSource {
         match self {
             AttributionSource::Start => "start",
             AttributionSource::Timeline => "timeline",
+            AttributionSource::Desktop => "desktop",
+            AttributionSource::Assign => "assign",
         }
     }
 }
@@ -95,6 +99,25 @@ impl Writer<'_> {
         Ok(())
     }
 
+    pub fn insert_account_if_missing(&mut self, row: &AccountRow, now_ms: i64) -> Result<bool> {
+        let inserted = self
+            .tx
+            .prepare_cached(
+                "INSERT INTO accounts (id, kind, label, organization_type, billing_type, first_seen_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (id) DO NOTHING",
+            )?
+            .execute(params![
+                row.id,
+                row.kind.as_str(),
+                row.label,
+                row.organization_type,
+                row.billing_type,
+                now_ms
+            ])?;
+        Ok(inserted > 0)
+    }
+
     pub fn open_period(&mut self, account_id: &str, from_ms: i64) -> Result<()> {
         self.tx
             .prepare_cached("INSERT INTO account_periods (account_id, from_ms) VALUES (?1, ?2)")?
@@ -121,7 +144,11 @@ impl Writer<'_> {
             .prepare_cached(
                 "INSERT INTO session_accounts (session_id, account_id, source) VALUES (?1, ?2, ?3)
                  ON CONFLICT (session_id) DO UPDATE SET account_id = excluded.account_id, source = excluded.source
-                 WHERE session_accounts.source = 'timeline' AND excluded.source = 'start'",
+                 WHERE (session_accounts.account_id <> excluded.account_id OR session_accounts.source <> excluded.source)
+                   AND ((excluded.source = 'start' AND session_accounts.source IN ('timeline', 'assign'))
+                     OR (excluded.source = 'desktop' AND EXISTS (
+                           SELECT 1 FROM accounts
+                           WHERE accounts.id = session_accounts.account_id AND accounts.kind = 'oauth')))",
             )?
             .execute(params![session_id, account_id, source.as_str()])?;
         Ok(changed > 0)
@@ -314,7 +341,10 @@ impl Store {
     pub fn account_sessions_count(&self, account_id: &str) -> Result<u64> {
         Ok(self
             .conn
-            .prepare_cached("SELECT COUNT(*) FROM session_accounts WHERE account_id = ?1")?
+            .prepare_cached(
+                "SELECT COUNT(*) FROM session_accounts a JOIN sessions s ON s.id = a.session_id
+                 WHERE a.account_id = ?1",
+            )?
             .query_row([account_id], |r| r.get::<_, i64>(0))? as u64)
     }
 }
@@ -573,5 +603,233 @@ mod tests {
             Some("oauth:a")
         );
         assert!(store.budget("oauth:a").unwrap().is_some());
+    }
+
+    fn typed(id: &str, kind: AccountKind) -> AccountRow {
+        AccountRow {
+            id: id.into(),
+            kind,
+            label: id.into(),
+            organization_type: None,
+            billing_type: None,
+        }
+    }
+
+    fn row_of(store: &Store, session: &str) -> Option<(String, String)> {
+        store
+            .conn
+            .query_row(
+                "SELECT account_id, source FROM session_accounts WHERE session_id = ?1",
+                [session],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn desktop_row() -> Option<(String, String)> {
+        Some(("oauth:desk".into(), "desktop".into()))
+    }
+
+    #[test]
+    fn a_desktop_attribution_replaces_no_row_or_any_row_on_an_oauth_account() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("cli", "CLI"), 0).unwrap();
+        w.upsert_account(&oauth("desk", "Desk"), 0).unwrap();
+        w.upsert_account(&oauth("other", "Other"), 0).unwrap();
+        let earlier = [
+            ("start", AttributionSource::Start),
+            ("timeline", AttributionSource::Timeline),
+            ("assign", AttributionSource::Assign),
+            ("desktop", AttributionSource::Desktop),
+        ];
+        for (session, source) in earlier {
+            let account = if session == "desktop" {
+                "oauth:other"
+            } else {
+                "oauth:cli"
+            };
+            assert!(w.attribute(session, account, source).unwrap(), "{session}");
+            assert!(
+                w.attribute(session, "oauth:desk", AttributionSource::Desktop)
+                    .unwrap(),
+                "{session}"
+            );
+        }
+        assert!(
+            w.attribute("fresh", "oauth:desk", AttributionSource::Desktop)
+                .unwrap()
+        );
+        w.commit().unwrap();
+        for session in ["start", "timeline", "assign", "desktop", "fresh"] {
+            assert_eq!(row_of(&store, session), desktop_row(), "{session}");
+        }
+    }
+
+    #[test]
+    fn a_desktop_attribution_keeps_a_cloud_gateway_or_api_row() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("desk", "Desk"), 0).unwrap();
+        for (id, kind) in [
+            ("cloud:bedrock", AccountKind::Cloud),
+            ("gateway:https://gw:443", AccountKind::Gateway),
+            ("api", AccountKind::Api),
+        ] {
+            w.upsert_account(&typed(id, kind), 0).unwrap();
+            w.attribute(id, id, AttributionSource::Start).unwrap();
+            assert!(
+                !w.attribute(id, "oauth:desk", AttributionSource::Desktop)
+                    .unwrap(),
+                "{id}"
+            );
+        }
+        w.commit().unwrap();
+        for id in ["cloud:bedrock", "gateway:https://gw:443", "api"] {
+            assert_eq!(row_of(&store, id), Some((id.into(), "start".into())));
+        }
+    }
+
+    #[test]
+    fn a_start_attribution_replaces_timeline_and_assign_but_not_desktop_or_start() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("cli", "CLI"), 0).unwrap();
+        w.upsert_account(&oauth("desk", "Desk"), 0).unwrap();
+        w.attribute("t", "oauth:desk", AttributionSource::Timeline)
+            .unwrap();
+        w.attribute("a", "oauth:desk", AttributionSource::Assign)
+            .unwrap();
+        w.attribute("d", "oauth:desk", AttributionSource::Desktop)
+            .unwrap();
+        w.attribute("s", "oauth:desk", AttributionSource::Start)
+            .unwrap();
+        assert!(
+            w.attribute("t", "oauth:cli", AttributionSource::Start)
+                .unwrap()
+        );
+        assert!(
+            w.attribute("a", "oauth:cli", AttributionSource::Start)
+                .unwrap()
+        );
+        assert!(
+            !w.attribute("d", "oauth:cli", AttributionSource::Start)
+                .unwrap()
+        );
+        assert!(
+            !w.attribute("s", "oauth:cli", AttributionSource::Start)
+                .unwrap()
+        );
+        assert!(
+            w.attribute("new", "oauth:cli", AttributionSource::Start)
+                .unwrap()
+        );
+        w.commit().unwrap();
+        let cli_start = Some(("oauth:cli".to_string(), "start".to_string()));
+        assert_eq!(row_of(&store, "t"), cli_start);
+        assert_eq!(row_of(&store, "a"), cli_start);
+        assert_eq!(row_of(&store, "new"), cli_start);
+        assert_eq!(row_of(&store, "d"), desktop_row());
+        assert_eq!(
+            row_of(&store, "s"),
+            Some(("oauth:desk".into(), "start".into()))
+        );
+    }
+
+    #[test]
+    fn timeline_and_assign_attributions_only_fill_an_empty_row() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("cli", "CLI"), 0).unwrap();
+        w.upsert_account(&oauth("desk", "Desk"), 0).unwrap();
+        for source in [AttributionSource::Timeline, AttributionSource::Assign] {
+            for earlier in [
+                AttributionSource::Start,
+                AttributionSource::Timeline,
+                AttributionSource::Desktop,
+                AttributionSource::Assign,
+            ] {
+                let session = format!("{source:?}-{earlier:?}");
+                w.attribute(&session, "oauth:desk", earlier).unwrap();
+                assert!(
+                    !w.attribute(&session, "oauth:cli", source).unwrap(),
+                    "{session}"
+                );
+            }
+            let empty = format!("{source:?}-empty");
+            assert!(w.attribute(&empty, "oauth:cli", source).unwrap());
+        }
+        w.commit().unwrap();
+        assert_eq!(
+            row_of(&store, "Assign-empty"),
+            Some(("oauth:cli".into(), "assign".into()))
+        );
+        assert_eq!(row_of(&store, "Timeline-Desktop"), desktop_row());
+    }
+
+    #[test]
+    fn attributing_the_same_account_and_source_again_changes_nothing() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("desk", "Desk"), 0).unwrap();
+        assert!(
+            w.attribute("s1", "oauth:desk", AttributionSource::Desktop)
+                .unwrap()
+        );
+        w.commit().unwrap();
+        let before = store.total_changes();
+        let mut w = store.writer().unwrap();
+        assert!(
+            !w.attribute("s1", "oauth:desk", AttributionSource::Desktop)
+                .unwrap()
+        );
+        w.commit().unwrap();
+        assert_eq!(store.total_changes(), before);
+    }
+
+    #[test]
+    fn inserting_a_missing_account_never_touches_a_known_one() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("a", "Acme · Enterprise"), 1)
+            .unwrap();
+        assert!(
+            !w.insert_account_if_missing(&oauth("a", "Desktop account a"), 2)
+                .unwrap()
+        );
+        assert!(
+            w.insert_account_if_missing(&oauth("b", "Desktop account b"), 3)
+                .unwrap()
+        );
+        w.commit().unwrap();
+        let a = store.account("oauth:a").unwrap().unwrap();
+        assert_eq!(
+            (a.label.as_str(), a.first_seen_ms),
+            ("Acme · Enterprise", 1)
+        );
+        let b = store.account("oauth:b").unwrap().unwrap();
+        assert_eq!(
+            (b.label.as_str(), b.first_seen_ms),
+            ("Desktop account b", 3)
+        );
+    }
+
+    #[test]
+    fn an_account_counts_only_sessions_that_were_imported() {
+        let mut store = Store::open_in_memory().unwrap();
+        session(&mut store, "s1", 10);
+        let mut w = store.writer().unwrap();
+        w.upsert_account(&oauth("a", "A"), 0).unwrap();
+        w.attribute("s1", "oauth:a", AttributionSource::Desktop)
+            .unwrap();
+        w.attribute("not-imported", "oauth:a", AttributionSource::Desktop)
+            .unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.account_sessions_count("oauth:a").unwrap(), 1);
+        assert_eq!(
+            store.session_account("not-imported").unwrap().as_deref(),
+            Some("oauth:a")
+        );
     }
 }
