@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use chrono::Local;
 use comfy_table::{Cell, CellAlignment, Table, presets::UTF8_FULL_CONDENSED};
 
@@ -52,24 +52,50 @@ pub fn resolve(store: &Store, given: Option<&str>) -> Result<String> {
         return Ok(exact.id.clone());
     }
     let wanted = given.to_lowercase();
-    let matches: Vec<&AccountInfo> = accounts
+    let whole: Vec<&AccountInfo> = accounts
         .iter()
         .filter(|a| a.label.to_lowercase() == wanted)
         .collect();
-    match matches.as_slice() {
+    match whole.as_slice() {
+        [one] => return Ok(one.id.clone()),
+        [] => {}
+        many => bail!("\"{given}\" matches {}; pass the id", listed(many)),
+    }
+    if given == "api" || given.starts_with("gateway:") || given.starts_with("cloud:") {
+        return Ok(given.to_string());
+    }
+    let parts: Vec<&AccountInfo> = accounts
+        .iter()
+        .filter(|a| a.label.to_lowercase().contains(&wanted))
+        .collect();
+    match parts.as_slice() {
         [one] => Ok(one.id.clone()),
-        [] if given == "api" || given.starts_with("gateway:") || given.starts_with("cloud:") => {
-            Ok(given.to_string())
-        }
-        [] => bail!("no account called \"{given}\"; see claude-plus accounts"),
+        [] => Err(unknown(given, &accounts)),
         many => bail!(
-            "\"{given}\" matches {}; pass the id",
-            many.iter()
-                .map(|a| format!("{} ({})", a.id, a.label))
-                .collect::<Vec<_>>()
-                .join(", ")
+            "\"{given}\" matches {}; pass more of the label or the id",
+            listed(many)
         ),
     }
+}
+
+fn unknown(given: &str, accounts: &[AccountInfo]) -> anyhow::Error {
+    if accounts.is_empty() {
+        return anyhow!(
+            "no account called \"{given}\"; no account is known yet, see claude-plus accounts"
+        );
+    }
+    anyhow!(
+        "no account called \"{given}\"; the accounts are {}",
+        listed(&accounts.iter().collect::<Vec<_>>())
+    )
+}
+
+fn listed(accounts: &[&AccountInfo]) -> String {
+    accounts
+        .iter()
+        .map(|a| format!("{} ({})", a.label, a.id))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn scope(store: &Store, given: Option<&str>) -> Result<(Scope, String)> {
@@ -278,29 +304,10 @@ fn write_matching(
 }
 
 fn assignable(store: &Store, given: &str) -> Result<AccountInfo> {
-    let accounts = store.accounts()?;
-    let wanted = given.to_lowercase();
-    let known = accounts
-        .iter()
-        .any(|a| a.id == given || a.label.to_lowercase() == wanted);
-    if !known && accounts.is_empty() {
-        bail!("no account called \"{given}\"; no account is known yet, see claude-plus accounts");
-    }
-    if !known {
-        bail!(
-            "no account called \"{given}\"; the accounts are {}",
-            accounts
-                .iter()
-                .map(|a| format!("{} ({})", a.label, a.id))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
     let id = resolve(store, Some(given))?;
-    accounts
-        .into_iter()
-        .find(|a| a.id == id)
-        .with_context(|| format!("no account called \"{given}\"; see claude-plus accounts"))
+    let accounts = store.accounts()?;
+    let found = accounts.iter().find(|a| a.id == id).cloned();
+    found.ok_or_else(|| unknown(given, &accounts))
 }
 
 fn selection_line(chosen: &Selection) -> String {

@@ -1053,8 +1053,73 @@ fn an_ambiguous_label_lists_the_matches() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "\"WORK\" matches oauth:a (Work), oauth:b (work)",
+            "\"WORK\" matches Work (oauth:a), work (oauth:b); pass the id",
         ));
+}
+
+fn work_and_private(env: &Env) {
+    env.seed_accounts(&[
+        ("oauth:me", "Me · Max"),
+        ("oauth:work", "Acme · Enterprise"),
+    ]);
+}
+
+#[test]
+fn a_unique_part_of_a_label_is_enough() {
+    let env = env();
+    work_and_private(&env);
+    cmd(&env, &["budget", "set", "10", "--account", "max"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Budget for Me · Max set"));
+    cmd(&env, &["budget", "set", "700", "--account", "ENTER"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Budget for Acme · Enterprise set"));
+}
+
+#[test]
+fn a_part_of_several_labels_lists_them() {
+    let env = env();
+    work_and_private(&env);
+    cmd(&env, &["budget", "set", "10", "--account", "e"])
+        .assert()
+        .failure()
+        .stderr(
+            "claude-plus: \"e\" matches Me · Max (oauth:me), Acme · Enterprise (oauth:work); pass more of the label or the id\n",
+        );
+}
+
+#[test]
+fn a_whole_label_wins_over_a_longer_one_containing_it() {
+    let env = env();
+    env.seed_accounts(&[("oauth:a", "Work"), ("oauth:b", "Work Two")]);
+    cmd(&env, &["budget", "set", "10", "--account", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Budget for Work set"));
+}
+
+#[test]
+fn an_unknown_account_lists_the_accounts() {
+    let env = env();
+    work_and_private(&env);
+    cmd(&env, &["stats", "--account", "nobody"])
+        .assert()
+        .failure()
+        .stderr(
+            "claude-plus: no account called \"nobody\"; the accounts are Me · Max (oauth:me), Acme · Enterprise (oauth:work)\n",
+        );
+}
+
+#[test]
+fn a_typed_id_is_never_taken_for_part_of_a_label() {
+    let env = env();
+    env.seed_accounts(&[("oauth:r", "Rapid · Team")]);
+    cmd(&env, &["budget", "set", "50", "--account", "api"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Budget for API key set"));
 }
 
 #[test]
@@ -1524,7 +1589,9 @@ fn accounts_help_lists_assign_and_unassign() {
         assert!(assign.contains(flag), "missing {flag} in\n{assign}");
     }
     assert!(
-        assign.contains("<ACCOUNT>  Account id or label, see claude-plus accounts"),
+        assign.contains(
+            "<ACCOUNT>  Account id, label or a unique part of it, see claude-plus accounts"
+        ),
         "{assign}"
     );
 }

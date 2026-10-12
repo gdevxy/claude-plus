@@ -100,10 +100,13 @@ An account seen only there is called `Desktop account <first 8 characters of its
 You attribute the remaining Unknown sessions yourself, by project folder and days:
 
 ```bash
-claude-plus accounts assign "Me · Max" --project '~/private/*' --dry-run
-claude-plus accounts assign "Me · Max" --project '~/private/*'
-claude-plus accounts assign "Acme · Enterprise" --since 2026-06-01 --until 2026-09-30
+claude-plus accounts assign max --project '~/private/*' --dry-run
+claude-plus accounts assign max --project '~/private/*'
+claude-plus accounts assign enterprise --since 2026-06-01 --until 2026-09-30
 ```
+
+An account is named by its id, its label as `claude-plus accounts` lists it, or any part of the label that only one account has, in any case.
+A name that matches no account, or several, is refused with the accounts it could mean.
 
 `--project` matches the session's working directory, where `*` matches anything, `/` included; quote it so the shell leaves it alone.
 `--since` and `--until` are days in local time, both included.

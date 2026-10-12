@@ -67,7 +67,7 @@ enum Command {
         days: u32,
         #[arg(
             long,
-            help = "Account id or label, or all [default: the current account]"
+            help = "Account id, label or a unique part of it, or all [default: the current account]"
         )]
         account: Option<String>,
     },
@@ -83,7 +83,7 @@ enum Command {
         days: Option<u32>,
         #[arg(
             long,
-            help = "Account id or label, or all [default: the current account]"
+            help = "Account id, label or a unique part of it, or all [default: the current account]"
         )]
         account: Option<String>,
     },
@@ -131,14 +131,14 @@ enum Command {
 enum AccountsAction {
     #[command(about = "Give an account your own label")]
     Rename {
-        #[arg(help = "Account id or label, see claude-plus accounts")]
+        #[arg(help = "Account id, label or a unique part of it, see claude-plus accounts")]
         account: String,
         #[arg(help = "The new label")]
         label: String,
     },
     #[command(about = "Attribute Unknown sessions to an account by project and days")]
     Assign {
-        #[arg(help = "Account id or label, see claude-plus accounts")]
+        #[arg(help = "Account id, label or a unique part of it, see claude-plus accounts")]
         account: String,
         #[command(flatten)]
         selection: SelectionArgs,
@@ -176,17 +176,26 @@ enum BudgetAction {
     Set {
         #[arg(allow_hyphen_values = true)]
         usd: String,
-        #[arg(long, help = "Account id or label [default: the current account]")]
+        #[arg(
+            long,
+            help = "Account id, label or a unique part of it [default: the current account]"
+        )]
         account: Option<String>,
     },
     #[command(about = "Show the budget, this month's spend and the pace")]
     Show {
-        #[arg(long, help = "Account id or label [default: the current account]")]
+        #[arg(
+            long,
+            help = "Account id, label or a unique part of it [default: the current account]"
+        )]
         account: Option<String>,
     },
     #[command(about = "Remove the budget")]
     Clear {
-        #[arg(long, help = "Account id or label [default: the current account]")]
+        #[arg(
+            long,
+            help = "Account id, label or a unique part of it [default: the current account]"
+        )]
         account: Option<String>,
     },
 }

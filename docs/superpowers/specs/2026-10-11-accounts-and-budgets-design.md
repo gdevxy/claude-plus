@@ -192,7 +192,8 @@ The control shows whenever that cycle has two entries or more, and the report's 
 - `stats` and `export` take `--account <label|id|all>`, defaulting to the current account; `export` gains an `account` column.
 - `doctor` reports the current account, whether `.claude.json` was readable, and whether a user price file is loaded.
 
-`<account>` matches an id exactly or a label case-insensitively; an ambiguous label is an error listing the matches.
+`<account>` matches an id exactly, then a whole label case-insensitively, then a part of a label that only one account has, case-insensitively.
+A name matching several labels, or none, is an error listing the accounts it could mean.
 
 ## 9. Pricing for gateways and cloud providers
 
